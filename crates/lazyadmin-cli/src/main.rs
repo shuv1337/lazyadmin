@@ -216,7 +216,15 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             if let Some(selector) = cli.selector {
                 run_point_query(&selector, cli.json, cli.brief, cli.config.as_deref()).await
             } else {
-                lazyadmin_tui::run_default().await.map_err(AppError::Other)
+                run_tui_command(
+                    TuiArgs {
+                        headless: false,
+                        theme: None,
+                    },
+                    cli.json,
+                    cli.config.as_deref(),
+                )
+                .await
             }
         }
         Some(Command::Export) => {
@@ -230,6 +238,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             command: ConfigCommand::Check,
         }) => {
             let cfg = Config::load(cli.config.as_deref()).map_err(|e| AppError::Other(eyre!(e)))?;
+            validate_tui_theme_config(&cfg).map_err(|e| AppError::Other(eyre!(e)))?;
             if cli.json {
                 let keybindings =
                     lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)
@@ -302,7 +311,99 @@ async fn run_tui_command(
         }
         return Ok(());
     }
-    lazyadmin_tui::run_tui(snap).await.map_err(AppError::Other)
+    let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(4);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    spawn_tui_refresh_task(
+        cfg.clone(),
+        config_path.map(std::path::Path::to_path_buf),
+        snapshot_tx,
+        event_tx,
+    );
+    let runtime = lazyadmin_tui::TuiRuntime {
+        initial_snapshot: snap,
+        config: lazyadmin_tui::AppConfig {
+            refresh_interval: Duration::from_millis(cfg.ui.refresh.tick_ms),
+            show_system: false,
+            event_debounce: Duration::from_millis(cfg.ui.refresh.event_debounce_ms),
+            max_redraw_hz: cfg.ui.refresh.max_redraw_hz,
+        },
+        theme,
+        keybindings,
+        snapshots: Some(snapshot_rx),
+        discovery_events: Some(event_rx),
+    };
+    lazyadmin_tui::run_tui_with_runtime(runtime)
+        .await
+        .map_err(AppError::Other)
+}
+
+fn validate_tui_theme_config(cfg: &Config) -> anyhow::Result<()> {
+    lazyadmin_tui::Theme::load(cfg.ui.theme.name.as_deref(), cfg.ui.theme.path.as_deref())?;
+    Ok(())
+}
+
+fn spawn_tui_refresh_task(
+    cfg: Config,
+    config_path: Option<PathBuf>,
+    snapshot_tx: tokio::sync::mpsc::Sender<Snapshot>,
+    event_tx: tokio::sync::mpsc::Sender<lazyadmin_core::model::DiscoveryEvent>,
+) {
+    tokio::spawn(async move {
+        let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
+        let procfs_stream = if cfg.adapters.events.enabled {
+            procfs.watch().await
+        } else {
+            None
+        };
+        let has_events = procfs_stream.is_some();
+        let (mut events, drops) = EventFanIn::new(
+            procfs_stream.into_iter().collect(),
+            cfg.adapters.events.channel_capacity,
+            Duration::from_millis(cfg.ui.refresh.event_debounce_ms),
+        );
+        let mut interval = tokio::time::interval(Duration::from_millis(cfg.ui.refresh.tick_ms));
+        if !has_events {
+            loop {
+                interval.tick().await;
+                match build_snapshot_with_event_drops(config_path.as_deref(), Some(&drops)).await {
+                    Ok(snapshot) => {
+                        if snapshot_tx.send(snapshot).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => tracing::debug!(error = %err, "tui snapshot refresh failed"),
+                }
+            }
+            return;
+        }
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match build_snapshot_with_event_drops(config_path.as_deref(), Some(&drops)).await {
+                        Ok(snapshot) => {
+                            if snapshot_tx.send(snapshot).await.is_err() { break; }
+                        }
+                        Err(err) => tracing::debug!(error = %err, "tui snapshot refresh failed"),
+                    }
+                }
+                event = events.next() => {
+                    match event {
+                        Some(event) => {
+                            let _ = event_tx.send(event).await;
+                            tokio::time::sleep(Duration::from_millis(cfg.ui.refresh.event_debounce_ms)).await;
+                            match build_snapshot_with_event_drops(config_path.as_deref(), Some(&drops)).await {
+                                Ok(snapshot) => {
+                                    if snapshot_tx.send(snapshot).await.is_err() { break; }
+                                }
+                                Err(err) => tracing::debug!(error = %err, "tui event snapshot refresh failed"),
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn run_events(

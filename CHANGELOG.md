@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- PLAN-12 TUI polish: explicit `lazyadmin tui --headless --json`, real Ratatui rendering paths, Process Tree and Metrics view-models, live refresh coalescing, themes, keybinding validation, docs, and v0.2 acceptance notes.
+- PLAN-12 TUI polish follow-up: interactive `lazyadmin tui` now receives resolved refresh/theme/keybinding runtime settings, uses procfs discovery events as refresh hints with snapshot polling as the authoritative fallback, and applies keybinding overrides to dispatch. Docs/acceptance now mark partial/deferred Process Tree, Metrics, theme lookup, copy/open, and release-readiness scope honestly.
 
 ## 0.1.0
 

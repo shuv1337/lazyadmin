@@ -63,7 +63,7 @@ Run `lazyadmin` with no args to launch the Ratatui TUI, or use `lazyadmin tui --
 - `60–79` columns: single pane with view switching
 - `<60` columns: refuses with CLI hints
 
-Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `m`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, and `q`. Themes and keybindings are configurable; see [`docs/tui.md`](docs/tui.md), [`docs/themes.md`](docs/themes.md), and [`docs/keybindings.md`](docs/keybindings.md).
+Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `m`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, and `q`, and interactive dispatch honors configured overrides. Themes and keybindings are configurable; see [`docs/tui.md`](docs/tui.md), [`docs/themes.md`](docs/themes.md), and [`docs/keybindings.md`](docs/keybindings.md). v0.2 TUI copy/open/palette actions are still limited; prefer CLI commands for external or destructive operations.
 
 ## Agent skill
 
@@ -91,4 +91,4 @@ Agents should check `command -v lazyadmin && lazyadmin doctor --json` once per s
 
 ## Scope
 
-v0.1 is Linux-first. Podman discovery is read-only; Podman actions/log follow are deferred to v0.2.
+v0.1 is Linux-first. v0.2 work is in progress: TUI rendering/configuration is substantially improved, while full adapter-native event streams and some interactive action plumbing remain deferred.

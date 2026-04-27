@@ -15,7 +15,7 @@ use crossterm::{
 };
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::{
-    config::keybindings::ResolvedKeybindings,
+    config::keybindings::{KeybindAction, ResolvedKeybindings},
     model::{DiscoveryEvent, Exposure, ProcessKey, Snapshot},
     snapshot::build_empty_snapshot,
 };
@@ -47,7 +47,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            refresh_interval: Duration::from_secs(2),
+            refresh_interval: Duration::from_millis(500),
             show_system: false,
             event_debounce: Duration::from_millis(100),
             max_redraw_hz: 30,
@@ -58,6 +58,7 @@ impl Default for AppConfig {
 #[derive(Clone, Debug)]
 pub struct App {
     pub vm: ViewModel,
+    pub snapshot: Snapshot,
     pub pane: Pane,
     pub active_view: ViewKind,
     pub query: String,
@@ -74,6 +75,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             vm: ViewModel::default(),
+            snapshot: build_empty_snapshot(),
             pane: Pane::default(),
             active_view: ViewKind::Everything,
             query: String::new(),
@@ -89,6 +91,33 @@ impl Default for App {
                     .collect(),
             },
             status: None,
+        }
+    }
+}
+
+pub struct TuiRuntime {
+    pub initial_snapshot: Snapshot,
+    pub config: AppConfig,
+    pub theme: Theme,
+    pub keybindings: ResolvedKeybindings,
+    pub snapshots: Option<mpsc::Receiver<Snapshot>>,
+    pub discovery_events: Option<mpsc::Receiver<DiscoveryEvent>>,
+}
+
+impl TuiRuntime {
+    pub fn static_snapshot(snapshot: Snapshot) -> Self {
+        Self {
+            initial_snapshot: snapshot,
+            config: AppConfig::default(),
+            theme: Theme::default_dark(),
+            keybindings: ResolvedKeybindings {
+                bindings: ResolvedKeybindings::default_map()
+                    .into_iter()
+                    .map(|(a, b)| (a.as_name().into(), b))
+                    .collect(),
+            },
+            snapshots: None,
+            discovery_events: None,
         }
     }
 }
@@ -629,12 +658,25 @@ pub fn build_view_model(
             provenance_expanded: false,
             diagnostic_markdown: "# lazyadmin diagnostic\nNo selection\n".into(),
         });
+    let mut process_tree = build_process_tree(snapshot, None);
+    if !filter.is_empty() {
+        let m = SkimMatcherV2::default();
+        process_tree.rows.retain(|r| {
+            let text = format!(
+                "{} {} {}",
+                r.label,
+                r.runtime,
+                r.workload.clone().unwrap_or_default()
+            );
+            m.fuzzy_match(&text, filter).is_some()
+        });
+    }
     ViewModel {
         width,
         layout,
         groups: groups(show_system),
         rows,
-        process_tree: build_process_tree(snapshot, None),
+        process_tree,
         metrics: build_metrics(snapshot, None),
         inspector,
         hidden_system_count: hidden,
@@ -758,7 +800,7 @@ pub fn build_metrics(snapshot: &Snapshot, previous: Option<&Snapshot>) -> Metric
             .as_ref()
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
-        event_rate: vec![rate, rate + 1, rate],
+        event_rate: vec![rate],
     }
 }
 fn inspector_for_row(row: &RowVm) -> InspectorVm {
@@ -813,6 +855,88 @@ fn groups(show_system: bool) -> Vec<String> {
 }
 
 pub fn key_to_command(key: KeyEvent) -> Option<Command> {
+    let defaults = ResolvedKeybindings {
+        bindings: ResolvedKeybindings::default_map()
+            .into_iter()
+            .map(|(a, b)| (a.as_name().into(), b))
+            .collect(),
+    };
+    key_to_command_with_bindings(key, &defaults)
+}
+
+pub fn key_to_command_with_bindings(
+    key: KeyEvent,
+    keybindings: &ResolvedKeybindings,
+) -> Option<Command> {
+    let pressed = key_event_to_spec(key)?;
+    for (action, specs) in &keybindings.bindings {
+        if specs
+            .iter()
+            .any(|spec| normalize_key_spec(spec) == normalize_key_spec(&pressed))
+        {
+            return KeybindAction::parse(action).and_then(action_to_command);
+        }
+    }
+    None
+}
+
+fn action_to_command(action: KeybindAction) -> Option<Command> {
+    Some(match action {
+        KeybindAction::Quit => Command::Quit,
+        KeybindAction::Help => Command::Help,
+        KeybindAction::NextPane => Command::NextPane,
+        KeybindAction::PrevPane => Command::PrevPane,
+        KeybindAction::OpenPalette => Command::Palette,
+        KeybindAction::Filter | KeybindAction::ToggleFilter => Command::Filter,
+        KeybindAction::ToggleSystem => Command::ToggleSystem,
+        KeybindAction::Inspect => Command::Inspect,
+        KeybindAction::Logs => Command::Logs,
+        KeybindAction::Ports => Command::Ports,
+        KeybindAction::ProcessTree => Command::Tree,
+        KeybindAction::Metrics => Command::Metrics,
+        KeybindAction::Restart => Command::Restart,
+        KeybindAction::Stop => Command::Stop,
+        KeybindAction::FreePort => Command::Free,
+        KeybindAction::Kill => Command::Kill,
+        KeybindAction::Open => Command::Open,
+        KeybindAction::Edit => Command::Edit,
+        KeybindAction::CopyDiagnostic => Command::CopyDiagnostic,
+        KeybindAction::Run => Command::Run,
+        KeybindAction::Refresh => Command::Refresh,
+    })
+}
+
+fn key_event_to_spec(key: KeyEvent) -> Option<String> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key.code {
+            return Some(format!("ctrl+{}", c.to_ascii_lowercase()));
+        }
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(c.to_string()),
+        KeyCode::Tab => Some("tab".into()),
+        KeyCode::BackTab => Some("shift+tab".into()),
+        KeyCode::Enter => Some("enter".into()),
+        KeyCode::Esc => Some("esc".into()),
+        KeyCode::Up => Some("up".into()),
+        KeyCode::Down => Some("down".into()),
+        KeyCode::Left => Some("left".into()),
+        KeyCode::Right => Some("right".into()),
+        KeyCode::F(5) => Some("f5".into()),
+        _ => None,
+    }
+}
+
+fn normalize_key_spec(spec: &str) -> String {
+    if spec.chars().count() == 1 {
+        spec.to_string()
+    } else {
+        spec.to_ascii_lowercase()
+    }
+}
+
+#[allow(dead_code)]
+fn key_to_command_hardcoded_legacy(key: KeyEvent) -> Option<Command> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('/'), _) => Some(Command::Filter),
         (KeyCode::Char(':'), _) => Some(Command::Palette),
@@ -1244,6 +1368,10 @@ pub fn headless_dump(
 }
 
 pub async fn run_tui(snapshot: Snapshot) -> Result<()> {
+    run_tui_with_runtime(TuiRuntime::static_snapshot(snapshot)).await
+}
+
+pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
     install_panic_guard();
     let (w, _) = terminal::size().unwrap_or((80, 24));
     if w < 60 {
@@ -1255,12 +1383,52 @@ pub async fn run_tui(snapshot: Snapshot) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     info!("tui.start");
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let initial_snapshot = runtime.initial_snapshot;
     let mut app = App {
-        vm: build_view_model(&snapshot, w, false, ""),
+        vm: build_view_model(&initial_snapshot, w, runtime.config.show_system, ""),
+        snapshot: initial_snapshot,
+        show_system: runtime.config.show_system,
+        theme: runtime.theme,
+        keybindings: runtime.keybindings,
         ..Default::default()
     };
+    let mut refresh_state =
+        LiveRefreshState::new(runtime.config.event_debounce, runtime.config.max_redraw_hz);
     let started = Instant::now();
     loop {
+        while let Some(rx) = runtime.discovery_events.as_mut() {
+            match rx.try_recv() {
+                Ok(event) => {
+                    refresh_state.on_event(&event, Instant::now());
+                    app.vm.degraded = refresh_state.degraded.clone();
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    runtime.discovery_events = None;
+                    break;
+                }
+            }
+        }
+        while let Some(rx) = runtime.snapshots.as_mut() {
+            match rx.try_recv() {
+                Ok(snapshot) => {
+                    app.snapshot = snapshot;
+                    rebuild_view_model(&mut app, w);
+                    if let Some(degraded) = &refresh_state.degraded {
+                        app.vm.degraded = Some(degraded.clone());
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    runtime.snapshots = None;
+                    break;
+                }
+            }
+        }
+        if refresh_state.should_refresh(Instant::now()) {
+            rebuild_view_model(&mut app, w);
+            app.vm.degraded = refresh_state.degraded.clone().or(app.vm.degraded.clone());
+        }
         let render_started = Instant::now();
         terminal.draw(|f| render_app(f, &app))?;
         debug!(
@@ -1270,7 +1438,7 @@ pub async fn run_tui(snapshot: Snapshot) -> Result<()> {
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let input_started = Instant::now();
-                handle_key(&mut app, key);
+                handle_key(&mut app, key, w);
                 debug!(
                     elapsed_ms = input_started.elapsed().as_millis(),
                     "tui.input"
@@ -1285,13 +1453,40 @@ pub async fn run_tui(snapshot: Snapshot) -> Result<()> {
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) {
-    if let Some(cmd) = key_to_command(key) {
+fn rebuild_view_model(app: &mut App, width: u16) {
+    app.vm = build_view_model(&app.snapshot, width, app.show_system, &app.query);
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
+    if matches!(app.mode, InputMode::Filter) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => app.mode = InputMode::Normal,
+            KeyCode::Backspace => {
+                app.query.pop();
+                rebuild_view_model(app, width);
+            }
+            KeyCode::Char(c) => {
+                app.query.push(c);
+                rebuild_view_model(app, width);
+            }
+            _ => {}
+        }
+        return;
+    }
+    if matches!(app.mode, InputMode::Help) && matches!(key.code, KeyCode::Esc | KeyCode::Char('?'))
+    {
+        app.mode = InputMode::Normal;
+        return;
+    }
+    if let Some(cmd) = key_to_command_with_bindings(key, &app.keybindings) {
         match cmd {
             Command::Quit => app.should_quit = true,
             Command::ToggleSystem => {
                 app.show_system = !app.show_system;
+                rebuild_view_model(app, width);
             }
+            Command::Filter => app.mode = InputMode::Filter,
+            Command::Refresh => rebuild_view_model(app, width),
             Command::Tree => app.active_view = ViewKind::ProcessTree,
             Command::Metrics => app.active_view = ViewKind::Metrics,
             Command::Logs => app.active_view = ViewKind::Logs,
@@ -1318,6 +1513,41 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         app.active_view,
         Some(&app.keybindings),
     );
+    if matches!(app.mode, InputMode::Help) {
+        let area = centered_rect(70, 70, f.area());
+        let help = Paragraph::new(help_lines(&app.keybindings).join("\n"))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Help — active keybindings")
+                    .borders(Borders::ALL),
+            )
+            .style(
+                Style::default()
+                    .fg(app.theme.base_fg.color())
+                    .bg(app.theme.base_bg.color()),
+            );
+        f.render_widget(help, area);
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 #[allow(dead_code)]
@@ -1439,6 +1669,7 @@ mod tests {
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
         );
         assert_eq!(app.confirmation.as_ref().unwrap().required, "kill");
     }
@@ -1613,10 +1844,63 @@ mod tests {
             .overrides
             .insert("quit".into(), "Q".into());
         let keybindings = ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(
+            key_to_command_with_bindings(
+                KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE),
+                &keybindings,
+            ),
+            Some(Command::Quit)
+        );
+        assert_eq!(
+            key_to_command_with_bindings(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &keybindings,
+            ),
+            None
+        );
         assert!(
             help_lines(&keybindings)
                 .iter()
                 .any(|l| l.contains("quit: Q"))
+        );
+    }
+
+    #[test]
+    fn keybindings_override_dispatch_for_help_search_toggle() {
+        let mut cfg = lazyadmin_core::config::Config::default();
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("help".into(), "h".into());
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("filter".into(), "F".into());
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("toggle_system".into(), "T".into());
+        let keybindings = ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(
+            key_to_command_with_bindings(
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                &keybindings
+            ),
+            Some(Command::Help)
+        );
+        assert_eq!(
+            key_to_command_with_bindings(
+                KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE),
+                &keybindings
+            ),
+            Some(Command::Filter)
+        );
+        assert_eq!(
+            key_to_command_with_bindings(
+                KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE),
+                &keybindings
+            ),
+            Some(Command::ToggleSystem)
         );
     }
 

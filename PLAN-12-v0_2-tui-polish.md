@@ -92,15 +92,15 @@ cargo test -p lazyadmin-tui live_refresh
   - [x] Option A: `tui-tree-widget` crate. Document license/maintenance and pin a version.
   - [x] Option B: render manually using `Table` + `└──` ASCII guides; portable, no extra dep.
   - [x] Decision recorded in `docs/process-tree-decision.md`.
-- [x] Keymap entry: `t` opens the Process Tree view scoped to the currently selected entity (or whole graph if no selection). `t` again on a node toggles expand/collapse.
-- [x] Inspector integration: when a process node is selected, the existing inspector pane shows its details (ports owned, project, tracked metadata).
+- [ ] Keymap entry: `t` opens the Process Tree view scoped to the currently selected entity (or whole graph if no selection). `t` again on a node toggles expand/collapse.
+- [ ] Inspector integration: when a process node is selected, the existing inspector pane shows its details (ports owned, project, tracked metadata).
 - [x] Search (`/`) operates on visible tree rows.
 - [x] Stable selection across refreshes uses `ProcessKey`.
 
 Tests:
 
 - [x] tree built from fixture snapshot has the expected shape and ordering.
-- [x] expanding/collapsing nodes does not lose selection.
+- [ ] expanding/collapsing nodes does not lose selection.
 - [x] PID reuse during refresh is handled: a node with the same PID but different start time becomes a new node.
 
 Validation:
@@ -114,9 +114,9 @@ cargo test -p lazyadmin-tui process_tree
 - [x] Build a new `ViewModel::Metrics` populated from existing snapshot data:
   - [x] Counts: listeners (by exposure), workloads (by runtime), warnings (by severity), tracked runs.
   - [x] Rates: derive simple deltas from previous snapshot (no new `/proc` polling); store last N snapshots in core if necessary.
-  - [x] Adapter health: latency / event throughput / drops per adapter.
+  - [ ] Adapter health: latency / event throughput / drops per adapter.
 - [x] Render with `ratatui::widgets::{Sparkline, Gauge, Chart}`:
-  - [x] Sparkline for per-adapter event rate.
+  - [ ] Sparkline for per-adapter event rate.
   - [x] Gauge for `events_dropped` saturation against capacity.
   - [x] Bar chart for warnings by severity.
 - [x] Keymap entry: `m` opens Metrics view.
@@ -127,7 +127,7 @@ Tests:
 
 - [x] metrics view-model derives expected counts from fixture.
 - [x] rate calculation across two fixtures produces non-negative numbers.
-- [x] adapter event sparkline reads from telemetry counters via a thin in-memory ring buffer.
+- [ ] adapter event sparkline reads from telemetry counters via a thin in-memory ring buffer.
 
 Validation:
 
@@ -218,7 +218,7 @@ cargo run -p lazyadmin-cli -- tui --headless --theme high-contrast --json | jq '
   - [ ] reload command re-reads config and applies new theme/keybindings without restarting.
 - [x] Copy diagnostic (`y`):
   - [ ] uses `arboard`; falls back to `wl-copy`/`xclip` shellout; on failure shows a footer message and writes the same diagnostic to `$XDG_STATE_HOME/lazyadmin/copies/<timestamp>.md`.
-- [x] Open URL (`o`):
+- [ ] Open URL (`o`):
   - [x] only enabled for localhost TCP listeners on common HTTP ports unless user opts in via config (`actions.open_non_loopback = false` default).
   - [ ] uses `open` crate / `xdg-open` shellout with explicit URL argument escaping.
 
@@ -226,7 +226,7 @@ Tests:
 
 - [x] help overlay renders all bindings.
 - [x] palette command `:reload` triggers config re-read (mocked).
-- [x] copy-diagnostic falls back to file on simulated clipboard failure.
+- [ ] copy-diagnostic falls back to file on simulated clipboard failure.
 - [x] open refuses non-loopback by default.
 
 Validation:
@@ -253,10 +253,10 @@ cargo test -p lazyadmin-tui help_palette_open_copy
   - [x] dual-stack proof present and honest,
   - [x] `lazyadmin events --json` streams,
   - [x] all v0.1 view-models render,
-  - [x] Process Tree and Metrics views work,
+- [ ] Process Tree and Metrics views work,
   - [x] keybinding overrides accepted,
   - [x] themes load and downgrade safely,
-  - [x] copy-diagnostic works or falls back,
+- [ ] copy-diagnostic works or falls back,
   - [x] no JSON regressions.
 - [x] AGENTS.md update: state, validation commands, new config knobs.
 
@@ -278,13 +278,13 @@ cargo run -p lazyadmin-cli -- tui --headless --json
 ## Done criteria
 
 - [x] All v0.1 view-models render with the new theme system at the four supported widths.
-- [x] Process Tree and Metrics views ship and have golden tests.
+- [ ] Process Tree and Metrics views ship and have golden tests.
 - [x] Live refresh consumes events from PLAN-11 with bounded redraws and visible degraded indicators.
 - [x] Keybinding overrides validated at config load with helpful errors.
 - [x] Themes load, validate, and downgrade for limited-color terminals.
 - [ ] Help overlay, palette, copy-diagnostic, and open all work with sane fallbacks.
 - [x] Docs cover TUI, themes, keybindings, decision records.
-- [x] `cargo fmt`/`clippy`/`test`/`doc` all pass.
+- [ ] `cargo fmt`/`clippy`/`test`/`doc` all pass.
 - [x] `docs/acceptance-v0_2.md` records v0.2 acceptance with PASS/PARTIAL/DEFERRED entries.
 
 ## Handoff notes for v0.3
@@ -296,6 +296,8 @@ cargo run -p lazyadmin-cli -- tui --headless --json
 ## Implementation notes
 
 - Implemented PLAN-12 as a v0.2 TUI polish pass with explicit `lazyadmin tui --headless --json`, snapshot-derived rendering, Process Tree, Metrics, themes, keybinding validation, live refresh coalescing, docs, and acceptance notes.
-- Live DiscoveryEvent handling intentionally treats events as redraw hints; snapshot polling remains authoritative. Container/systemd native event streams remain deferred from PLAN-11.
-- Copy diagnostic has a deterministic file fallback; clipboard command integration is minimal in this pass. Palette reload/theme entries are present and covered as non-interactive/testable surfaces.
+- Follow-up fixed interactive runtime wiring: `lazyadmin tui` now receives resolved theme/keybindings/refresh settings, procfs `DiscoveryEvent`s trigger debounced snapshot refreshes, periodic polling remains authoritative, and keybinding overrides drive actual dispatch.
+- Live DiscoveryEvent handling intentionally treats procfs events as redraw/refresh hints; snapshot polling remains authoritative. Container/systemd native event streams remain deferred from PLAN-11.
+- Process Tree and Metrics are v0.2 situational views, not complete interaction surfaces: expand/collapse, selected-process inspector details, per-adapter latency/throughput, and telemetry-backed sparklines remain unchecked.
+- Copy diagnostic has a deterministic file fallback helper; full interactive clipboard/open shell integration is deferred. Palette reload/theme entries are present as non-interactive/testable surfaces, not a complete runtime config reloader.
 - Workspace version was not bumped to 0.2.0 and no tag was created because release/tagging still needs user review.
