@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub const SNAPSHOT_SCHEMA_VERSION: &str = "lazyadmin.snapshot.v1";
 pub const DIFF_SCHEMA_VERSION: &str = "lazyadmin.diff.v1";
 pub const DOCTOR_SCHEMA_VERSION: &str = "lazyadmin.doctor.v1";
+pub const DISCOVERY_EVENT_SCHEMA_VERSION: &str = "lazyadmin.discovery_event.v1";
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -93,7 +94,7 @@ pub enum RuntimeKind {
     Cloudflared,
     Unknown,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Exposure {
     Loopback,
@@ -103,7 +104,7 @@ pub enum Exposure {
     UnixLocal,
     Unknown,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
     Tcp,
@@ -111,7 +112,7 @@ pub enum Protocol {
     Unix,
     Any,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressFamily {
     Ipv4,
@@ -124,6 +125,15 @@ pub enum AddressFamily {
 pub enum ListenerState {
     Listen,
     Bound,
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DualStackState {
+    NotApplicable,
+    ConfirmedDualStack,
+    ConfirmedV6Only,
+    Possible,
     Unknown,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +220,11 @@ pub struct Listener {
     pub provenance: Vec<Provenance>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
+    #[serde(default = "default_dual_stack_state")]
+    pub dual_stack_state: DualStackState,
+}
+fn default_dual_stack_state() -> DualStackState {
+    DualStackState::Unknown
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RedactedEnvironmentSummary {
@@ -332,6 +347,92 @@ pub struct Host {
     pub kernel: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_dropped: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryEventKind {
+    Added,
+    Removed,
+    Changed,
+    Heartbeat,
+    Degraded,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldChange {
+    pub field: String,
+    pub old: String,
+    pub new: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryEvent {
+    pub schema_version: String,
+    pub kind: DiscoveryEventKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Vec<FieldChange>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+impl DiscoveryEvent {
+    pub fn added(entity: EntityRef) -> Self {
+        Self::new(DiscoveryEventKind::Added, Some(entity), None, None, None)
+    }
+    pub fn removed(entity: EntityRef) -> Self {
+        Self::new(DiscoveryEventKind::Removed, Some(entity), None, None, None)
+    }
+    pub fn changed(entity: EntityRef, changes: Vec<FieldChange>) -> Self {
+        Self::new(
+            DiscoveryEventKind::Changed,
+            Some(entity),
+            Some(changes),
+            None,
+            None,
+        )
+    }
+    pub fn heartbeat(adapter: impl Into<String>) -> Self {
+        Self::new(
+            DiscoveryEventKind::Heartbeat,
+            None,
+            None,
+            Some(adapter.into()),
+            None,
+        )
+    }
+    pub fn degraded(adapter: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::new(
+            DiscoveryEventKind::Degraded,
+            None,
+            None,
+            Some(adapter.into()),
+            Some(reason.into()),
+        )
+    }
+    fn new(
+        kind: DiscoveryEventKind,
+        entity: Option<EntityRef>,
+        changes: Option<Vec<FieldChange>>,
+        adapter: Option<String>,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version: DISCOVERY_EVENT_SCHEMA_VERSION.into(),
+            kind,
+            entity,
+            changes,
+            adapter,
+            reason,
+            timestamp: Utc::now(),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub schema_version: String,
     pub generated_at: DateTime<Utc>,
@@ -344,6 +445,8 @@ pub struct Snapshot {
     pub tracked_runs: Vec<TrackedRun>,
     pub edges: Vec<Edge>,
     pub warnings: Vec<Warning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SnapshotMetadata>,
 }
 impl Snapshot {
     pub fn empty() -> Self {
@@ -363,6 +466,43 @@ impl Snapshot {
             tracked_runs: vec![],
             edges: vec![],
             warnings: vec![],
+            metadata: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_event_schema_version_serializes() {
+        let event = DiscoveryEvent::heartbeat("procfs");
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["schema_version"], DISCOVERY_EVENT_SCHEMA_VERSION);
+        assert_eq!(json["kind"], "heartbeat");
+    }
+
+    #[test]
+    fn listener_defaults_dual_stack_unknown_for_old_json() {
+        let json = serde_json::json!({
+            "id": "listener:test",
+            "protocol": "tcp",
+            "family": "ipv4",
+            "bind_addr": "127.0.0.1",
+            "port": 3000,
+            "path": null,
+            "state": "listen",
+            "netns": "host",
+            "socket_inode": null,
+            "exposure": "loopback",
+            "owners": [],
+            "confidence": "high",
+            "provenance": [],
+            "first_seen": "2026-04-27T12:00:00Z",
+            "last_seen": "2026-04-27T12:00:00Z"
+        });
+        let listener: Listener = serde_json::from_value(json).unwrap();
+        assert_eq!(listener.dual_stack_state, DualStackState::Unknown);
     }
 }

@@ -2,6 +2,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::eyre;
+use futures::StreamExt;
 use lazyadmin_core::{
     actions::{
         Action, ActionKind, ActionPlan, ActionResult, ActionStatus, ConfirmationPolicy, DryRunLine,
@@ -10,7 +11,10 @@ use lazyadmin_core::{
     config::Config,
     correlate::everything_filter,
     diff::diff_snapshots,
-    doctor::{DoctorCheck, DoctorReport, DoctorSeverity},
+    doctor::{
+        DoctorAdapterWatch, DoctorAdapters, DoctorCheck, DoctorEvents, DoctorReport,
+        DoctorSeverity, DoctorSockets, DoctorSubsystems, DualStackProbeReport,
+    },
     graph::{DiscoveryAdapter, DiscoveryContext},
     logs::{LogLine, LogOptions, LogStream, direct_unavailable},
     model::{
@@ -69,6 +73,7 @@ enum Command {
     Projects,
     Logs(LogsArgs),
     Doctor,
+    Events(EventsArgs),
     Export,
     Diff(DiffArgs),
     Run(RunArgs),
@@ -113,6 +118,14 @@ struct LogsArgs {
     selector: String,
     #[arg(long)]
     tail: Option<usize>,
+    #[arg(long)]
+    follow: bool,
+}
+
+#[derive(Args, Debug)]
+struct EventsArgs {
+    #[arg(long)]
+    once: bool,
     #[arg(long)]
     follow: bool,
 }
@@ -225,6 +238,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         Some(Command::Projects) => run_view("projects", cli.json, cli.brief).await,
         Some(Command::Logs(args)) => run_logs(args, cli.json).await,
         Some(Command::Doctor) => run_doctor(cli.json).await,
+        Some(Command::Events(args)) => run_events(args, cli.json).await,
         Some(Command::PauseRestart { selector }) => {
             run_pause_restart(&selector, cli.json, false).await
         }
@@ -233,6 +247,50 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         }
         Some(Command::Free(args)) => run_free(args, cli.json).await,
     }
+}
+
+async fn run_events(args: EventsArgs, json: bool) -> std::result::Result<(), AppError> {
+    let cfg = Config::default();
+    if !cfg.adapters.events.enabled {
+        return unavailable("discovery events are disabled by config");
+    }
+    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg);
+    let mut stream = procfs
+        .watch()
+        .await
+        .ok_or_else(|| AppError::Unavailable("procfs watch stream unavailable".into()))?;
+    let event = tokio::time::timeout(
+        Duration::from_secs(if args.once { 6 } else { 60 }),
+        stream.next(),
+    )
+    .await
+    .map_err(|_| AppError::Unavailable("no discovery event received before timeout".into()))?
+    .ok_or_else(|| AppError::Unavailable("discovery event stream ended".into()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&event).map_err(|e| AppError::Other(eyre!(e)))?
+        );
+    } else {
+        println!(
+            "{:?} entity={:?} adapter={:?}",
+            event.kind, event.entity, event.adapter
+        );
+    }
+    if args.once || !args.follow {
+        return Ok(());
+    }
+    while let Some(event) = stream.next().await {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&event).map_err(|e| AppError::Other(eyre!(e)))?
+            );
+        } else {
+            println!("{:?} {:?} {:?}", event.kind, event.entity, event.adapter);
+        }
+    }
+    Ok(())
 }
 
 fn unavailable<T>(msg: impl Into<String>) -> std::result::Result<T, AppError> {
@@ -608,7 +666,52 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
         ),
         hint: Some("Run lazyadmin resume-restart <selector> to restore a recorded policy.".into()),
     });
-    let report = DoctorReport::new(checks);
+    let cfg = Config::default();
+    let report = DoctorReport::new(checks).with_subsystems(DoctorSubsystems {
+        adapters: Some(DoctorAdapters {
+            sockets: Some(DoctorSockets {
+                preferred: format!("{:?}", cfg.adapters.sockets.preferred).to_ascii_lowercase(),
+                active: "proc".into(),
+                degraded: false,
+                parity_diff_count: 0,
+                dual_stack_probe: DualStackProbeReport {
+                    supported: false,
+                    attempted: 0,
+                    succeeded: 0,
+                    errors: 0,
+                },
+            }),
+        }),
+        events: Some(DoctorEvents {
+            enabled: cfg.adapters.events.enabled,
+            per_adapter: vec![
+                DoctorAdapterWatch {
+                    adapter: "procfs".into(),
+                    state: if cfg.adapters.events.enabled {
+                        "polling"
+                    } else {
+                        "disabled"
+                    }
+                    .into(),
+                    last_event_at: None,
+                    dropped: 0,
+                },
+                DoctorAdapterWatch {
+                    adapter: "container".into(),
+                    state: "spike_safe_heartbeat".into(),
+                    last_event_at: None,
+                    dropped: 0,
+                },
+                DoctorAdapterWatch {
+                    adapter: "systemd".into(),
+                    state: "spike_safe_heartbeat".into(),
+                    last_event_at: None,
+                    dropped: 0,
+                },
+            ],
+            dropped: 0,
+        }),
+    });
     if json {
         print_json(&report)?;
     } else {

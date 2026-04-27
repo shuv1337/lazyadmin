@@ -33,6 +33,7 @@ impl SnapshotBuilder {
             tracked_runs: graph.tracked_runs.into_values().collect(),
             edges: graph.edges,
             warnings: graph.warnings,
+            metadata: None,
         }
     }
     pub fn empty() -> Snapshot {

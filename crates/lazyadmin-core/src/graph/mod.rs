@@ -50,14 +50,6 @@ pub enum Entity {
     Project(Project),
     TrackedRun(TrackedRun),
 }
-#[derive(Clone, Debug)]
-pub enum DiscoveryEvent {
-    Added(Entity),
-    Removed(EntityRef),
-    Updated(Entity),
-    HealthChanged(AdapterHealth),
-}
-
 #[async_trait]
 pub trait DiscoveryAdapter: Send + Sync {
     fn name(&self) -> &'static str;

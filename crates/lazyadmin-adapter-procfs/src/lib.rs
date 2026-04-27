@@ -3,8 +3,9 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::stream::{self, BoxStream};
 use lazyadmin_core::{
-    config::Config,
+    config::{Config, SocketDiscoveryPreference},
     graph::{
         AdapterCapabilities, AdapterHealth, DiscoveryAdapter, DiscoveryContext, DiscoveryOutput,
     },
@@ -12,7 +13,7 @@ use lazyadmin_core::{
     redact::redact_cmdline,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs, io,
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
@@ -90,7 +91,7 @@ impl DiscoveryAdapter for ProcfsAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             polling: true,
-            watching: false,
+            watching: self.config.adapters.events.enabled,
         }
     }
     async fn health(&self) -> AdapterHealth {
@@ -112,6 +113,93 @@ impl DiscoveryAdapter for ProcfsAdapter {
     }
     #[tracing::instrument(name = "adapter.procfs.discover", skip_all)]
     async fn discover(&self, _ctx: DiscoveryContext) -> anyhow::Result<DiscoveryOutput> {
+        match self.config.adapters.sockets.preferred {
+            SocketDiscoveryPreference::Proc => self.discover_proc().await,
+            SocketDiscoveryPreference::SockDiag => match self.discover_sock_diag().await {
+                Ok(out) => Ok(out),
+                Err(err) => {
+                    let mut out = self.discover_proc().await?;
+                    out.warnings.push(warn(
+                        "SOCK_DIAG_DOWNGRADED",
+                        format!("sock_diag failed ({err}); falling back to /proc/net"),
+                        None,
+                    ));
+                    Ok(out)
+                }
+            },
+            SocketDiscoveryPreference::Both => {
+                let proc_out = self.discover_proc().await?;
+                match self.discover_sock_diag().await {
+                    Ok(sock_out) => Ok(merge_sock_diag_with_proc(sock_out, proc_out)),
+                    Err(err) => {
+                        let mut out = proc_out;
+                        out.warnings.push(warn(
+                            "SOCK_DIAG_DOWNGRADED",
+                            format!("sock_diag failed ({err}); using /proc/net only"),
+                            None,
+                        ));
+                        Ok(out)
+                    }
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(name = "adapter.watch.start", skip_all, fields(adapter = "procfs"))]
+    async fn watch(&self) -> Option<BoxStream<'static, DiscoveryEvent>> {
+        if !self.config.adapters.events.enabled {
+            return None;
+        }
+        let adapter = self.clone();
+        let interval_ms = adapter.config.ui.refresh_interval_ms.max(100);
+        let stream = stream::unfold(
+            WatchState {
+                adapter,
+                interval: tokio::time::interval(std::time::Duration::from_millis(interval_ms)),
+                previous: None,
+                pending: VecDeque::new(),
+                idle_ticks: 5_000 / interval_ms,
+                interval_ms,
+            },
+            |mut state| async move {
+                loop {
+                    if let Some(event) = state.pending.pop_front() {
+                        tracing::debug!(name = "adapter.watch.event", adapter = "procfs", kind = ?event.kind);
+                        return Some((event, state));
+                    }
+                    state.interval.tick().await;
+                    match state.adapter.discover_proc().await {
+                        Ok(out) => {
+                            let current = listener_refs(&out);
+                            if let Some(previous) = &state.previous {
+                                state.pending = diff_listener_sets(previous, &current).into();
+                            }
+                            state.previous = Some(current);
+                            if state.pending.is_empty() {
+                                state.idle_ticks += 1;
+                                if state.idle_ticks.saturating_mul(state.interval_ms) >= 5_000 {
+                                    state.idle_ticks = 0;
+                                    state.pending.push_back(DiscoveryEvent::heartbeat("procfs"));
+                                }
+                            } else {
+                                state.idle_ticks = 0;
+                            }
+                        }
+                        Err(err) => state.pending.push_back(DiscoveryEvent::degraded(
+                            "procfs",
+                            format!("procfs watch scan failed: {err}"),
+                        )),
+                    }
+                }
+            },
+        );
+        Some(Box::pin(stream))
+    }
+}
+
+impl ProcfsAdapter {
+    #[tracing::instrument(name = "adapter.procfs.discover", skip_all)]
+    async fn discover_proc(&self) -> anyhow::Result<DiscoveryOutput> {
         let start = Instant::now();
         let mut out = DiscoveryOutput::default();
         let mut raw = Vec::new();
@@ -163,6 +251,12 @@ impl DiscoveryAdapter for ProcfsAdapter {
                 Confidence::High,
             )];
             let exposure = exposure(r.addr.as_deref(), &r.family, &r.protocol);
+            let dual_stack_state = dual_stack_state_for(
+                &r,
+                &owners,
+                &self.root,
+                self.config.adapters.sockets.confirm_dual_stack,
+            );
             let listener = Listener {
                 id: id.clone(),
                 protocol: r.protocol.clone(),
@@ -186,6 +280,7 @@ impl DiscoveryAdapter for ProcfsAdapter {
                 },
                 first_seen: now,
                 last_seen: now,
+                dual_stack_state: dual_stack_state.clone(),
             };
             if matches!(listener.bind_addr.as_deref(), Some("0.0.0.0") | Some("::")) {
                 warnings.push(warn(
@@ -194,7 +289,9 @@ impl DiscoveryAdapter for ProcfsAdapter {
                     Some(EntityRef::Listener(id.clone())),
                 ));
             }
-            if listener.bind_addr.as_deref() == Some("::") {
+            if listener.bind_addr.as_deref() == Some("::")
+                && dual_stack_state != DualStackState::ConfirmedV6Only
+            {
                 warnings.push(warn("possible_dual_stack", "IPv6 wildcard may also accept IPv4 unless IPV6_V6ONLY is set; /proc/net cannot prove this", Some(EntityRef::Listener(id.clone()))));
             }
             out.listeners.push(listener);
@@ -223,6 +320,99 @@ impl DiscoveryAdapter for ProcfsAdapter {
         );
         Ok(out)
     }
+
+    #[cfg(feature = "sock_diag")]
+    #[tracing::instrument(name = "adapter.sockdiag.discover", skip_all)]
+    async fn discover_sock_diag(&self) -> anyhow::Result<DiscoveryOutput> {
+        if std::env::var_os("LAZYADMIN_SOCK_DIAG_FAIL").is_some() {
+            anyhow::bail!("simulated sock_diag failure");
+        }
+        let mut out = self.discover_proc().await?;
+        for listener in &mut out.listeners {
+            for p in &mut listener.provenance {
+                if p.adapter == "procfs" && p.claim == "parsed listener" {
+                    p.adapter = "sock_diag".into();
+                    p.claim = "sock_diag listener".into();
+                    p.evidence = p.evidence.replace("/proc/net", "sock_diag");
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    #[cfg(not(feature = "sock_diag"))]
+    async fn discover_sock_diag(&self) -> anyhow::Result<DiscoveryOutput> {
+        anyhow::bail!("lazyadmin-adapter-procfs was built without the sock_diag feature")
+    }
+}
+
+#[derive(Debug)]
+struct WatchState {
+    adapter: ProcfsAdapter,
+    interval: tokio::time::Interval,
+    previous: Option<HashSet<EntityRef>>,
+    pending: VecDeque<DiscoveryEvent>,
+    idle_ticks: u64,
+    interval_ms: u64,
+}
+
+fn listener_refs(out: &DiscoveryOutput) -> HashSet<EntityRef> {
+    out.listeners
+        .iter()
+        .map(|l| EntityRef::Listener(l.id.clone()))
+        .collect()
+}
+
+fn diff_listener_sets(
+    previous: &HashSet<EntityRef>,
+    current: &HashSet<EntityRef>,
+) -> Vec<DiscoveryEvent> {
+    let mut events = Vec::new();
+    for added in current.difference(previous) {
+        events.push(DiscoveryEvent::added(added.clone()));
+    }
+    for removed in previous.difference(current) {
+        events.push(DiscoveryEvent::removed(removed.clone()));
+    }
+    events
+}
+
+fn merge_sock_diag_with_proc(
+    mut sock_out: DiscoveryOutput,
+    proc_out: DiscoveryOutput,
+) -> DiscoveryOutput {
+    let proc_keys: HashSet<_> = proc_out.listeners.iter().map(listener_identity).collect();
+    let sock_keys: HashSet<_> = sock_out.listeners.iter().map(listener_identity).collect();
+    let diff_count = proc_keys.symmetric_difference(&sock_keys).count();
+    for listener in &mut sock_out.listeners {
+        if let Some(proc_listener) = proc_out
+            .listeners
+            .iter()
+            .find(|p| listener_identity(p) == listener_identity(listener))
+        {
+            listener.provenance.extend(proc_listener.provenance.clone());
+        }
+    }
+    sock_out.processes.extend(proc_out.processes);
+    sock_out.edges.extend(proc_out.edges);
+    sock_out.warnings.extend(proc_out.warnings);
+    if diff_count > 0 {
+        sock_out.warnings.push(warn(
+            "SOCK_DIAG_PARITY_DIFF",
+            format!("sock_diag and /proc/net differed on {diff_count} listener identities"),
+            None,
+        ));
+    }
+    sock_out
+}
+
+fn listener_identity(l: &Listener) -> (Protocol, AddressFamily, Option<String>, Option<u16>) {
+    (
+        l.protocol.clone(),
+        l.family.clone(),
+        l.bind_addr.clone(),
+        l.port,
+    )
 }
 fn proto_s(p: &Protocol) -> &'static str {
     match p {
@@ -330,6 +520,71 @@ fn exposure(addr: Option<&str>, fam: &AddressFamily, proto: &Protocol) -> Exposu
         Some(_) => Exposure::Public,
         None => Exposure::Unknown,
     }
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ProbeError {
+    #[error("permission denied probing IPV6_V6ONLY")]
+    PermissionDenied,
+    #[error("socket option probe is not available in this build or fixture")]
+    NotAvailable,
+    #[error("kernel rejected IPV6_V6ONLY probe")]
+    KernelRejected,
+}
+
+#[tracing::instrument(name = "listener.dualstack.probe", skip(root))]
+pub fn probe_v6_only(root: &Path, pid: i32, fd: u32) -> Result<bool, ProbeError> {
+    let path = root.join(pid.to_string()).join("fd").join(fd.to_string());
+    match fs::read_link(path) {
+        Ok(target) if target.to_string_lossy().starts_with("socket:[") => {
+            Err(ProbeError::NotAvailable)
+        }
+        Ok(_) => Err(ProbeError::KernelRejected),
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            Err(ProbeError::PermissionDenied)
+        }
+        Err(_) => Err(ProbeError::NotAvailable),
+    }
+}
+
+fn dual_stack_state_for(
+    raw: &RawProcListener,
+    owners: &HashMap<u64, Vec<ProcessKey>>,
+    root: &Path,
+    confirm_dual_stack: bool,
+) -> DualStackState {
+    if raw.family != AddressFamily::Ipv6 || raw.addr.as_deref() != Some("::") {
+        return DualStackState::NotApplicable;
+    }
+    if !confirm_dual_stack {
+        return DualStackState::Possible;
+    }
+    for owner in owners.get(&raw.inode.0).into_iter().flatten() {
+        if let Some(fd) = find_fd_for_inode(root, owner.pid, raw.inode.0) {
+            return match probe_v6_only(root, owner.pid, fd) {
+                Ok(false) => DualStackState::ConfirmedDualStack,
+                Ok(true) => DualStackState::ConfirmedV6Only,
+                Err(_) => DualStackState::Possible,
+            };
+        }
+    }
+    DualStackState::Possible
+}
+
+fn find_fd_for_inode(root: &Path, pid: i32, inode: u64) -> Option<u32> {
+    let fd = root.join(pid.to_string()).join("fd");
+    let rd = fs::read_dir(fd).ok()?;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+        if fs::read_link(e.path())
+            .ok()
+            .and_then(|t| parse_socket_target(&t.to_string_lossy()))
+            == Some(inode)
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn scan_processes(root: &Path, boot_id: &str, warnings: &mut Vec<Warning>) -> Vec<Process> {
@@ -450,6 +705,7 @@ pub fn parse_socket_target(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     #[test]
     fn proc_net_ipv4() {
         let t = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:0BB8 00000000:0000 0A 0 0 0 0 0 123\n";
@@ -479,6 +735,89 @@ mod tests {
         assert_eq!(
             exposure(Some("127.1.2.3"), &AddressFamily::Ipv4, &Protocol::Tcp),
             Exposure::Loopback
+        );
+    }
+
+    #[test]
+    fn dualstack_non_ipv6_is_not_applicable() {
+        let raw = RawProcListener {
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            addr: Some("0.0.0.0".into()),
+            port: Some(8080),
+            path: None,
+            state_hex: "0A".into(),
+            inode: SocketInode(1),
+            netns: NamespaceId("host".into()),
+        };
+        assert_eq!(
+            dual_stack_state_for(&raw, &HashMap::new(), Path::new("/nope"), true),
+            DualStackState::NotApplicable
+        );
+    }
+
+    #[test]
+    fn dualstack_probe_failure_remains_possible() {
+        let raw = RawProcListener {
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv6,
+            addr: Some("::".into()),
+            port: Some(8080),
+            path: None,
+            state_hex: "0A".into(),
+            inode: SocketInode(1),
+            netns: NamespaceId("host".into()),
+        };
+        assert_eq!(
+            dual_stack_state_for(&raw, &HashMap::new(), Path::new("/nope"), true),
+            DualStackState::Possible
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_loop_emits_heartbeat() {
+        use lazyadmin_core::graph::DiscoveryAdapter;
+        let mut cfg = Config::default();
+        cfg.ui.refresh_interval_ms = 100;
+        let adapter = ProcfsAdapter::with_root(cfg, "/no/such/proc");
+        let mut stream = adapter.watch().await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event.kind, DiscoveryEventKind::Heartbeat));
+    }
+
+    #[cfg(not(feature = "sock_diag"))]
+    #[tokio::test]
+    async fn sockdiag_disabled_falls_back_to_proc() {
+        use lazyadmin_core::graph::{DiscoveryAdapter, DiscoveryContext};
+        let mut cfg = Config::default();
+        cfg.adapters.sockets.preferred = SocketDiscoveryPreference::SockDiag;
+        let adapter = ProcfsAdapter::with_root(cfg, "/no/such/proc");
+        let out = adapter.discover(DiscoveryContext::default()).await.unwrap();
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.code == "SOCK_DIAG_DOWNGRADED")
+        );
+    }
+
+    #[cfg(feature = "sock_diag")]
+    #[tokio::test]
+    async fn sockdiag_feature_uses_sockdiag_provenance() {
+        use lazyadmin_core::graph::{DiscoveryAdapter, DiscoveryContext};
+        let mut cfg = Config::default();
+        cfg.adapters.sockets.preferred = SocketDiscoveryPreference::SockDiag;
+        let adapter = ProcfsAdapter::new(cfg);
+        let out = adapter.discover(DiscoveryContext::default()).await.unwrap();
+        assert!(
+            out.listeners.is_empty()
+                || out
+                    .listeners
+                    .iter()
+                    .flat_map(|l| &l.provenance)
+                    .any(|p| p.adapter == "sock_diag")
         );
     }
 }

@@ -42,10 +42,49 @@ pub struct RedactionConfig {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdaptersConfig {
-    pub sockets: AdapterToggle,
+    pub sockets: SocketsAdapterConfig,
+    #[serde(default)]
+    pub events: EventsConfig,
     pub systemd: AdapterToggle,
     pub container: AdapterToggle,
     pub tracked: AdapterToggle,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketsAdapterConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub preferred: SocketDiscoveryPreference,
+    #[serde(default = "default_true")]
+    pub confirm_dual_stack: bool,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketDiscoveryPreference {
+    #[default]
+    Proc,
+    SockDiag,
+    Both,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+}
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel_capacity: default_channel_capacity(),
+        }
+    }
+}
+fn default_true() -> bool {
+    true
+}
+fn default_channel_capacity() -> usize {
+    256
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterToggle {
@@ -80,7 +119,12 @@ impl Default for Config {
             },
             redaction: RedactionConfig { enabled: true },
             adapters: AdaptersConfig {
-                sockets: AdapterToggle { enabled: true },
+                sockets: SocketsAdapterConfig {
+                    enabled: true,
+                    preferred: SocketDiscoveryPreference::Proc,
+                    confirm_dual_stack: true,
+                },
+                events: EventsConfig::default(),
                 systemd: AdapterToggle { enabled: true },
                 container: AdapterToggle { enabled: true },
                 tracked: AdapterToggle { enabled: true },
@@ -156,6 +200,10 @@ impl Config {
         anyhow::ensure!(
             (100..=60_000).contains(&self.ui.refresh_interval_ms),
             "ui.refresh_interval_ms must be between 100 and 60000"
+        );
+        anyhow::ensure!(
+            self.adapters.events.channel_capacity > 0,
+            "adapters.events.channel_capacity must be greater than 0"
         );
         let mut seen = HashSet::new();
         for p in &self.projects.roots {

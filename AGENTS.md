@@ -31,6 +31,8 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - Bollard is confirmed as a Docker Engine API Rust client, but the plan does not assume automatic Podman socket discovery without a spike. Probe Docker and Podman sockets explicitly.
 - `GetUnitByPIDFD`, `GetUnitByPID`, `GetUnitByControlGroup`, `StopUnit`, `RestartUnit`, `KillUnit`, `StartTransientUnit`, and unit-listing methods exist in systemd's D-Bus Manager interface, but runtime availability varies by systemd version.
 - Exact IPv6 dual-stack (`IPV6_V6ONLY`) detection is not proven from `/proc/net` alone. v0.1 should label it best-effort unless the adapter can prove the per-socket option.
+- PLAN-11 keeps sock_diag opt-in (`adapters.sockets.preferred = "proc"` by default). The v0.2 implementation has a feature-gated spike-safe sock_diag path for fallback/parity/provenance plumbing; native netlink enumeration remains deferred until live parity is proven.
+- Discovery events use `lazyadmin.discovery_event.v1`. In v0.2, procfs watch is debounced polling; container/systemd watch streams are liveness plumbing only and should be treated as refresh hints, not authoritative state.
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to v0.2, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 
 ## Development standards
@@ -57,6 +59,8 @@ cargo run -p lazyadmin-cli -- conflicts --json
 cargo run -p lazyadmin-cli -- projects --json
 cargo run -p lazyadmin-cli -- diff testdata/snapshots/empty.json testdata/snapshots/empty.json --json
 cargo run -p lazyadmin-cli -- config check --json
+cargo run -p lazyadmin-cli -- doctor --json
+cargo run -p lazyadmin-cli -- events --once --json
 ```
 
 Later plans may add Linux integration tests such as:

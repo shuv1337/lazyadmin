@@ -1,6 +1,9 @@
 use crate::{config::Config, graph::Graph, model::*};
 use chrono::Utc;
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Debug)]
 pub struct ViewSnapshot {
@@ -192,6 +195,42 @@ pub fn everything_filter(snapshot: &Snapshot, _config: &Config) -> ViewSnapshot 
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct EventNormalizer {
+    debounce_window: Duration,
+    last_seen: HashMap<String, Instant>,
+}
+
+impl EventNormalizer {
+    pub fn new(debounce_window: Duration) -> Self {
+        Self {
+            debounce_window,
+            last_seen: HashMap::new(),
+        }
+    }
+
+    pub fn normalize(&mut self, event: DiscoveryEvent) -> Option<DiscoveryEvent> {
+        let key = serde_json::to_string(&(
+            &event.kind,
+            &event.entity,
+            &event.changes,
+            &event.adapter,
+            &event.reason,
+        ))
+        .unwrap_or_else(|_| format!("{:?}", event.kind));
+        let now = Instant::now();
+        if self
+            .last_seen
+            .get(&key)
+            .is_some_and(|previous| now.duration_since(*previous) < self.debounce_window)
+        {
+            return None;
+        }
+        self.last_seen.insert(key, now);
+        Some(event)
+    }
+}
+
 #[tracing::instrument(name = "graph.correlate", skip_all, fields(result = "ok"))]
 pub fn correlate_placeholder() {}
 
@@ -245,5 +284,13 @@ mod tests {
         let v = everything_filter(&s, &Config::default());
         assert_eq!(v.hidden_count, 1);
         assert!(v.snapshot.workloads.is_empty());
+    }
+
+    #[test]
+    fn discovery_event_normalizer_dedupes_storms() {
+        let mut n = EventNormalizer::new(Duration::from_secs(60));
+        let event = DiscoveryEvent::heartbeat("procfs");
+        assert!(n.normalize(event.clone()).is_some());
+        assert!(n.normalize(event).is_none());
     }
 }
