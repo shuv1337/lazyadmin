@@ -1,0 +1,1 @@
+../lazyadmin-spec-v0_2.md

@@ -1,0 +1,9 @@
+---
+source: crates/lazyadmin-core/src/diff/mod.rs
+assertion_line: 122
+expression: d.summaries
+---
+[
+  "listeners: +0 -0 ~0",
+  "workloads: +0 -0 ~0"
+]

@@ -1,0 +1,13 @@
+{
+  "schema_version": "lazyadmin.snapshot.v1",
+  "generated_at": "2026-04-27T12:00:00Z",
+  "host": { "boot_id": null, "hostname": null, "kernel": null },
+  "managers": [],
+  "processes": [],
+  "listeners": [],
+  "workloads": [],
+  "projects": [],
+  "tracked_runs": [],
+  "edges": [],
+  "warnings": []
+}
