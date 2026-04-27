@@ -194,7 +194,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             if let Some(selector) = cli.selector {
                 run_point_query(&selector, cli.json, cli.brief).await
             } else {
-                unavailable("TUI is not implemented yet")
+                lazyadmin_tui::run_default().await.map_err(AppError::Other)
             }
         }
         Some(Command::Export) => {

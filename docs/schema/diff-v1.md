@@ -1,7 +1,3 @@
-# lazyadmin.diff.v1
+# diff-v1
 
-Public JSON produced by `lazyadmin diff --json`.
-
-Required top-level fields: `schema_version`, `generated_at`, `listeners`, `workloads`, `owner_changes`, `warning_changes`, `summaries`.
-
-`listeners`, `workloads`, and `warning_changes` each contain `added`, `removed`, and `changed` arrays.
+Diff JSON reports schema version plus added/removed/changed listener, workload, process, project, manager, tracked-run, edge, and warning projections suitable for scripts.

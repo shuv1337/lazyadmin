@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release -p lazyadmin-cli --target ${{ matrix.target }}
+      - run: scripts/build-skill-tarball.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazyadmin-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/lazyadmin
+            lazyadmin-agent-skill-v*.tar.gz

@@ -2,16 +2,18 @@
 
 ## Current state
 
-This repository now contains the PLAN-01 Rust workspace foundation for `lazyadmin`:
+This repository now contains the v0.1 release-ready Rust workspace for `lazyadmin` after PLAN-01 through PLAN-05:
 
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
 - `crates/lazyadmin-cli` — Clap command skeleton with `export`, `diff`, `config check`, read-only views, `doctor`, `logs`, `free`, and pause-registry commands. Runtime mutation is conservative and direct-process free validates `ProcessKey` before signaling.
-- `crates/lazyadmin-tui` remains a stub; procfs, systemd, tracked, container, and project adapters now provide read-only discovery foundations.
+- `crates/lazyadmin-tui` contains the Ratatui MVP foundation: responsive view models, keymap, command palette entries, terminal panic guard, and non-blocking snapshot-controller architecture. View-model tests cover 120/90/70/50 column modes; avoid launching the TUI interactively in automation.
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
 - `docs/schema/` and `testdata/snapshots/` — initial public JSON contract docs and fixtures.
-- `PLAN-*.md` — implementation-ready planning documents derived from the spec and assumption review.
+- `PLAN-*.md` — implementation history/checklists derived from the spec and assumption review. PLAN-05 covers the TUI, agent skill, docs, CI, packaging, and v0.1 acceptance record.
+- `skills/lazyadmin-agent/` — shipped coding-agent skill with always-do rules, cheatsheet, schema notes, examples, and install script.
+- `scripts/build-skill-tarball.sh` — builds the release skill artifact `lazyadmin-agent-skill-v<version>.tar.gz`.
 
 ## Intended architecture
 
