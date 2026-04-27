@@ -1,0 +1,1 @@
+{"id":"example","tag":"example","cmd":["sleep","1"],"cwd":null,"env_hash":null,"started_at":"2026-04-27T00:00:00Z","creator":"test","scope_or_unit_name":null,"state":"exited","log_source":"file","spawn_method":"direct_detached_file_log","pid":null,"log_file":null}

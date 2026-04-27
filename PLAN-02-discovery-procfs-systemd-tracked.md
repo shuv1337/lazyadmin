@@ -15,61 +15,61 @@ Goal: implement the Linux discovery backbone: `/proc/net` listeners, process enr
 
 Crate: `crates/lazyadmin-adapter-procfs`.
 
-- [ ] Add dependencies:
-  - [ ] `procfs`
-  - [ ] `nix`
-  - [ ] `tokio`
-  - [ ] `tracing`
-  - [ ] `thiserror`
-- [ ] Implement adapter config input from `Config.adapters.sockets` and `Config.ports`.
-- [ ] Define internal structs:
-  - [ ] `RawProcListener`
-  - [ ] `RawProcProcess`
-  - [ ] `SocketInode(u64)`
-  - [ ] `NamespaceId`
-  - [ ] `ProcScanCache`
-- [ ] Add fixture loading helpers for parser tests so unit tests do not require live `/proc` only.
+- [x] Add dependencies:
+  - [x] `procfs`
+  - [x] `nix`
+  - [x] `tokio`
+  - [x] `tracing`
+  - [x] `thiserror`
+- [x] Implement adapter config input from `Config.adapters.sockets` and `Config.ports`.
+- [x] Define internal structs:
+  - [x] `RawProcListener`
+  - [x] `RawProcProcess`
+  - [x] `SocketInode(u64)`
+  - [x] `NamespaceId`
+  - [x] `ProcScanCache`
+- [x] Add fixture loading helpers for parser tests so unit tests do not require live `/proc` only.
 
 Telemetry:
 
-- [ ] Span `adapter.procfs.discover` with listener counts, process counts, fd_readlink counts, cache hits, permission errors, duration.
+- [x] Span `adapter.procfs.discover` with listener counts, process counts, fd_readlink counts, cache hits, permission errors, duration.
 
 ## Phase 2 — `/proc/net` listener parsing
 
-- [ ] Parse `/proc/net/tcp` and `/proc/net/tcp6`.
-  - [ ] Decode hex IPv4/IPv6 addresses.
-  - [ ] Decode ports.
-  - [ ] Include only listen state for TCP unless config later asks for established.
-  - [ ] Capture socket inode.
-- [ ] Parse `/proc/net/udp` and `/proc/net/udp6`.
-  - [ ] Treat bound UDP sockets as listeners/bindings, not TCP-style `LISTEN`.
-  - [ ] Preserve state field for provenance/debug output.
-- [ ] Parse `/proc/net/unix` when enabled.
-  - [ ] Capture path, inode, socket type/state where available.
-  - [ ] Hide Unix sockets from Everything view later, but include in JSON.
-- [ ] Implement exposure classification:
-  - [ ] loopback: `127.0.0.0/8`, `::1`, Unix socket,
-  - [ ] LAN/public candidate: `0.0.0.0`, `::`, private LAN IPs, non-loopback interface IPs,
-  - [ ] public: public-routable specific IP,
-  - [ ] unknown when namespace/address is incomplete.
-- [ ] Add warning caveat for `0.0.0.0`/`::`: "reachable beyond localhost depending on firewall/routing".
-- [ ] Add dual-stack behavior as **best-effort** only:
-  - [ ] For `[::]` listeners, add `possible_dual_stack` warning unless exact `IPV6_V6ONLY` proof is implemented.
-  - [ ] Do not claim exact dual-stack if only `/proc/net` evidence exists.
+- [x] Parse `/proc/net/tcp` and `/proc/net/tcp6`.
+  - [x] Decode hex IPv4/IPv6 addresses.
+  - [x] Decode ports.
+  - [x] Include only listen state for TCP unless config later asks for established.
+  - [x] Capture socket inode.
+- [x] Parse `/proc/net/udp` and `/proc/net/udp6`.
+  - [x] Treat bound UDP sockets as listeners/bindings, not TCP-style `LISTEN`.
+  - [x] Preserve state field for provenance/debug output.
+- [x] Parse `/proc/net/unix` when enabled.
+  - [x] Capture path, inode, socket type/state where available.
+  - [x] Hide Unix sockets from Everything view later, but include in JSON.
+- [x] Implement exposure classification:
+  - [x] loopback: `127.0.0.0/8`, `::1`, Unix socket,
+  - [x] LAN/public candidate: `0.0.0.0`, `::`, private LAN IPs, non-loopback interface IPs,
+  - [x] public: public-routable specific IP,
+  - [x] unknown when namespace/address is incomplete.
+- [x] Add warning caveat for `0.0.0.0`/`::`: "reachable beyond localhost depending on firewall/routing".
+- [x] Add dual-stack behavior as **best-effort** only:
+  - [x] For `[::]` listeners, add `possible_dual_stack` warning unless exact `IPV6_V6ONLY` proof is implemented.
+  - [x] Do not claim exact dual-stack if only `/proc/net` evidence exists.
 
 Fallbacks:
 
-- [ ] If parser fails, shell out to `ss` as a marked fallback adapter evidence source.
-- [ ] Do not implement `lsof` fallback until a real test case requires it; leave trait seam.
+- [x] If parser fails, shell out to `ss` as a marked fallback adapter evidence source.
+- [x] Do not implement `lsof` fallback until a real test case requires it; leave trait seam.
 
 Tests:
 
-- [ ] IPv4 listen parser.
-- [ ] IPv6 listen parser.
-- [ ] UDP bound socket parser.
-- [ ] Unix socket parser.
-- [ ] malformed line resilience.
-- [ ] exposure classification.
+- [x] IPv4 listen parser.
+- [x] IPv6 listen parser.
+- [x] UDP bound socket parser.
+- [x] Unix socket parser.
+- [x] malformed line resilience.
+- [x] exposure classification.
 
 Validation:
 
@@ -79,34 +79,34 @@ cargo test -p lazyadmin-adapter-procfs proc_net
 
 ## Phase 3 — Process scan and cache
 
-- [ ] Read boot ID from `/proc/sys/kernel/random/boot_id`.
-- [ ] Walk numeric `/proc/<pid>` directories.
-- [ ] For each process, collect:
-  - [ ] PID,
-  - [ ] start time ticks from `/proc/<pid>/stat`,
-  - [ ] ppid, pgid, sid,
-  - [ ] uid/gid from status,
-  - [ ] exe symlink,
-  - [ ] cwd symlink,
-  - [ ] cmdline,
-  - [ ] cgroup,
-  - [ ] net namespace symlink/inode,
-  - [ ] optional redacted environment summary only when enabled.
-- [ ] Build `ProcessKey { pid, boot_id, start_time_ticks }` immediately after stat read.
-- [ ] Cache stable metadata by `ProcessKey`.
-- [ ] Distinguish permission errors:
-  - [ ] `PermissionDenied` details become warnings/provenance, not hidden rows.
-  - [ ] include PID/UID if known.
-- [ ] Mark stale/deleted executable paths when symlink target includes `(deleted)`.
-- [ ] Compute orphan marker when session leader has exited or reparented to PID 1 and no project/manager association exists later.
+- [x] Read boot ID from `/proc/sys/kernel/random/boot_id`.
+- [x] Walk numeric `/proc/<pid>` directories.
+- [x] For each process, collect:
+  - [x] PID,
+  - [x] start time ticks from `/proc/<pid>/stat`,
+  - [x] ppid, pgid, sid,
+  - [x] uid/gid from status,
+  - [x] exe symlink,
+  - [x] cwd symlink,
+  - [x] cmdline,
+  - [x] cgroup,
+  - [x] net namespace symlink/inode,
+  - [x] optional redacted environment summary only when enabled.
+- [x] Build `ProcessKey { pid, boot_id, start_time_ticks }` immediately after stat read.
+- [x] Cache stable metadata by `ProcessKey`.
+- [x] Distinguish permission errors:
+  - [x] `PermissionDenied` details become warnings/provenance, not hidden rows.
+  - [x] include PID/UID if known.
+- [x] Mark stale/deleted executable paths when symlink target includes `(deleted)`.
+- [x] Compute orphan marker when session leader has exited or reparented to PID 1 and no project/manager association exists later.
 
 Tests:
 
-- [ ] ProcessKey construction.
-- [ ] cache hit/miss behavior.
-- [ ] permission-denied fixture.
-- [ ] deleted executable fixture.
-- [ ] cmdline redaction integration.
+- [x] ProcessKey construction.
+- [x] cache hit/miss behavior.
+- [x] permission-denied fixture.
+- [x] deleted executable fixture.
+- [x] cmdline redaction integration.
 
 Validation:
 
@@ -127,19 +127,19 @@ Algorithm:
 
 Tasks:
 
-- [ ] Implement inode set gating.
-- [ ] Parse `socket:[123456]` symlink targets.
-- [ ] Map multiple processes to same inode for `SO_REUSEPORT`/forked listeners.
-- [ ] Do not assume one port equals one process.
-- [ ] Add per-process FD read timeout/rate-limit guard.
-- [ ] Track fd-read failures as warnings.
+- [x] Implement inode set gating.
+- [x] Parse `socket:[123456]` symlink targets.
+- [x] Map multiple processes to same inode for `SO_REUSEPORT`/forked listeners.
+- [x] Do not assume one port equals one process.
+- [x] Add per-process FD read timeout/rate-limit guard.
+- [x] Track fd-read failures as warnings.
 
 Tests:
 
-- [ ] direct TCP listener fixture.
-- [ ] reuseport/multiple PID fixture.
-- [ ] PID reuse validation fixture.
-- [ ] permission denied does not hide listener.
+- [x] direct TCP listener fixture.
+- [x] reuseport/multiple PID fixture.
+- [x] PID reuse validation fixture.
+- [x] permission denied does not hide listener.
 
 Validation:
 
@@ -151,16 +151,16 @@ cargo test -p lazyadmin-adapter-procfs socket_owner
 
 Crates: `lazyadmin-core`, `lazyadmin-cli`, `lazyadmin-adapter-procfs`.
 
-- [ ] Wire procfs adapter into snapshot orchestrator.
-- [ ] Implement `lazyadmin :PORT`, `lazyadmin port PORT`, and `--brief` for direct process listeners.
-- [ ] Human output includes:
-  - [ ] listener identity,
-  - [ ] owner process summary,
-  - [ ] cwd/project placeholder if unknown,
-  - [ ] confidence,
-  - [ ] warnings,
-  - [ ] provenance.
-- [ ] JSON output uses the same snapshot/query model, not a separate ad hoc struct.
+- [x] Wire procfs adapter into snapshot orchestrator.
+- [x] Implement `lazyadmin :PORT`, `lazyadmin port PORT`, and `--brief` for direct process listeners.
+- [x] Human output includes:
+  - [x] listener identity,
+  - [x] owner process summary,
+  - [x] cwd/project placeholder if unknown,
+  - [x] confidence,
+  - [x] warnings,
+  - [x] provenance.
+- [x] JSON output uses the same snapshot/query model, not a separate ad hoc struct.
 
 Validation:
 
@@ -176,46 +176,46 @@ kill $(cat /tmp/lazyadmin-http.pid)
 
 Crate: `crates/lazyadmin-adapter-systemd`.
 
-- [ ] Add dependencies:
-  - [ ] `zbus`
-  - [ ] `tokio`
-  - [ ] `tracing`
-  - [ ] `thiserror`
-- [ ] Implement health checks:
-  - [ ] system bus reachable,
-  - [ ] user bus reachable,
-  - [ ] method availability hints where cheap,
-  - [ ] permission/polkit hints for system-bus actions.
-- [ ] Implement `Manager` entities for system and user buses.
-- [ ] Implement timeout/cancellation for all D-Bus calls.
+- [x] Add dependencies:
+  - [x] `zbus`
+  - [x] `tokio`
+  - [x] `tracing`
+  - [x] `thiserror`
+- [x] Implement health checks:
+  - [x] system bus reachable,
+  - [x] user bus reachable,
+  - [x] method availability hints where cheap,
+  - [x] permission/polkit hints for system-bus actions.
+- [x] Implement `Manager` entities for system and user buses.
+- [x] Implement timeout/cancellation for all D-Bus calls.
 
 Telemetry:
 
-- [ ] Span `adapter.systemd.health` and `adapter.systemd.discover` with bus, unit counts, failures, duration.
+- [x] Span `adapter.systemd.health` and `adapter.systemd.discover` with bus, unit counts, failures, duration.
 
 ## Phase 7 — systemd process/unit correlation
 
-- [ ] Bulk fast path:
-  - [ ] Parse `/proc/<pid>/cgroup` from processes provided by procfs adapter.
-  - [ ] Extract candidate unit names from cgroup paths.
-  - [ ] Create medium/high confidence provenance depending on path clarity.
-- [ ] Targeted verification:
-  - [ ] Implement `GetUnitByPIDFD` when available.
-  - [ ] Fall back to `GetUnitByPID`.
-  - [ ] Fall back to `GetUnitByControlGroup` for cgroup-derived lookups.
-- [ ] Represent system and user units distinctly:
-  - [ ] `RuntimeKind::SystemdSystem`
-  - [ ] `RuntimeKind::SystemdUser`
-- [ ] Populate `Workload` entries for units with process refs.
-- [ ] Add `ManagerOwnsWorkload` and `WorkloadContainsProcess` edges.
-- [ ] Ensure point queries bypass default visibility filters later.
+- [x] Bulk fast path:
+  - [x] Parse `/proc/<pid>/cgroup` from processes provided by procfs adapter.
+  - [x] Extract candidate unit names from cgroup paths.
+  - [x] Create medium/high confidence provenance depending on path clarity.
+- [x] Targeted verification:
+  - [x] Implement `GetUnitByPIDFD` when available.
+  - [x] Fall back to `GetUnitByPID`.
+  - [x] Fall back to `GetUnitByControlGroup` for cgroup-derived lookups.
+- [x] Represent system and user units distinctly:
+  - [x] `RuntimeKind::SystemdSystem`
+  - [x] `RuntimeKind::SystemdUser`
+- [x] Populate `Workload` entries for units with process refs.
+- [x] Add `ManagerOwnsWorkload` and `WorkloadContainsProcess` edges.
+- [x] Ensure point queries bypass default visibility filters later.
 
 Tests:
 
-- [ ] cgroup parser for system service.
-- [ ] cgroup parser for user service.
-- [ ] escaped unit names.
-- [ ] fallback behavior when D-Bus methods unavailable.
+- [x] cgroup parser for system service.
+- [x] cgroup parser for user service.
+- [x] escaped unit names.
+- [x] fallback behavior when D-Bus methods unavailable.
 
 Validation:
 
@@ -225,20 +225,20 @@ cargo test -p lazyadmin-adapter-systemd cgroup unit_lookup
 
 ## Phase 8 — systemd socket units and restart policy
 
-- [ ] List socket units and service units through D-Bus.
-- [ ] Spike exact property access for socket listeners:
-  - [ ] `ListenStream`, `ListenDatagram`, `ListenSequentialPacket`, `Accept`, `Service`, `BindIPv6Only`, `ReusePort`, `SocketUser`, `SocketGroup`.
-  - [ ] If properties are unavailable/incomplete via zbus, mark `systemctl show` or unit-file parsing fallback in provenance.
-- [ ] Create socket `Workload` entries even with no PID.
-- [ ] Create `WorkloadActivatedBy` edge from service to socket or socket to service consistently; document direction in `docs/adapter-protocol.md`.
-- [ ] Populate `RestartPolicy` from service `Restart=` property.
-- [ ] Add `SOCKET-ACT` warning/badge when socket owns listener and service inactive.
+- [x] List socket units and service units through D-Bus.
+- [x] Spike exact property access for socket listeners:
+  - [x] `ListenStream`, `ListenDatagram`, `ListenSequentialPacket`, `Accept`, `Service`, `BindIPv6Only`, `ReusePort`, `SocketUser`, `SocketGroup`.
+  - [x] If properties are unavailable/incomplete via zbus, mark `systemctl show` or unit-file parsing fallback in provenance.
+- [x] Create socket `Workload` entries even with no PID.
+- [x] Create `WorkloadActivatedBy` edge from service to socket or socket to service consistently; document direction in `docs/adapter-protocol.md`.
+- [x] Populate `RestartPolicy` from service `Restart=` property.
+- [x] Add `SOCKET-ACT` warning/badge when socket owns listener and service inactive.
 
 Tests:
 
-- [ ] fixture for active socket/inactive service.
-- [ ] restart policy parser.
-- [ ] socket-to-listener matching by address/protocol/port.
+- [x] fixture for active socket/inactive service.
+- [x] restart policy parser.
+- [x] socket-to-listener matching by address/protocol/port.
 
 Validation:
 
@@ -250,32 +250,32 @@ cargo test -p lazyadmin-adapter-systemd socket_units restart_policy
 
 Crate: `crates/lazyadmin-adapter-tracked` plus core model additions.
 
-- [ ] Define `TrackedRun` fields:
-  - [ ] `id`,
-  - [ ] `tag`,
-  - [ ] `cmd`,
-  - [ ] `cwd`,
-  - [ ] `env_hash`,
-  - [ ] `started_at`,
-  - [ ] `creator`,
-  - [ ] `scope_or_unit_name`,
-  - [ ] `state`,
-  - [ ] `log_source`,
-  - [ ] `spawn_method`,
-  - [ ] redacted metadata only.
-- [ ] Registry path: `$XDG_RUNTIME_DIR/lazyadmin/runs/<id>.json` mode 0700 parent dir.
-- [ ] Implement load/list/reconcile:
-  - [ ] mark entries `exited` when backing scope/unit/process no longer exists,
-  - [ ] never silently delete entries,
-  - [ ] `forget` removes registry entry only.
-- [ ] Add `lazyadmin runs --json` and human list.
+- [x] Define `TrackedRun` fields:
+  - [x] `id`,
+  - [x] `tag`,
+  - [x] `cmd`,
+  - [x] `cwd`,
+  - [x] `env_hash`,
+  - [x] `started_at`,
+  - [x] `creator`,
+  - [x] `scope_or_unit_name`,
+  - [x] `state`,
+  - [x] `log_source`,
+  - [x] `spawn_method`,
+  - [x] redacted metadata only.
+- [x] Registry path: `$XDG_RUNTIME_DIR/lazyadmin/runs/<id>.json` mode 0700 parent dir.
+- [x] Implement load/list/reconcile:
+  - [x] mark entries `exited` when backing scope/unit/process no longer exists,
+  - [x] never silently delete entries,
+  - [x] `forget` removes registry entry only.
+- [x] Add `lazyadmin runs --json` and human list.
 
 Tests:
 
-- [ ] registry read/write permissions.
-- [ ] malformed registry entry quarantine.
-- [ ] exited entry reconciliation.
-- [ ] tag collision handling with `<tag>-<short-id>`.
+- [x] registry read/write permissions.
+- [x] malformed registry entry quarantine.
+- [x] exited entry reconciliation.
+- [x] tag collision handling with `<tag>-<short-id>`.
 
 ## Phase 10 — Tracked-run spawn spike
 
@@ -283,26 +283,26 @@ This phase must complete before public `lazyadmin run` behavior is documented.
 
 Spike matrix:
 
-- [ ] `systemd-run --user --scope --unit=lazyadmin-run-<id>.scope --collect -- <cmd>` foreground.
-- [ ] Scope plus `lazyadmin` shim process that redirects stdout/stderr to file and can detach.
-- [ ] Transient user service via `systemd-run --user --unit=lazyadmin-run-<id>.service --collect --property=Type=exec ...`.
-- [ ] Direct D-Bus `StartTransientUnit` equivalent for both scope/service candidates if CLI shell-out proves too limiting.
+- [x] `systemd-run --user --scope --unit=lazyadmin-run-<id>.scope --collect -- <cmd>` foreground.
+- [x] Scope plus `lazyadmin` shim process that redirects stdout/stderr to file and can detach.
+- [x] Transient user service via `systemd-run --user --unit=lazyadmin-run-<id>.service --collect --property=Type=exec ...`.
+- [x] Direct D-Bus `StartTransientUnit` equivalent for both scope/service candidates if CLI shell-out proves too limiting.
 
 Evaluate each candidate for:
 
-- [ ] returns immediately for `--detach`,
-- [ ] preserves desired cwd/env,
-- [ ] captures descendant tree reliably,
-- [ ] exposes cgroup/unit for discovery,
-- [ ] provides logs through journal or file,
-- [ ] stops descendants cleanly,
-- [ ] works without lingering after logout expectations documented,
-- [ ] handles command-not-found errors clearly.
+- [x] returns immediately for `--detach`,
+- [x] preserves desired cwd/env,
+- [x] captures descendant tree reliably,
+- [x] exposes cgroup/unit for discovery,
+- [x] provides logs through journal or file,
+- [x] stops descendants cleanly,
+- [x] works without lingering after logout expectations documented,
+- [x] handles command-not-found errors clearly.
 
 Decision record:
 
-- [ ] Write `docs/tracked-run-spawn-decision.md` with chosen behavior and rejected alternatives.
-- [ ] Update `PLAN-02` checklist or open follow-up if behavior differs from original spec.
+- [x] Write `docs/tracked-run-spawn-decision.md` with chosen behavior and rejected alternatives.
+- [x] Update `PLAN-02` checklist or open follow-up if behavior differs from original spec.
 
 User-confirmed planning preference:
 
@@ -312,25 +312,25 @@ User-confirmed planning preference:
 
 Implement only after Phase 10 decision.
 
-- [ ] `lazyadmin run --tag NAME --detach --cwd PATH --env KEY=VAL -- <cmd>`.
-- [ ] `lazyadmin run stop <id|tag>`.
-- [ ] `lazyadmin run logs <id|tag>` using proven `log_source`.
-- [ ] `lazyadmin run forget <id|tag>`.
-- [ ] `lazyadmin run restart <id|tag>` only if original command/env/cwd can be restored safely; otherwise defer with clear message.
-- [ ] Join tracked registry with systemd/procfs discovery:
-  - [ ] set `Process.lazyadmin_run_id`,
-  - [ ] create `RuntimeKind::LazyadminTracked` workload,
-  - [ ] add `TrackedRunSpawned` edge,
-  - [ ] add `TRACKED` badge/warning.
-- [ ] Update direct-process no-log message to suggest `lazyadmin run`.
+- [x] `lazyadmin run --tag NAME --detach --cwd PATH --env KEY=VAL -- <cmd>`.
+- [x] `lazyadmin run stop <id|tag>`.
+- [x] `lazyadmin run logs <id|tag>` using proven `log_source`.
+- [x] `lazyadmin run forget <id|tag>`.
+- [x] `lazyadmin run restart <id|tag>` only if original command/env/cwd can be restored safely; otherwise defer with clear message.
+- [x] Join tracked registry with systemd/procfs discovery:
+  - [x] set `Process.lazyadmin_run_id`,
+  - [x] create `RuntimeKind::LazyadminTracked` workload,
+  - [x] add `TrackedRunSpawned` edge,
+  - [x] add `TRACKED` badge/warning.
+- [x] Update direct-process no-log message to suggest `lazyadmin run`.
 
 Tests:
 
-- [ ] tracked run appears in `runs --json`.
-- [ ] tracked run appears in `export --json` workloads and tracked_runs.
-- [ ] stop terminates child and grandchild.
-- [ ] logs command reflects `log_source` truthfully.
-- [ ] registry survives CLI restart during same boot.
+- [x] tracked run appears in `runs --json`.
+- [x] tracked run appears in `export --json` workloads and tracked_runs.
+- [x] stop terminates child and grandchild.
+- [x] logs command reflects `log_source` truthfully.
+- [x] registry survives CLI restart during same boot.
 
 Validation:
 
@@ -345,34 +345,34 @@ cargo run -p lazyadmin-cli -- run stop tag:la-smoke
 
 Expose structured health records for `PLAN-04` doctor rendering.
 
-- [ ] procfs health:
-  - [ ] `/proc` readable,
-  - [ ] `/proc/net` readable,
-  - [ ] fallback `ss` availability,
-  - [ ] unreadable process count.
-- [ ] systemd health:
-  - [ ] user/system bus reachability,
-  - [ ] journal availability placeholder,
-  - [ ] method availability warnings,
-  - [ ] polkit/sudo requirement hints.
-- [ ] tracked health:
-  - [ ] `$XDG_RUNTIME_DIR` present,
-  - [ ] registry dir writable,
-  - [ ] spawn method decision/availability,
-  - [ ] active/exited run counts.
+- [x] procfs health:
+  - [x] `/proc` readable,
+  - [x] `/proc/net` readable,
+  - [x] fallback `ss` availability,
+  - [x] unreadable process count.
+- [x] systemd health:
+  - [x] user/system bus reachability,
+  - [x] journal availability placeholder,
+  - [x] method availability warnings,
+  - [x] polkit/sudo requirement hints.
+- [x] tracked health:
+  - [x] `$XDG_RUNTIME_DIR` present,
+  - [x] registry dir writable,
+  - [x] spawn method decision/availability,
+  - [x] active/exited run counts.
 
 ## Done criteria
 
-- [ ] Direct TCP/UDP/Unix listeners are discoverable from `/proc/net`.
-- [ ] Listener inode to owning process mapping works with provenance.
-- [ ] Permission-denied processes are visible as partial data.
-- [ ] `lazyadmin :PORT --brief` works for a direct listener.
-- [ ] systemd system/user units correlate to processes through cgroups and targeted D-Bus verification.
-- [ ] systemd socket activation can be represented without a service PID.
-- [ ] Restart policy is populated for systemd service workloads.
-- [ ] Tracked-run spawn behavior has a documented decision record.
-- [ ] `lazyadmin run --detach`, `runs --json`, `run stop`, and `run logs` are implemented only to the level proven by the spike.
-- [ ] All discovery phases emit structured tracing spans.
+- [x] Direct TCP/UDP/Unix listeners are discoverable from `/proc/net`.
+- [x] Listener inode to owning process mapping works with provenance.
+- [x] Permission-denied processes are visible as partial data.
+- [x] `lazyadmin :PORT --brief` works for a direct listener.
+- [x] systemd system/user units correlate to processes through cgroups and targeted D-Bus verification.
+- [x] systemd socket activation can be represented without a service PID.
+- [x] Restart policy is populated for systemd service workloads.
+- [x] Tracked-run spawn behavior has a documented decision record.
+- [x] `lazyadmin run --detach`, `runs --json`, `run stop`, and `run logs` are implemented only to the level proven by the spike.
+- [x] All discovery phases emit structured tracing spans.
 
 ## Handoff notes for next plan
 

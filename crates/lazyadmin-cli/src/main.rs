@@ -5,8 +5,10 @@ use color_eyre::eyre::eyre;
 use lazyadmin_core::{
     config::Config,
     diff::diff_snapshots,
-    model::{DIFF_SCHEMA_VERSION, Snapshot},
-    snapshot::build_empty_snapshot,
+    graph::{DiscoveryAdapter, DiscoveryContext},
+    model::{DIFF_SCHEMA_VERSION, Protocol, Snapshot},
+    selector::{Selector, parse_selector},
+    snapshot::{SnapshotBuilder, build_empty_snapshot},
 };
 use std::{path::PathBuf, process::ExitCode};
 use tracing::{error, info_span};
@@ -58,11 +60,11 @@ enum Command {
     Doctor,
     Export,
     Diff(DiffArgs),
-    Run {
-        #[arg(trailing_var_arg = true)]
-        cmd: Vec<String>,
+    Run(RunArgs),
+    Runs {
+        #[arg(long)]
+        json: bool,
     },
-    Runs,
     PauseRestart {
         selector: String,
     },
@@ -84,6 +86,20 @@ enum ConfigCommand {
 struct DiffArgs {
     before: PathBuf,
     after: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct RunArgs {
+    #[arg(long)]
+    tag: Option<String>,
+    #[arg(long)]
+    detach: bool,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long = "env")]
+    envs: Vec<String>,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    cmd: Vec<String>,
 }
 
 #[tokio::main]
@@ -147,13 +163,13 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
     match cli.command {
         None => {
             if let Some(selector) = cli.selector {
-                unavailable(format!("point query for {selector} is not implemented yet"))
+                run_point_query(&selector, cli.json, cli.brief).await
             } else {
                 unavailable("TUI is not implemented yet")
             }
         }
         Some(Command::Export) => {
-            let snap = build_empty_snapshot();
+            let snap = build_snapshot().await?;
             print_json(&snap)?;
             Ok(())
         }
@@ -169,25 +185,214 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             }
             Ok(())
         }
-        Some(Command::Port { .. })
-        | Some(Command::Free { .. })
+        Some(Command::Port { port }) => {
+            run_point_query(&format!(":{port}"), cli.json, cli.brief).await
+        }
+        Some(Command::Run(args)) => run_run(args, cli.json).await,
+        Some(Command::Runs { json }) => run_runs(cli.json || json).await,
+        Some(Command::Free { .. })
         | Some(Command::Ps)
         | Some(Command::Public)
         | Some(Command::Conflicts)
         | Some(Command::Projects)
         | Some(Command::Logs { .. })
         | Some(Command::Doctor)
-        | Some(Command::Run { .. })
-        | Some(Command::Runs)
         | Some(Command::PauseRestart { .. })
         | Some(Command::ResumeRestart { .. }) => {
-            unavailable("command is not implemented in PLAN-01 foundation")
+            unavailable("command is not implemented in PLAN-02")
         }
     }
 }
 
 fn unavailable<T>(msg: impl Into<String>) -> std::result::Result<T, AppError> {
     Err(AppError::Unavailable(msg.into()))
+}
+
+async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
+    let cfg = Config::default();
+    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg);
+    let tracked = lazyadmin_adapter_tracked::TrackedAdapter::new();
+    let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
+    let mut outputs = Vec::new();
+    outputs.push(
+        procfs
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    outputs.push(
+        tracked
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    outputs.push(
+        systemd
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    let mut snap = SnapshotBuilder::from_adapter_outputs(outputs);
+    let runs = lazyadmin_adapter_tracked::Registry::default()
+        .list()
+        .unwrap_or_default();
+    for run in runs {
+        if let Some(pid) = run.pid {
+            for process in &mut snap.processes {
+                if process.pid == pid as i32 {
+                    process.lazyadmin_run_id =
+                        Some(lazyadmin_core::model::RunId::new(run.id.clone()));
+                }
+            }
+        }
+    }
+    Ok(snap)
+}
+
+async fn run_point_query(
+    selector: &str,
+    json: bool,
+    brief: bool,
+) -> std::result::Result<(), AppError> {
+    let sel = parse_selector(selector).map_err(|e| AppError::Other(eyre!(e)))?;
+    let snap = build_snapshot().await?;
+    let Selector::Socket(sock) = sel else {
+        return unavailable("only socket point queries are implemented");
+    };
+    let mut filtered = snap.clone();
+    filtered.listeners = snap
+        .listeners
+        .into_iter()
+        .filter(|l| {
+            l.port == Some(sock.port)
+                && (sock.protocol == Protocol::Any || l.protocol == sock.protocol)
+        })
+        .collect();
+    if json {
+        print_json(&filtered)?;
+        return Ok(());
+    }
+    if filtered.listeners.is_empty() {
+        println!("no listener found on :{}", sock.port);
+        return Ok(());
+    }
+    for l in &filtered.listeners {
+        if brief {
+            println!(
+                "{} {}:{} owners={}",
+                format!("{:?}", l.protocol).to_lowercase(),
+                l.bind_addr.as_deref().unwrap_or("*"),
+                l.port.unwrap_or(0),
+                l.owners.len()
+            );
+        } else {
+            println!(
+                "listener {:?} {}:{} inode {:?} confidence {:?}",
+                l.protocol,
+                l.bind_addr.as_deref().unwrap_or("*"),
+                l.port.unwrap_or(0),
+                l.socket_inode,
+                l.confidence
+            );
+            for o in &l.owners {
+                println!("  owner: {o:?}");
+            }
+            for w in filtered.warnings.iter().filter(|w| {
+                w.entity.as_ref().is_some_and(|e| {
+                    l.owners.contains(e)
+                        || *e == lazyadmin_core::model::EntityRef::Listener(l.id.clone())
+                })
+            }) {
+                println!("  warning {}: {}", w.code, w.message);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_runs(json: bool) -> std::result::Result<(), AppError> {
+    let reg = lazyadmin_adapter_tracked::Registry::default();
+    let runs = reg.list().map_err(|e| AppError::Other(eyre!(e)))?;
+    if json {
+        print_json(&serde_json::json!({"tracked_runs": runs}))?;
+    } else {
+        for r in runs {
+            println!("{} {:?} {:?}", r.id, r.tag, r.state);
+        }
+    }
+    Ok(())
+}
+
+async fn run_run(args: RunArgs, json: bool) -> std::result::Result<(), AppError> {
+    if let Some(action) = args.cmd.first().cloned() {
+        if matches!(action.as_str(), "stop" | "logs" | "forget" | "restart") {
+            let sel = args
+                .cmd
+                .get(1)
+                .ok_or_else(|| AppError::Other(eyre!("selector required")))?;
+            return match action.as_str() {
+                "stop" => {
+                    if lazyadmin_adapter_tracked::stop(sel)
+                        .map_err(|e| AppError::Other(eyre!(e)))?
+                    {
+                        println!("stopped {sel}");
+                        Ok(())
+                    } else {
+                        unavailable("run not found")
+                    }
+                }
+                "logs" => {
+                    print!(
+                        "{}",
+                        lazyadmin_adapter_tracked::logs(sel)
+                            .map_err(|e| AppError::Other(eyre!(e)))?
+                    );
+                    Ok(())
+                }
+                "forget" => {
+                    if lazyadmin_adapter_tracked::forget(sel)
+                        .map_err(|e| AppError::Other(eyre!(e)))?
+                    {
+                        println!("forgot {sel}");
+                        Ok(())
+                    } else {
+                        unavailable("run not found")
+                    }
+                }
+                "restart" => unavailable(
+                    "run restart is deferred: direct MVP does not restore process trees safely",
+                ),
+                _ => unreachable!(),
+            };
+        }
+    }
+    if !args.detach {
+        return unavailable("only --detach is implemented for lazyadmin run MVP");
+    }
+    let envs = args
+        .envs
+        .into_iter()
+        .filter_map(|e| {
+            e.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+    let cmd = if args.cmd.first().is_some_and(|s| s == "--") {
+        args.cmd[1..].to_vec()
+    } else {
+        args.cmd
+    };
+    let entry = lazyadmin_adapter_tracked::spawn_detached(args.tag, args.cwd, envs, cmd)
+        .map_err(|e| AppError::Other(eyre!(e)))?;
+    if json {
+        print_json(&entry)?;
+    } else {
+        println!(
+            "started {} pid {:?} log_source={}",
+            entry.id, entry.pid, entry.log_source
+        );
+    }
+    Ok(())
 }
 
 async fn run_diff(args: DiffArgs, json: bool) -> std::result::Result<(), AppError> {
