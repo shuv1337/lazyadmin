@@ -11,7 +11,7 @@ Discovery events use a new additive schema, `lazyadmin.discovery_event.v1`, and 
 - Container and systemd watch support is **not enabled** in v0.2. They remain poll-only adapters until Docker `/events` and systemd D-Bus subscriptions are implemented and tested.
 - Consumers should treat events as hints and refresh snapshots for authoritative state.
 - Events are ordered within a single adapter stream. Cross-adapter ordering is best effort.
-- Overflow is reported by incrementing `Snapshot.metadata.events_dropped` and doctor `subsystems.events.dropped` when a bounded fan-in drops events.
+- Overflow is tracked by the shared bounded fan-in `EventDropCounter`. Long-lived consumers should pass that counter into snapshot/doctor builders so `Snapshot.metadata.events_dropped`, `EVENTS_DROPPED` warnings, and doctor `subsystems.events.dropped` all come from the same source. The stateless CLI `doctor` command has no long-lived fan-in to observe, so it reports `drop_counter_observable=false` and `drop_counter_source="unavailable_in_stateless_cli_doctor"` rather than inventing a count.
 
 ## Deferred to PLAN-12/PLAN-13
 

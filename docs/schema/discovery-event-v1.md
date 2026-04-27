@@ -138,7 +138,7 @@ Common fields:
 When the event channel overflows:
 - Oldest events are dropped
 - The fan-in `events_dropped` counter is incremented
-- Runtimes that own a long-lived event fan-in should copy that count into `Snapshot.metadata.events_dropped`, doctor `subsystems.events.dropped`, and an `EVENTS_DROPPED` warning on the next snapshot
+- Runtimes that own a long-lived event fan-in should pass the shared `EventDropCounter` into snapshot/doctor builders so `Snapshot.metadata.events_dropped`, doctor `subsystems.events.dropped`, and an `EVENTS_DROPPED` warning on the next snapshot all use the same count. Stateless one-shot commands report that no historical counter is observable instead of fabricating a value.
 
 ## Adapter-Specific Notes
 

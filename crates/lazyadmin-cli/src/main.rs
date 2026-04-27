@@ -9,7 +9,7 @@ use lazyadmin_core::{
         Requirement,
     },
     config::Config,
-    correlate::{EventFanIn, everything_filter},
+    correlate::{EventDropCounter, EventFanIn, everything_filter},
     diff::diff_snapshots,
     doctor::{
         DoctorAdapterWatch, DoctorAdapters, DoctorCheck, DoctorEvents, DoctorReport,
@@ -205,13 +205,13 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
     match cli.command {
         None => {
             if let Some(selector) = cli.selector {
-                run_point_query(&selector, cli.json, cli.brief).await
+                run_point_query(&selector, cli.json, cli.brief, cli.config.as_deref()).await
             } else {
                 lazyadmin_tui::run_default().await.map_err(AppError::Other)
             }
         }
         Some(Command::Export) => {
-            let snap = build_snapshot().await?;
+            let snap = build_snapshot(cli.config.as_deref()).await?;
             print_json(&snap)?;
             Ok(())
         }
@@ -228,17 +228,29 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             Ok(())
         }
         Some(Command::Port { port }) => {
-            run_point_query(&format!(":{port}"), cli.json, cli.brief).await
+            run_point_query(
+                &format!(":{port}"),
+                cli.json,
+                cli.brief,
+                cli.config.as_deref(),
+            )
+            .await
         }
         Some(Command::Run(args)) => run_run(args, cli.json).await,
         Some(Command::Runs { json }) => run_runs(cli.json || json).await,
-        Some(Command::Ps) => run_view("ps", cli.json, cli.brief).await,
-        Some(Command::Public) => run_view("public", cli.json, cli.brief).await,
-        Some(Command::Conflicts) => run_view("conflicts", cli.json, cli.brief).await,
-        Some(Command::Projects) => run_view("projects", cli.json, cli.brief).await,
+        Some(Command::Ps) => run_view("ps", cli.json, cli.brief, cli.config.as_deref()).await,
+        Some(Command::Public) => {
+            run_view("public", cli.json, cli.brief, cli.config.as_deref()).await
+        }
+        Some(Command::Conflicts) => {
+            run_view("conflicts", cli.json, cli.brief, cli.config.as_deref()).await
+        }
+        Some(Command::Projects) => {
+            run_view("projects", cli.json, cli.brief, cli.config.as_deref()).await
+        }
         Some(Command::Logs(args)) => run_logs(args, cli.json).await,
-        Some(Command::Doctor) => run_doctor(cli.json).await,
-        Some(Command::Events(args)) => run_events(args, cli.json).await,
+        Some(Command::Doctor) => run_doctor(cli.json, cli.config.as_deref()).await,
+        Some(Command::Events(args)) => run_events(args, cli.json, cli.config.as_deref()).await,
         Some(Command::PauseRestart { selector }) => {
             run_pause_restart(&selector, cli.json, false).await
         }
@@ -249,17 +261,20 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
     }
 }
 
-async fn run_events(args: EventsArgs, json: bool) -> std::result::Result<(), AppError> {
-    let cfg = Config::default();
+async fn run_events(
+    args: EventsArgs,
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
     if !cfg.adapters.events.enabled {
         return unavailable("discovery events are disabled by config");
     }
-    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg);
+    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
     let procfs_stream = procfs
         .watch()
         .await
         .ok_or_else(|| AppError::Unavailable("procfs watch stream unavailable".into()))?;
-    let cfg = Config::default();
     let (mut stream, _drops) = EventFanIn::new(
         vec![procfs_stream],
         cfg.adapters.events.channel_capacity,
@@ -303,13 +318,22 @@ fn unavailable<T>(msg: impl Into<String>) -> std::result::Result<T, AppError> {
     Err(AppError::Unavailable(msg.into()))
 }
 
-async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
-    let cfg = Config::default();
+async fn build_snapshot(
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<Snapshot, AppError> {
+    build_snapshot_with_event_drops(config_path, None).await
+}
+
+async fn build_snapshot_with_event_drops(
+    config_path: Option<&std::path::Path>,
+    event_drops: Option<&EventDropCounter>,
+) -> std::result::Result<Snapshot, AppError> {
+    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
     let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
     let tracked = lazyadmin_adapter_tracked::TrackedAdapter::new();
     let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
     let container = lazyadmin_adapter_container::ContainerAdapter::new();
-    let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg);
+    let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg.clone());
     let mut outputs = Vec::new();
     outputs.push(
         procfs
@@ -341,7 +365,15 @@ async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
             .await
             .map_err(|e| AppError::Other(eyre!(e)))?,
     );
-    let mut snap = SnapshotBuilder::from_adapter_outputs(outputs);
+    let mut snap = if let Some(event_drops) = event_drops {
+        SnapshotBuilder::from_adapter_outputs_with_config_and_event_drops(
+            outputs,
+            &cfg,
+            event_drops,
+        )
+    } else {
+        SnapshotBuilder::from_adapter_outputs_with_config(outputs, &cfg)
+    };
     let runs = lazyadmin_adapter_tracked::Registry::default()
         .list()
         .unwrap_or_default();
@@ -358,9 +390,15 @@ async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
     Ok(snap)
 }
 
-async fn run_view(kind: &str, json: bool, brief: bool) -> std::result::Result<(), AppError> {
-    let mut snap = build_snapshot().await?;
-    let hidden = everything_filter(&snap, &Config::default()).hidden_count;
+async fn run_view(
+    kind: &str,
+    json: bool,
+    brief: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
+    let mut snap = build_snapshot(config_path).await?;
+    let hidden = everything_filter(&snap, &cfg).hidden_count;
     match kind {
         "public" => snap.listeners.retain(|l| {
             l.exposure != lazyadmin_core::model::Exposure::Loopback
@@ -419,9 +457,10 @@ async fn run_point_query(
     selector: &str,
     json: bool,
     brief: bool,
+    config_path: Option<&std::path::Path>,
 ) -> std::result::Result<(), AppError> {
     let sel = parse_selector(selector).map_err(|e| AppError::Other(eyre!(e)))?;
-    let snap = build_snapshot().await?;
+    let snap = build_snapshot(config_path).await?;
     let Selector::Socket(sock) = sel else {
         if json {
             print_json(&snap)?;
@@ -606,7 +645,21 @@ fn print_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), AppErro
     Ok(())
 }
 
-async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
+async fn run_doctor(
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
+    let report = build_doctor_report(cfg, None).await;
+    if json {
+        print_json(&report)?;
+    } else {
+        render_doctor(&report);
+    }
+    Ok(())
+}
+
+async fn build_doctor_report(cfg: Config, event_drops: Option<&EventDropCounter>) -> DoctorReport {
     let mut checks = vec![
         check_path("sockets", "/proc/net", "/proc/net", true),
         check_path("processes", "/proc", "/proc", true),
@@ -672,7 +725,6 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
         ),
         hint: Some("Run lazyadmin resume-restart <selector> to restore a recorded policy.".into()),
     });
-    let cfg = Config::default();
     let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
     let proc_out = procfs
         .discover(DiscoveryContext::default())
@@ -722,7 +774,8 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
     let container_health = container.health().await;
     let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
     let systemd_health = systemd.health().await;
-    let report = DoctorReport::new(checks).with_subsystems(DoctorSubsystems {
+    let observable_event_drops = event_drops.map(EventDropCounter::dropped);
+    DoctorReport::new(checks).with_subsystems(DoctorSubsystems {
         adapters: Some(DoctorAdapters {
             sockets: Some(DoctorSockets {
                 preferred: format!("{:?}", cfg.adapters.sockets.preferred).to_ascii_lowercase(),
@@ -740,52 +793,55 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
                 },
             }),
         }),
-        events: Some(DoctorEvents {
-            enabled: cfg.adapters.events.enabled,
-            per_adapter: vec![
-                DoctorAdapterWatch {
-                    adapter: "procfs".into(),
-                    state: if cfg.adapters.events.enabled {
-                        "polling"
-                    } else {
-                        "disabled"
-                    }
-                    .into(),
-                    last_event_at: None,
-                    dropped: 0,
-                },
-                DoctorAdapterWatch {
-                    adapter: "container".into(),
-                    state: if container_health.available {
-                        "poll_only_events_deferred"
-                    } else {
-                        "unavailable"
-                    }
-                    .into(),
-                    last_event_at: None,
-                    dropped: 0,
-                },
-                DoctorAdapterWatch {
-                    adapter: "systemd".into(),
-                    state: if systemd_health.available {
-                        "poll_only_events_deferred"
-                    } else {
-                        "unavailable"
-                    }
-                    .into(),
-                    last_event_at: None,
-                    dropped: 0,
-                },
-            ],
-            dropped: 0,
+        events: Some({
+            let dropped = observable_event_drops.unwrap_or(0);
+            DoctorEvents {
+                enabled: cfg.adapters.events.enabled,
+                per_adapter: vec![
+                    DoctorAdapterWatch {
+                        adapter: "procfs".into(),
+                        state: if cfg.adapters.events.enabled {
+                            "polling"
+                        } else {
+                            "disabled"
+                        }
+                        .into(),
+                        last_event_at: None,
+                        dropped,
+                    },
+                    DoctorAdapterWatch {
+                        adapter: "container".into(),
+                        state: if container_health.available {
+                            "poll_only_events_deferred"
+                        } else {
+                            "unavailable"
+                        }
+                        .into(),
+                        last_event_at: None,
+                        dropped: 0,
+                    },
+                    DoctorAdapterWatch {
+                        adapter: "systemd".into(),
+                        state: if systemd_health.available {
+                            "poll_only_events_deferred"
+                        } else {
+                            "unavailable"
+                        }
+                        .into(),
+                        last_event_at: None,
+                        dropped: 0,
+                    },
+                ],
+                dropped,
+                drop_counter_observable: observable_event_drops.is_some(),
+                drop_counter_source: Some(if observable_event_drops.is_some() {
+                    "shared_event_fan_in".into()
+                } else {
+                    "unavailable_in_stateless_cli_doctor".into()
+                }),
+            }
         }),
-    });
-    if json {
-        print_json(&report)?;
-    } else {
-        render_doctor(&report);
-    }
-    Ok(())
+    })
 }
 
 fn check_path(subsystem: &str, name: &str, path: &str, required: bool) -> DoctorCheck {
@@ -841,7 +897,12 @@ fn render_doctor(report: &DoctorReport) {
     for (g, cs) in groups {
         println!("{g}:");
         for c in cs {
-            println!("  {}: {:?} ({})", c.name, c.severity, c.summary);
+            println!(
+                "  {} {} ({})",
+                severity_badge(&c.severity),
+                c.name,
+                c.summary
+            );
             if let Some(h) = &c.hint {
                 println!("    hint: {h}");
             }
@@ -866,7 +927,13 @@ fn render_doctor(report: &DoctorReport) {
         }
         if let Some(events) = &subsystems.events {
             println!("events:");
-            println!("  enabled={} dropped={}", events.enabled, events.dropped);
+            println!(
+                "  enabled={} dropped={} drop_counter_observable={} source={}",
+                events.enabled,
+                events.dropped,
+                events.drop_counter_observable,
+                events.drop_counter_source.as_deref().unwrap_or("unknown")
+            );
             for adapter in &events.per_adapter {
                 println!(
                     "  {}: state={} dropped={} last_event_at={}",
@@ -880,6 +947,16 @@ fn render_doctor(report: &DoctorReport) {
                 );
             }
         }
+    }
+}
+
+fn severity_badge(severity: &DoctorSeverity) -> &'static str {
+    match severity {
+        DoctorSeverity::Ok => "\x1b[32m[OK]\x1b[0m",
+        DoctorSeverity::Info => "\x1b[36m[INFO]\x1b[0m",
+        DoctorSeverity::Warning => "\x1b[33m[WARN]\x1b[0m",
+        DoctorSeverity::Degraded => "\x1b[35m[DEGRADED]\x1b[0m",
+        DoctorSeverity::Error => "\x1b[31m[ERROR]\x1b[0m",
     }
 }
 
@@ -990,7 +1067,7 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
     if args.yes_for_test_only {
         tracing::warn!("--yes-for-test-only bypass used; this flag is for automated tests only");
     }
-    let before = build_snapshot().await?;
+    let before = build_snapshot(None).await?;
     let listeners: Vec<_> = before
         .listeners
         .iter()
@@ -1043,7 +1120,7 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
     }
     let futs = plan.actions.iter().map(execute_direct_action);
     let results = futures::future::join_all(futs).await;
-    let after = build_snapshot().await?;
+    let after = build_snapshot(None).await?;
     let diff = diff_snapshots(&before, &after);
     let report = lazyadmin_core::actions::ActionExecutionReport {
         schema_version: "lazyadmin.action_report.v1".into(),
@@ -1173,7 +1250,7 @@ async fn execute_direct_action(action: &Action) -> ActionResult {
             Some("unsupported"),
         );
     };
-    let snap = match build_snapshot().await {
+    let snap = match build_snapshot(None).await {
         Ok(s) => s,
         Err(e) => {
             return result(
@@ -1223,7 +1300,7 @@ async fn execute_direct_action(action: &Action) -> ActionResult {
         }
     }
     tokio::time::sleep(Duration::from_millis(action.timeout_ms.min(5_000))).await;
-    let after = build_snapshot().await.ok();
+    let after = build_snapshot(None).await.ok();
     let gone = after
         .as_ref()
         .is_none_or(|s| !s.processes.iter().any(|p| p.key == *key));
@@ -1318,5 +1395,63 @@ fn remove_pause(selector: &str) -> std::result::Result<bool, AppError> {
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn doctor_report_honors_socket_and_event_config() {
+        let mut cfg = Config::default();
+        cfg.adapters.sockets.preferred = lazyadmin_core::config::SocketDiscoveryPreference::Both;
+        cfg.adapters.events.enabled = false;
+
+        let report = build_doctor_report(cfg, None).await;
+        let subsystems = report.subsystems.unwrap();
+        let sockets = subsystems.adapters.unwrap().sockets.unwrap();
+        assert_eq!(sockets.preferred, "both");
+        let events = subsystems.events.unwrap();
+        assert!(!events.enabled);
+        assert!(!events.drop_counter_observable);
+        assert_eq!(
+            events.drop_counter_source.as_deref(),
+            Some("unavailable_in_stateless_cli_doctor")
+        );
+        assert_eq!(
+            events
+                .per_adapter
+                .iter()
+                .find(|adapter| adapter.adapter == "procfs")
+                .unwrap()
+                .state,
+            "disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_uses_shared_event_drop_counter_when_available() {
+        let (mut fan_in, drops) = EventFanIn::new(vec![], 1, Duration::from_millis(0));
+        fan_in.push_event_for_test(lazyadmin_core::model::DiscoveryEvent::heartbeat("a"));
+        fan_in.push_event_for_test(lazyadmin_core::model::DiscoveryEvent::heartbeat("b"));
+
+        let report = build_doctor_report(Config::default(), Some(&drops)).await;
+        let events = report.subsystems.unwrap().events.unwrap();
+        assert_eq!(events.dropped, 1);
+        assert!(events.drop_counter_observable);
+        assert_eq!(
+            events.drop_counter_source.as_deref(),
+            Some("shared_event_fan_in")
+        );
+        assert_eq!(
+            events
+                .per_adapter
+                .iter()
+                .find(|adapter| adapter.adapter == "procfs")
+                .unwrap()
+                .dropped,
+            1
+        );
     }
 }

@@ -114,7 +114,7 @@ cargo test -p lazyadmin-adapter-procfs dualstack
 - [x] Implement bounded fan-in:
   - [x] Each adapter pushes events to its own task-local sender.
   - [x] Orchestrator/core merges into a bounded fan-in queue honoring `channel_capacity`.
-  - [x] On overflow, drop oldest, increment `events_dropped` counter, emit `EVENTS_DROPPED` warning at next snapshot.
+  - [x] On overflow, drop oldest, increment a shared `EventDropCounter`, and provide snapshot/doctor builder inputs that emit `metadata.events_dropped` plus `EVENTS_DROPPED` warnings when a long-lived fan-in passes the counter. Stateless one-shot CLI commands report that no historical counter is observable.
 - [x] Provide a CLI surface for events:
   - [x] `lazyadmin events --json` streams normalized events as JSON Lines until interrupted.
   - [x] `--once` flag prints the first event and exits, used in tests.
@@ -213,7 +213,7 @@ cargo test -p lazyadmin-adapter-systemd events
 - [x] Add `lazyadmin events --follow` (already implied; ensure friendly output for humans without `--json`).
 - [x] Update `lazyadmin export --json`:
   - [x] include `dual_stack_state` on listeners,
-  - [x] include `events_dropped` in metadata if non-zero.
+  - [x] include `events_dropped` in metadata if a caller supplies a non-zero shared event counter; stateless CLI export has no live fan-in and omits it honestly.
 - [x] Update agent skill: add a small note in `skills/lazyadmin-agent/json-schema-v1.md` describing the new optional fields. Do **not** require agents to use them; backward compatibility holds.
 
 Validation:
@@ -254,6 +254,7 @@ cargo test --workspace -- --ignored discovery_events_smoke
 - Completed as a v0.2 spike-safe discovery upgrade. Defaults remain unchanged (`adapters.sockets.preferred = "proc"`).
 - Native netlink sock_diag enumeration, Docker `/events` reconnection, and full systemd `PropertiesChanged` fan-out are documented limitations. Container/systemd `watch()` now returns `None` rather than heartbeat stubs so PLAN-12 does not depend on unavailable streams.
 - Per-FD IPv6 probing never emits `confirmed_*` unless a future probe implementation returns direct evidence; current fallback labels IPv6 wildcard as `possible` and keeps the warning.
+- Event overflow accounting now has a reusable core path (`EventDropCounter` -> snapshot metadata/warning and doctor dropped counts). The standalone CLI doctor/export commands are stateless and therefore expose the limitation with `drop_counter_observable=false` instead of carrying a persisted counter.
 
 ## Handoff notes for next plan
 

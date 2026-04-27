@@ -66,6 +66,10 @@ pub struct DoctorEvents {
     pub enabled: bool,
     pub per_adapter: Vec<DoctorAdapterWatch>,
     pub dropped: u64,
+    #[serde(default)]
+    pub drop_counter_observable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_counter_source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
