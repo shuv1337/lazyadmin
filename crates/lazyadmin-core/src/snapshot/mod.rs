@@ -1,4 +1,6 @@
 use crate::{
+    config::Config,
+    correlate::correlate,
     graph::{DiscoveryOutput, Graph},
     model::*,
 };
@@ -10,6 +12,7 @@ impl SnapshotBuilder {
     #[tracing::instrument(name = "snapshot.build", skip_all, fields(adapter_count = outputs.len()))]
     pub fn from_adapter_outputs(outputs: Vec<DiscoveryOutput>) -> Snapshot {
         let graph = Graph::merge_outputs(outputs);
+        let graph = correlate(graph, &Config::default());
         Self::from_graph(graph)
     }
     #[tracing::instrument(name = "graph.correlate", skip_all, fields(result = "ok"))]

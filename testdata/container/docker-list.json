@@ -1,0 +1,4 @@
+[
+  {"Id":"abcdef1234567890","Names":["/pg"],"Image":"postgres:16","State":"running","Status":"Up","Labels":{},"Ports":[{"IP":"0.0.0.0","PrivatePort":5432,"PublicPort":5432,"Type":"tcp"}]},
+  {"Id":"1111111111112222","Names":["/internal"],"Image":"redis","State":"running","Status":"Up","Labels":{},"Ports":[{"PrivatePort":6379,"Type":"tcp"}]}
+]

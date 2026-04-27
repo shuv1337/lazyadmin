@@ -17,6 +17,8 @@ lazyadmin-core = { path = "../lazyadmin-core" }
 lazyadmin-adapter-procfs = { path = "../lazyadmin-adapter-procfs" }
 lazyadmin-adapter-systemd = { path = "../lazyadmin-adapter-systemd" }
 lazyadmin-adapter-tracked = { path = "../lazyadmin-adapter-tracked" }
+lazyadmin-adapter-container = { path = "../lazyadmin-adapter-container" }
+lazyadmin-adapter-project = { path = "../lazyadmin-adapter-project" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

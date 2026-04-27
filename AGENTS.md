@@ -7,7 +7,7 @@ This repository now contains the PLAN-01 Rust workspace foundation for `lazyadmi
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
 - `crates/lazyadmin-cli` — Clap command skeleton; `export`, `diff`, and `config check` are available while other commands return an EX_UNAVAILABLE-style error.
-- `crates/lazyadmin-tui` and adapter crates — stubs only for now (`pub fn placeholder() {}`).
+- `crates/lazyadmin-tui` remains a stub; procfs, systemd, tracked, container, and project adapters now provide read-only discovery foundations.
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
 - `docs/schema/` and `testdata/snapshots/` — initial public JSON contract docs and fixtures.
@@ -18,7 +18,7 @@ This repository now contains the PLAN-01 Rust workspace foundation for `lazyadmi
 `lazyadmin` is planned as a Linux-first Rust workspace with:
 
 - `crates/lazyadmin-core` for normalized graph models, correlation, actions, config, redaction, JSON schemas, diffs, and telemetry primitives.
-- `crates/lazyadmin-cli` for CLI parsing and human/JSON output.
+- `crates/lazyadmin-cli` for CLI parsing and human/JSON output, including `export`, `diff`, `config check`, tracked-run commands, and read-only `ps`/`public`/`conflicts`/`projects` views.
 - `crates/lazyadmin-tui` for the Ratatui interface.
 - Adapter crates for procfs/sockets, systemd, containers, projects, and tracked runs.
 - `skills/lazyadmin-agent` for AI-agent integration guidance.
@@ -49,6 +49,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p lazyadmin-cli -- --help
 cargo run -p lazyadmin-cli -- export --json
+cargo run -p lazyadmin-cli -- ps --json
+cargo run -p lazyadmin-cli -- public --json
+cargo run -p lazyadmin-cli -- conflicts --json
+cargo run -p lazyadmin-cli -- projects --json
 cargo run -p lazyadmin-cli -- diff testdata/snapshots/empty.json testdata/snapshots/empty.json --json
 cargo run -p lazyadmin-cli -- config check --json
 ```

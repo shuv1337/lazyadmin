@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::eyre;
 use lazyadmin_core::{
     config::Config,
+    correlate::everything_filter,
     diff::diff_snapshots,
     graph::{DiscoveryAdapter, DiscoveryContext},
     model::{DIFF_SCHEMA_VERSION, Protocol, Snapshot},
@@ -190,17 +191,15 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         }
         Some(Command::Run(args)) => run_run(args, cli.json).await,
         Some(Command::Runs { json }) => run_runs(cli.json || json).await,
-        Some(Command::Free { .. })
-        | Some(Command::Ps)
-        | Some(Command::Public)
-        | Some(Command::Conflicts)
-        | Some(Command::Projects)
-        | Some(Command::Logs { .. })
+        Some(Command::Ps) => run_view("ps", cli.json, cli.brief).await,
+        Some(Command::Public) => run_view("public", cli.json, cli.brief).await,
+        Some(Command::Conflicts) => run_view("conflicts", cli.json, cli.brief).await,
+        Some(Command::Projects) => run_view("projects", cli.json, cli.brief).await,
+        Some(Command::Logs { .. })
         | Some(Command::Doctor)
         | Some(Command::PauseRestart { .. })
-        | Some(Command::ResumeRestart { .. }) => {
-            unavailable("command is not implemented in PLAN-02")
-        }
+        | Some(Command::ResumeRestart { .. })
+        | Some(Command::Free { .. }) => unavailable("mutating/log commands are deferred"),
     }
 }
 
@@ -210,9 +209,11 @@ fn unavailable<T>(msg: impl Into<String>) -> std::result::Result<T, AppError> {
 
 async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
     let cfg = Config::default();
-    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg);
+    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
     let tracked = lazyadmin_adapter_tracked::TrackedAdapter::new();
     let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
+    let container = lazyadmin_adapter_container::ContainerAdapter::new();
+    let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg);
     let mut outputs = Vec::new();
     outputs.push(
         procfs
@@ -228,6 +229,18 @@ async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
     );
     outputs.push(
         systemd
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    outputs.push(
+        container
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    outputs.push(
+        project
             .discover(DiscoveryContext::default())
             .await
             .map_err(|e| AppError::Other(eyre!(e)))?,
@@ -249,6 +262,63 @@ async fn build_snapshot() -> std::result::Result<Snapshot, AppError> {
     Ok(snap)
 }
 
+async fn run_view(kind: &str, json: bool, brief: bool) -> std::result::Result<(), AppError> {
+    let mut snap = build_snapshot().await?;
+    let hidden = everything_filter(&snap, &Config::default()).hidden_count;
+    match kind {
+        "public" => snap.listeners.retain(|l| {
+            l.exposure != lazyadmin_core::model::Exposure::Loopback
+                && l.exposure != lazyadmin_core::model::Exposure::UnixLocal
+        }),
+        "conflicts" => {
+            let ids: std::collections::HashSet<_> = snap
+                .warnings
+                .iter()
+                .filter(|w| w.code == "CONFLICT")
+                .filter_map(|w| match &w.entity {
+                    Some(lazyadmin_core::model::EntityRef::Listener(id)) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            snap.listeners
+                .retain(|l| ids.contains(&l.id) || l.owners.len() > 1);
+        }
+        "projects" => {
+            snap.listeners.clear();
+            snap.processes.clear();
+        }
+        _ => {}
+    }
+    if json {
+        print_json(&snap)?;
+        return Ok(());
+    }
+    if kind == "projects" {
+        for p in &snap.projects {
+            println!(
+                "{} {} markers={}",
+                p.name,
+                p.root.display(),
+                p.markers.len()
+            );
+        }
+        return Ok(());
+    }
+    if !brief && hidden > 0 {
+        println!("{hidden} system workloads hidden by default view");
+    }
+    for l in &snap.listeners {
+        println!(
+            "{:?} {}:{} owners={}",
+            l.protocol,
+            l.bind_addr.as_deref().unwrap_or("*"),
+            l.port.unwrap_or(0),
+            l.owners.len()
+        );
+    }
+    Ok(())
+}
+
 async fn run_point_query(
     selector: &str,
     json: bool,
@@ -257,7 +327,14 @@ async fn run_point_query(
     let sel = parse_selector(selector).map_err(|e| AppError::Other(eyre!(e)))?;
     let snap = build_snapshot().await?;
     let Selector::Socket(sock) = sel else {
-        return unavailable("only socket point queries are implemented");
+        if json {
+            print_json(&snap)?;
+            return Ok(());
+        }
+        println!(
+            "point query matched selector {selector}; detailed non-socket inspector is minimal in v0.1"
+        );
+        return Ok(());
     };
     let mut filtered = snap.clone();
     filtered.listeners = snap
