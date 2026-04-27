@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 directories = "6"
 futures = "0.3"
+nix = { version = "0.30", features = ["signal", "process"] }
 indexmap = { version = "2", features = ["serde"] }
 insta = { version = "1", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

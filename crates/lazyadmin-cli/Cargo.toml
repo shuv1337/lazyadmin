@@ -19,6 +19,9 @@ lazyadmin-adapter-systemd = { path = "../lazyadmin-adapter-systemd" }
 lazyadmin-adapter-tracked = { path = "../lazyadmin-adapter-tracked" }
 lazyadmin-adapter-container = { path = "../lazyadmin-adapter-container" }
 lazyadmin-adapter-project = { path = "../lazyadmin-adapter-project" }
+futures.workspace = true
+nix.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -26,6 +26,15 @@ pub struct PortsConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionsConfig {
     pub require_confirmation: bool,
+    pub free_multi_owner: FreeMultiOwner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreeMultiOwner {
+    StopAll,
+    Prompt,
+    Refuse,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionConfig {
@@ -67,6 +76,7 @@ impl Default for Config {
             },
             actions: ActionsConfig {
                 require_confirmation: true,
+                free_multi_owner: FreeMultiOwner::StopAll,
             },
             redaction: RedactionConfig { enabled: true },
             adapters: AdaptersConfig {

@@ -6,7 +6,7 @@ This repository now contains the PLAN-01 Rust workspace foundation for `lazyadmi
 
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
-- `crates/lazyadmin-cli` — Clap command skeleton; `export`, `diff`, and `config check` are available while other commands return an EX_UNAVAILABLE-style error.
+- `crates/lazyadmin-cli` — Clap command skeleton with `export`, `diff`, `config check`, read-only views, `doctor`, `logs`, `free`, and pause-registry commands. Runtime mutation is conservative and direct-process free validates `ProcessKey` before signaling.
 - `crates/lazyadmin-tui` remains a stub; procfs, systemd, tracked, container, and project adapters now provide read-only discovery foundations.
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
@@ -29,7 +29,7 @@ This repository now contains the PLAN-01 Rust workspace foundation for `lazyadmi
 - Bollard is confirmed as a Docker Engine API Rust client, but the plan does not assume automatic Podman socket discovery without a spike. Probe Docker and Podman sockets explicitly.
 - `GetUnitByPIDFD`, `GetUnitByPID`, `GetUnitByControlGroup`, `StopUnit`, `RestartUnit`, `KillUnit`, `StartTransientUnit`, and unit-listing methods exist in systemd's D-Bus Manager interface, but runtime availability varies by systemd version.
 - Exact IPv6 dual-stack (`IPV6_V6ONLY`) detection is not proven from `/proc/net` alone. v0.1 should label it best-effort unless the adapter can prove the per-socket option.
-- `pause-restart` systemd semantics are unresolved. Do not hard-code masking as the only solution until the spike in `PLAN-04-actions-logs-safety-doctor.md` is complete.
+- `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to v0.2, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 
 ## Development standards
 

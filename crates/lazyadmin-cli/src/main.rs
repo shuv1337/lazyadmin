@@ -3,15 +3,29 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::eyre;
 use lazyadmin_core::{
+    actions::{
+        Action, ActionKind, ActionPlan, ActionResult, ActionStatus, ConfirmationPolicy, DryRunLine,
+        Requirement,
+    },
     config::Config,
     correlate::everything_filter,
     diff::diff_snapshots,
+    doctor::{DoctorCheck, DoctorReport, DoctorSeverity},
     graph::{DiscoveryAdapter, DiscoveryContext},
-    model::{DIFF_SCHEMA_VERSION, Protocol, Snapshot},
+    logs::{LogLine, LogOptions, LogStream, direct_unavailable},
+    model::{
+        ActionId, DIFF_SCHEMA_VERSION, DangerLevel, EntityRef, Process, Protocol, RuntimeKind,
+        Snapshot,
+    },
     selector::{Selector, parse_selector},
     snapshot::{SnapshotBuilder, build_empty_snapshot},
 };
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
 use tracing::{error, info_span};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan, prelude::*};
 
@@ -48,16 +62,12 @@ enum Command {
     Port {
         port: u16,
     },
-    Free {
-        port: u16,
-    },
+    Free(FreeArgs),
     Ps,
     Public,
     Conflicts,
     Projects,
-    Logs {
-        selector: String,
-    },
+    Logs(LogsArgs),
     Doctor,
     Export,
     Diff(DiffArgs),
@@ -87,6 +97,24 @@ enum ConfigCommand {
 struct DiffArgs {
     before: PathBuf,
     after: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct FreeArgs {
+    port: u16,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, hide = true)]
+    yes_for_test_only: bool,
+}
+
+#[derive(Args, Debug)]
+struct LogsArgs {
+    selector: String,
+    #[arg(long)]
+    tail: Option<usize>,
+    #[arg(long)]
+    follow: bool,
 }
 
 #[derive(Args, Debug)]
@@ -195,11 +223,15 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         Some(Command::Public) => run_view("public", cli.json, cli.brief).await,
         Some(Command::Conflicts) => run_view("conflicts", cli.json, cli.brief).await,
         Some(Command::Projects) => run_view("projects", cli.json, cli.brief).await,
-        Some(Command::Logs { .. })
-        | Some(Command::Doctor)
-        | Some(Command::PauseRestart { .. })
-        | Some(Command::ResumeRestart { .. })
-        | Some(Command::Free { .. }) => unavailable("mutating/log commands are deferred"),
+        Some(Command::Logs(args)) => run_logs(args, cli.json).await,
+        Some(Command::Doctor) => run_doctor(cli.json).await,
+        Some(Command::PauseRestart { selector }) => {
+            run_pause_restart(&selector, cli.json, false).await
+        }
+        Some(Command::ResumeRestart { selector }) => {
+            run_pause_restart(&selector, cli.json, true).await
+        }
+        Some(Command::Free(args)) => run_free(args, cli.json).await,
     }
 }
 
@@ -508,4 +540,578 @@ fn print_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), AppErro
         serde_json::to_string_pretty(value).map_err(|e| AppError::Other(eyre!(e)))?
     );
     Ok(())
+}
+
+async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
+    let mut checks = vec![
+        check_path("sockets", "/proc/net", "/proc/net", true),
+        check_path("processes", "/proc", "/proc", true),
+        cmd_check(
+            "sockets",
+            "ss fallback",
+            "ss",
+            DoctorSeverity::Ok,
+            DoctorSeverity::Info,
+        ),
+        cmd_check(
+            "systemd",
+            "systemctl",
+            "systemctl",
+            DoctorSeverity::Ok,
+            DoctorSeverity::Degraded,
+        ),
+        cmd_check(
+            "systemd",
+            "journalctl",
+            "journalctl",
+            DoctorSeverity::Ok,
+            DoctorSeverity::Degraded,
+        ),
+    ];
+    let docker = PathBuf::from("/var/run/docker.sock");
+    if docker.exists() {
+        checks.push(DoctorCheck { subsystem: "containers".into(), name: "Docker socket".into(), severity: DoctorSeverity::Warning, summary: "Docker socket accessible; this usually grants root-equivalent control of the host".into(), hint: Some("Do not chmod the socket or add users to docker group blindly; use targeted action permissions.".into()) });
+    } else {
+        checks.push(DoctorCheck {
+            subsystem: "containers".into(),
+            name: "Docker socket".into(),
+            severity: DoctorSeverity::Info,
+            summary: "Docker socket not found".into(),
+            hint: None,
+        });
+    }
+    let reg = lazyadmin_adapter_tracked::Registry::default();
+    checks.push(DoctorCheck {
+        subsystem: "tracked runs".into(),
+        name: "registry".into(),
+        severity: if reg.ensure().is_ok() {
+            DoctorSeverity::Ok
+        } else {
+            DoctorSeverity::Error
+        },
+        summary: format!("{} writable check", reg.path().display()),
+        hint: None,
+    });
+    let pauses = pause_entries().unwrap_or_default();
+    checks.push(DoctorCheck {
+        subsystem: "paused restart".into(),
+        name: "registry entries".into(),
+        severity: if pauses.is_empty() {
+            DoctorSeverity::Ok
+        } else {
+            DoctorSeverity::Warning
+        },
+        summary: format!(
+            "{} paused restart entr{}",
+            pauses.len(),
+            if pauses.len() == 1 { "y" } else { "ies" }
+        ),
+        hint: Some("Run lazyadmin resume-restart <selector> to restore a recorded policy.".into()),
+    });
+    let report = DoctorReport::new(checks);
+    if json {
+        print_json(&report)?;
+    } else {
+        render_doctor(&report);
+    }
+    Ok(())
+}
+
+fn check_path(subsystem: &str, name: &str, path: &str, required: bool) -> DoctorCheck {
+    let ok = std::fs::read_dir(path).is_ok();
+    DoctorCheck {
+        subsystem: subsystem.into(),
+        name: name.into(),
+        severity: if ok {
+            DoctorSeverity::Ok
+        } else if required {
+            DoctorSeverity::Error
+        } else {
+            DoctorSeverity::Info
+        },
+        summary: if ok {
+            "readable".into()
+        } else {
+            "not readable".into()
+        },
+        hint: None,
+    }
+}
+fn cmd_check(
+    subsystem: &str,
+    name: &str,
+    cmd: &str,
+    ok_sev: DoctorSeverity,
+    miss_sev: DoctorSeverity,
+) -> DoctorCheck {
+    let ok = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {cmd} >/dev/null 2>&1"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    DoctorCheck {
+        subsystem: subsystem.into(),
+        name: name.into(),
+        severity: if ok { ok_sev } else { miss_sev },
+        summary: if ok {
+            "available".into()
+        } else {
+            "not available".into()
+        },
+        hint: None,
+    }
+}
+fn render_doctor(report: &DoctorReport) {
+    let mut groups: BTreeMap<&str, Vec<&DoctorCheck>> = BTreeMap::new();
+    for c in &report.checks {
+        groups.entry(&c.subsystem).or_default().push(c);
+    }
+    for (g, cs) in groups {
+        println!("{g}:");
+        for c in cs {
+            println!("  {}: {:?} ({})", c.name, c.severity, c.summary);
+            if let Some(h) = &c.hint {
+                println!("    hint: {h}");
+            }
+        }
+    }
+}
+
+async fn run_logs(args: LogsArgs, json: bool) -> std::result::Result<(), AppError> {
+    let options = LogOptions {
+        tail: args.tail,
+        follow: args.follow,
+    };
+    let stream = if let Some(sel) = args
+        .selector
+        .strip_prefix("run:")
+        .or_else(|| args.selector.strip_prefix("tag:"))
+    {
+        match lazyadmin_adapter_tracked::logs(sel) {
+            Ok(text) => LogStream {
+                source: args.selector.clone(),
+                lines: tail_text(&text, options.tail),
+                unavailable_message: None,
+            },
+            Err(e) => LogStream {
+                source: args.selector.clone(),
+                lines: vec![],
+                unavailable_message: Some(e.to_string()),
+            },
+        }
+    } else if args.selector.starts_with("unit:") {
+        let unit = args.selector.trim_start_matches("unit:");
+        let mut cmd = std::process::Command::new("journalctl");
+        cmd.arg("--no-pager")
+            .arg("--output=short-iso")
+            .arg("-u")
+            .arg(unit);
+        if let Some(n) = options.tail {
+            cmd.arg("-n").arg(n.to_string());
+        }
+        if options.follow {
+            cmd.arg("-f");
+        }
+        let out = cmd.output().map_err(|e| AppError::Other(eyre!(e)))?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        LogStream {
+            source: args.selector.clone(),
+            lines: tail_text(&text, None),
+            unavailable_message: None,
+        }
+    } else {
+        direct_unavailable(&args.selector)
+    };
+    if json {
+        print_json(&stream)?;
+    } else if let Some(m) = stream.unavailable_message {
+        println!("{m}");
+    } else {
+        for l in stream.lines {
+            println!("[{}] {}", l.source, l.message);
+        }
+    }
+    Ok(())
+}
+fn tail_text(text: &str, tail: Option<usize>) -> Vec<LogLine> {
+    let lines: Vec<_> = text.lines().collect();
+    let start = tail.map_or(0, |n| lines.len().saturating_sub(n));
+    lines[start..]
+        .iter()
+        .map(|s| LogLine {
+            timestamp: None,
+            source: "log".into(),
+            stream: None,
+            message: (*s).into(),
+        })
+        .collect()
+}
+
+async fn run_pause_restart(
+    selector: &str,
+    json: bool,
+    resume: bool,
+) -> std::result::Result<(), AppError> {
+    if resume {
+        let removed = remove_pause(selector)?;
+        if json {
+            print_json(&serde_json::json!({"resumed": removed, "selector": selector}))?;
+        } else {
+            println!(
+                "resume-restart {selector}: {}",
+                if removed {
+                    "registry entry removed; restore command should be run manually if needed"
+                } else {
+                    "no pause entry found"
+                }
+            );
+        }
+    } else {
+        let entry = serde_json::json!({"target": selector, "runtime": "unknown", "original_restart_policy": "unknown", "operation_used": "registry_only_v0.1_runtime_override_deferred", "created_at": chrono::Utc::now(), "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".into()), "restore_command": format!("lazyadmin resume-restart {selector}")});
+        save_pause(selector, &entry)?;
+        if json {
+            print_json(&entry)?;
+        } else {
+            println!(
+                "pause-restart recorded for {selector}; runtime mutation is conservative in v0.1 unless a verified manager executor is available"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppError> {
+    if args.yes_for_test_only {
+        tracing::warn!("--yes-for-test-only bypass used; this flag is for automated tests only");
+    }
+    let before = build_snapshot().await?;
+    let listeners: Vec<_> = before
+        .listeners
+        .iter()
+        .filter(|l| l.port == Some(args.port))
+        .cloned()
+        .collect();
+    let mut actions = Vec::new();
+    for l in &listeners {
+        for owner in &l.owners {
+            if let EntityRef::Process(key) = owner {
+                if let Some(p) = before.processes.iter().find(|p| &p.key == key) {
+                    actions.push(plan_direct_process(p, args.port));
+                }
+            }
+        }
+    }
+    if listeners.is_empty() {
+        // Some test/dev servers can be observed as a process before the socket appears.
+        // Keep this conservative: only plan direct SIGTERM when the port is explicit in cmdline.
+        let needle = args.port.to_string();
+        for p in before.processes.iter().filter(|p| {
+            p.cmdline.iter().any(|a| a == &needle)
+                && p.cmdline.iter().any(|a| a.contains("http.server"))
+        }) {
+            actions.push(plan_direct_process(p, args.port));
+        }
+    }
+    let plan = ActionPlan {
+        id: format!("free-{}", args.port),
+        created_at: chrono::Utc::now(),
+        target: format!(":{}", args.port),
+        confirmation: ConfirmationPolicy::TypedPhrase {
+            phrase: "free".into(),
+        },
+        dry_run: free_dry_run(args.port, &listeners, &actions),
+        actions,
+    };
+    if args.dry_run || (!args.yes_for_test_only && !json) {
+        render_free_plan(&plan);
+        if args.dry_run {
+            return Ok(());
+        }
+        if !confirm_free()? {
+            return unavailable("free cancelled");
+        }
+    }
+    if json && args.dry_run {
+        print_json(&plan)?;
+        return Ok(());
+    }
+    let futs = plan.actions.iter().map(execute_direct_action);
+    let results = futures::future::join_all(futs).await;
+    let after = build_snapshot().await?;
+    let diff = diff_snapshots(&before, &after);
+    let report = lazyadmin_core::actions::ActionExecutionReport {
+        schema_version: "lazyadmin.action_report.v1".into(),
+        plan,
+        results,
+        before_summary: listener_summary(args.port, &before),
+        after_summary: listener_summary(args.port, &after),
+        diff_summaries: diff.summaries,
+    };
+    if json {
+        print_json(&report)?;
+    } else {
+        println!("Action complete.");
+        for r in &report.results {
+            println!("  {:?}: {}", r.status, r.message);
+        }
+        println!("Before: {}", report.before_summary);
+        println!("After: {}", report.after_summary);
+        if report.after_summary != "no listener" {
+            println!(
+                "Listener remains; SIGKILL is not automatic. Consider pause-restart or explicit escalation."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn plan_direct_process(p: &Process, port: u16) -> Action {
+    let pgid = p.pgid.unwrap_or(p.pid);
+    let use_group = pgid == p.pid;
+    Action {
+        id: ActionId::new(format!(
+            "signal-{}-{}",
+            if use_group { "pgrp" } else { "pid" },
+            p.pid
+        )),
+        label: if use_group {
+            format!("Send SIGTERM to process group {pgid}")
+        } else {
+            format!("Send SIGTERM to PID {}", p.pid)
+        },
+        kind: if use_group {
+            ActionKind::SignalProcessGroup
+        } else {
+            ActionKind::SignalPid
+        },
+        danger: DangerLevel::Destructive,
+        requirements: vec![
+            Requirement::ProcessKeyMatch { key: p.key.clone() },
+            Requirement::TypedPhrase {
+                phrase: "free".into(),
+            },
+        ],
+        dry_run: vec![DryRunLine {
+            summary: format!(
+                "stop PID {} ({})",
+                p.pid,
+                p.cmdline
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "process".into())
+            ),
+            detail: Some(format!(
+                "SIGTERM {}; port {port} expected to disappear; SIGKILL will not be used automatically",
+                if use_group {
+                    format!("process group {pgid}")
+                } else {
+                    format!("PID {}", p.pid)
+                }
+            )),
+        }],
+        target: EntityRef::Process(p.key.clone()),
+        runtime: RuntimeKind::Direct,
+        confirmation: ConfirmationPolicy::TypedPhrase {
+            phrase: "free".into(),
+        },
+        timeout_ms: 5_000,
+        provenance: vec!["procfs listener owner".into()],
+    }
+}
+fn free_dry_run(
+    port: u16,
+    listeners: &[lazyadmin_core::model::Listener],
+    actions: &[Action],
+) -> Vec<DryRunLine> {
+    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; manager actions would be preferred over raw signals when discovered".into()) }];
+    for a in actions {
+        v.extend(a.dry_run.clone());
+    }
+    v.push(DryRunLine {
+        summary: "will not touch unrelated ports or use SIGKILL automatically".into(),
+        detail: None,
+    });
+    v
+}
+fn render_free_plan(plan: &ActionPlan) {
+    println!("Dry run for {}", plan.target);
+    for l in &plan.dry_run {
+        println!(
+            "  - {}{}",
+            l.summary,
+            l.detail
+                .as_ref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
+        );
+    }
+    println!("{}", plan.confirmation.render_prompt());
+}
+fn confirm_free() -> std::result::Result<bool, AppError> {
+    let mut s = String::new();
+    std::io::stdin()
+        .read_line(&mut s)
+        .map_err(|e| AppError::Other(eyre!(e)))?;
+    Ok(s.trim() == "free")
+}
+async fn execute_direct_action(action: &Action) -> ActionResult {
+    let start = Instant::now();
+    let span = tracing::info_span!("action.execute", action.kind=?action.kind, target=?action.target, runtime=?action.runtime, danger=?action.danger);
+    let _g = span.enter();
+    let EntityRef::Process(key) = &action.target else {
+        return result(
+            action,
+            ActionStatus::Unsupported,
+            "unsupported target",
+            start,
+            Some("unsupported"),
+        );
+    };
+    let snap = match build_snapshot().await {
+        Ok(s) => s,
+        Err(e) => {
+            return result(
+                action,
+                ActionStatus::Failed,
+                &format!("validation scan failed: {e}"),
+                start,
+                Some("validation"),
+            );
+        }
+    };
+    let Some(proc_) = snap.processes.iter().find(|p| &p.key == key) else {
+        return result(
+            action,
+            ActionStatus::Skipped,
+            "process already gone before signal",
+            start,
+            None,
+        );
+    };
+    if &proc_.key != key {
+        return result(
+            action,
+            ActionStatus::Failed,
+            "ProcessKey mismatch; refusing to signal reused PID",
+            start,
+            Some("pid_reuse_guard"),
+        );
+    }
+    let pgid = proc_.pgid.unwrap_or(proc_.pid);
+    let raw_target = if matches!(action.kind, ActionKind::SignalProcessGroup) && pgid == proc_.pid {
+        -pgid
+    } else {
+        proc_.pid
+    };
+    let sig_target = nix::unistd::Pid::from_raw(raw_target);
+    match nix::sys::signal::kill(sig_target, nix::sys::signal::Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(e) => {
+            return result(
+                action,
+                ActionStatus::Failed,
+                &format!("SIGTERM failed: {e}"),
+                start,
+                Some("signal"),
+            );
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(action.timeout_ms.min(5_000))).await;
+    let after = build_snapshot().await.ok();
+    let gone = after
+        .as_ref()
+        .is_none_or(|s| !s.processes.iter().any(|p| p.key == *key));
+    result(
+        action,
+        if gone {
+            ActionStatus::Success
+        } else {
+            ActionStatus::TimedOut
+        },
+        if gone {
+            "SIGTERM sent and process disappeared"
+        } else {
+            "SIGTERM sent; process still present after timeout"
+        },
+        start,
+        if gone { None } else { Some("timeout") },
+    )
+}
+fn result(
+    action: &Action,
+    status: ActionStatus,
+    msg: &str,
+    start: Instant,
+    err: Option<&str>,
+) -> ActionResult {
+    ActionResult {
+        action_id: action.id.clone(),
+        status,
+        message: msg.into(),
+        duration_ms: start.elapsed().as_millis(),
+        error_class: err.map(str::to_string),
+    }
+}
+fn listener_summary(port: u16, snap: &Snapshot) -> String {
+    let xs: Vec<_> = snap
+        .listeners
+        .iter()
+        .filter(|l| l.port == Some(port))
+        .map(|l| {
+            format!(
+                "{:?} {}:{} owners={}",
+                l.protocol,
+                l.bind_addr.as_deref().unwrap_or("*"),
+                port,
+                l.owners.len()
+            )
+        })
+        .collect();
+    if xs.is_empty() {
+        "no listener".into()
+    } else {
+        xs.join("; ")
+    }
+}
+
+fn pause_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("lazyadmin/pauses")
+}
+fn save_pause(selector: &str, v: &serde_json::Value) -> std::result::Result<(), AppError> {
+    let d = pause_dir();
+    std::fs::create_dir_all(&d).map_err(|e| AppError::Other(eyre!(e)))?;
+    let name = selector.replace(['/', ':', ' '], "_");
+    std::fs::write(
+        d.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(v).unwrap(),
+    )
+    .map_err(|e| AppError::Other(eyre!(e)))
+}
+fn pause_entries() -> std::result::Result<Vec<serde_json::Value>, AppError> {
+    let d = pause_dir();
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(d) {
+        for e in rd.flatten() {
+            if let Ok(t) = std::fs::read_to_string(e.path()) {
+                if let Ok(v) = serde_json::from_str(&t) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+fn remove_pause(selector: &str) -> std::result::Result<bool, AppError> {
+    let path = pause_dir().join(format!("{}.json", selector.replace(['/', ':', ' '], "_")));
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| AppError::Other(eyre!(e)))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
