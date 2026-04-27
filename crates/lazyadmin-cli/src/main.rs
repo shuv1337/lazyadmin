@@ -9,7 +9,7 @@ use lazyadmin_core::{
         Requirement,
     },
     config::Config,
-    correlate::everything_filter,
+    correlate::{EventFanIn, everything_filter},
     diff::diff_snapshots,
     doctor::{
         DoctorAdapterWatch, DoctorAdapters, DoctorCheck, DoctorEvents, DoctorReport,
@@ -255,10 +255,16 @@ async fn run_events(args: EventsArgs, json: bool) -> std::result::Result<(), App
         return unavailable("discovery events are disabled by config");
     }
     let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg);
-    let mut stream = procfs
+    let procfs_stream = procfs
         .watch()
         .await
         .ok_or_else(|| AppError::Unavailable("procfs watch stream unavailable".into()))?;
+    let cfg = Config::default();
+    let (mut stream, _drops) = EventFanIn::new(
+        vec![procfs_stream],
+        cfg.adapters.events.channel_capacity,
+        Duration::from_millis(250),
+    );
     let event = tokio::time::timeout(
         Duration::from_secs(if args.once { 6 } else { 60 }),
         stream.next(),
@@ -277,7 +283,7 @@ async fn run_events(args: EventsArgs, json: bool) -> std::result::Result<(), App
             event.kind, event.entity, event.adapter
         );
     }
-    if args.once || !args.follow {
+    if args.once || (!args.follow && !json) {
         return Ok(());
     }
     while let Some(event) = stream.next().await {
@@ -667,18 +673,70 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
         hint: Some("Run lazyadmin resume-restart <selector> to restore a recorded policy.".into()),
     });
     let cfg = Config::default();
+    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
+    let proc_out = procfs
+        .discover(DiscoveryContext::default())
+        .await
+        .unwrap_or_default();
+    let active_socket_path = if proc_out
+        .warnings
+        .iter()
+        .any(|w| w.code == "SOCK_DIAG_DOWNGRADED")
+    {
+        "proc"
+    } else {
+        match cfg.adapters.sockets.preferred {
+            lazyadmin_core::config::SocketDiscoveryPreference::Proc => "proc",
+            lazyadmin_core::config::SocketDiscoveryPreference::SockDiag => "sock_diag",
+            lazyadmin_core::config::SocketDiscoveryPreference::Both => "both",
+        }
+    };
+    let parity_diff_count = proc_out
+        .warnings
+        .iter()
+        .find(|w| w.code == "SOCK_DIAG_PARITY_DIFF")
+        .and_then(|w| {
+            w.message
+                .split_whitespace()
+                .find_map(|part| part.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    let dual_stack_attempted = proc_out
+        .listeners
+        .iter()
+        .filter(|l| l.bind_addr.as_deref() == Some("::"))
+        .count() as u64;
+    let dual_stack_succeeded = proc_out
+        .listeners
+        .iter()
+        .filter(|l| {
+            matches!(
+                l.dual_stack_state,
+                lazyadmin_core::model::DualStackState::ConfirmedDualStack
+                    | lazyadmin_core::model::DualStackState::ConfirmedV6Only
+            )
+        })
+        .count() as u64;
+    let dual_stack_errors = dual_stack_attempted.saturating_sub(dual_stack_succeeded);
+    let container = lazyadmin_adapter_container::ContainerAdapter::new();
+    let container_health = container.health().await;
+    let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
+    let systemd_health = systemd.health().await;
     let report = DoctorReport::new(checks).with_subsystems(DoctorSubsystems {
         adapters: Some(DoctorAdapters {
             sockets: Some(DoctorSockets {
                 preferred: format!("{:?}", cfg.adapters.sockets.preferred).to_ascii_lowercase(),
-                active: "proc".into(),
-                degraded: false,
-                parity_diff_count: 0,
+                active: active_socket_path.into(),
+                degraded: proc_out
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == "SOCK_DIAG_DOWNGRADED"),
+                parity_diff_count,
                 dual_stack_probe: DualStackProbeReport {
-                    supported: false,
-                    attempted: 0,
-                    succeeded: 0,
-                    errors: 0,
+                    supported: dual_stack_succeeded > 0,
+                    attempted: dual_stack_attempted,
+                    succeeded: dual_stack_succeeded,
+                    errors: dual_stack_errors,
                 },
             }),
         }),
@@ -698,13 +756,23 @@ async fn run_doctor(json: bool) -> std::result::Result<(), AppError> {
                 },
                 DoctorAdapterWatch {
                     adapter: "container".into(),
-                    state: "spike_safe_heartbeat".into(),
+                    state: if container_health.available {
+                        "poll_only_events_deferred"
+                    } else {
+                        "unavailable"
+                    }
+                    .into(),
                     last_event_at: None,
                     dropped: 0,
                 },
                 DoctorAdapterWatch {
                     adapter: "systemd".into(),
-                    state: "spike_safe_heartbeat".into(),
+                    state: if systemd_health.available {
+                        "poll_only_events_deferred"
+                    } else {
+                        "unavailable"
+                    }
+                    .into(),
                     last_event_at: None,
                     dropped: 0,
                 },
@@ -776,6 +844,40 @@ fn render_doctor(report: &DoctorReport) {
             println!("  {}: {:?} ({})", c.name, c.severity, c.summary);
             if let Some(h) = &c.hint {
                 println!("    hint: {h}");
+            }
+        }
+    }
+    if let Some(subsystems) = &report.subsystems {
+        if let Some(adapters) = &subsystems.adapters {
+            if let Some(sockets) = &adapters.sockets {
+                println!("adapters.sockets:");
+                println!(
+                    "  preferred={} active={} degraded={} parity_diff_count={}",
+                    sockets.preferred, sockets.active, sockets.degraded, sockets.parity_diff_count
+                );
+                println!(
+                    "  dual_stack_probe: supported={} attempted={} succeeded={} errors={}",
+                    sockets.dual_stack_probe.supported,
+                    sockets.dual_stack_probe.attempted,
+                    sockets.dual_stack_probe.succeeded,
+                    sockets.dual_stack_probe.errors
+                );
+            }
+        }
+        if let Some(events) = &subsystems.events {
+            println!("events:");
+            println!("  enabled={} dropped={}", events.enabled, events.dropped);
+            for adapter in &events.per_adapter {
+                println!(
+                    "  {}: state={} dropped={} last_event_at={}",
+                    adapter.adapter,
+                    adapter.state,
+                    adapter.dropped,
+                    adapter
+                        .last_event_at
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_else(|| "never".into())
+                );
             }
         }
     }

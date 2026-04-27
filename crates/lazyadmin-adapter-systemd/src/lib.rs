@@ -2,7 +2,7 @@
 #![deny(missing_debug_implementations)]
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::{stream, stream::BoxStream};
+use futures::stream::BoxStream;
 use lazyadmin_core::{
     graph::{
         AdapterCapabilities, AdapterHealth, DiscoveryAdapter, DiscoveryContext, DiscoveryOutput,
@@ -53,7 +53,7 @@ impl DiscoveryAdapter for SystemdAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             polling: true,
-            watching: true,
+            watching: false,
         }
     }
     #[tracing::instrument(name = "adapter.systemd.health", skip_all)]
@@ -140,9 +140,7 @@ impl DiscoveryAdapter for SystemdAdapter {
 
     #[tracing::instrument(name = "adapter.watch.start", skip_all, fields(adapter = "systemd"))]
     async fn watch(&self) -> Option<BoxStream<'static, DiscoveryEvent>> {
-        Some(Box::pin(stream::once(async {
-            DiscoveryEvent::heartbeat("systemd")
-        })))
+        None
     }
 }
 #[cfg(test)]
@@ -161,11 +159,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_watch_stream_emits_heartbeat() {
-        use futures::StreamExt;
+    async fn events_watch_stream_is_deferred() {
         use lazyadmin_core::graph::DiscoveryAdapter;
-        let mut stream = SystemdAdapter.watch().await.unwrap();
-        let event = stream.next().await.unwrap();
-        assert!(matches!(event.kind, DiscoveryEventKind::Heartbeat));
+        assert!(SystemdAdapter.watch().await.is_none());
+        assert!(!SystemdAdapter.capabilities().watching);
     }
 }

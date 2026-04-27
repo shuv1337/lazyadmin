@@ -32,7 +32,7 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - `GetUnitByPIDFD`, `GetUnitByPID`, `GetUnitByControlGroup`, `StopUnit`, `RestartUnit`, `KillUnit`, `StartTransientUnit`, and unit-listing methods exist in systemd's D-Bus Manager interface, but runtime availability varies by systemd version.
 - Exact IPv6 dual-stack (`IPV6_V6ONLY`) detection is not proven from `/proc/net` alone. v0.1 should label it best-effort unless the adapter can prove the per-socket option.
 - PLAN-11 keeps sock_diag opt-in (`adapters.sockets.preferred = "proc"` by default). The v0.2 implementation has a feature-gated spike-safe sock_diag path for fallback/parity/provenance plumbing; native netlink enumeration remains deferred until live parity is proven.
-- Discovery events use `lazyadmin.discovery_event.v1`. In v0.2, procfs watch is debounced polling; container/systemd watch streams are liveness plumbing only and should be treated as refresh hints, not authoritative state.
+- Discovery events use `lazyadmin.discovery_event.v1`. In v0.2, procfs watch is debounced polling through the bounded fan-in; container/systemd watch streams are intentionally unavailable and should be refreshed by snapshot polling until native Docker `/events` and systemd D-Bus subscriptions land.
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to v0.2, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 
 ## Development standards

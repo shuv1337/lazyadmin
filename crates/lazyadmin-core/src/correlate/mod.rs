@@ -1,7 +1,14 @@
 use crate::{config::Config, graph::Graph, model::*};
 use chrono::Utc;
+use futures::{Stream, stream::SelectAll};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -231,6 +238,96 @@ impl EventNormalizer {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct EventDropCounter {
+    dropped: Arc<AtomicU64>,
+}
+
+impl EventDropCounter {
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn increment(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub struct EventFanIn {
+    streams: SelectAll<futures::stream::BoxStream<'static, DiscoveryEvent>>,
+    buffer: VecDeque<DiscoveryEvent>,
+    capacity: usize,
+    drop_counter: EventDropCounter,
+    normalizer: EventNormalizer,
+}
+
+impl std::fmt::Debug for EventFanIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventFanIn")
+            .field("stream_count", &self.streams.len())
+            .field("buffer_len", &self.buffer.len())
+            .field("capacity", &self.capacity)
+            .field("dropped", &self.drop_counter.dropped())
+            .finish()
+    }
+}
+
+impl EventFanIn {
+    pub fn new(
+        streams: Vec<futures::stream::BoxStream<'static, DiscoveryEvent>>,
+        capacity: usize,
+        debounce_window: Duration,
+    ) -> (Self, EventDropCounter) {
+        let counter = EventDropCounter::default();
+        let mut select = SelectAll::new();
+        for stream in streams {
+            select.push(stream);
+        }
+        (
+            Self {
+                streams: select,
+                buffer: VecDeque::new(),
+                capacity: capacity.max(1),
+                drop_counter: counter.clone(),
+                normalizer: EventNormalizer::new(debounce_window),
+            },
+            counter,
+        )
+    }
+
+    pub fn push_event_for_test(&mut self, event: DiscoveryEvent) {
+        self.push_event(event);
+    }
+
+    fn push_event(&mut self, event: DiscoveryEvent) {
+        let Some(event) = self.normalizer.normalize(event) else {
+            return;
+        };
+        if self.buffer.len() >= self.capacity {
+            self.buffer.pop_front();
+            self.drop_counter.increment();
+        }
+        self.buffer.push_back(event);
+    }
+}
+
+impl Stream for EventFanIn {
+    type Item = DiscoveryEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        while let Poll::Ready(Some(event)) = Pin::new(&mut self.streams).poll_next(cx) {
+            self.push_event(event);
+        }
+        if let Some(event) = self.buffer.pop_front() {
+            Poll::Ready(Some(event))
+        } else if self.streams.is_empty() {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 #[tracing::instrument(name = "graph.correlate", skip_all, fields(result = "ok"))]
 pub fn correlate_placeholder() {}
 
@@ -292,5 +389,22 @@ mod tests {
         let event = DiscoveryEvent::heartbeat("procfs");
         assert!(n.normalize(event.clone()).is_some());
         assert!(n.normalize(event).is_none());
+    }
+
+    #[test]
+    fn fan_in_drops_oldest_and_counts_overflow() {
+        let (mut fan_in, drops) = EventFanIn::new(vec![], 2, Duration::from_millis(0));
+        fan_in.push_event_for_test(DiscoveryEvent::heartbeat("a"));
+        fan_in.push_event_for_test(DiscoveryEvent::heartbeat("b"));
+        fan_in.push_event_for_test(DiscoveryEvent::heartbeat("c"));
+        assert_eq!(drops.dropped(), 1);
+        assert_eq!(
+            fan_in.buffer.pop_front().unwrap().adapter.as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            fan_in.buffer.pop_front().unwrap().adapter.as_deref(),
+            Some("c")
+        );
     }
 }

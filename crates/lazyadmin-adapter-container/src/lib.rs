@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use bollard::{Docker, container::ListContainersOptions};
 use chrono::Utc;
-use futures::{stream, stream::BoxStream};
+use futures::stream::BoxStream;
 use lazyadmin_core::{
     graph::{
         AdapterCapabilities, AdapterHealth, DiscoveryAdapter, DiscoveryContext, DiscoveryOutput,
@@ -174,7 +174,7 @@ impl DiscoveryAdapter for ContainerAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             polling: true,
-            watching: true,
+            watching: false,
         }
     }
     async fn health(&self) -> AdapterHealth {
@@ -266,21 +266,7 @@ impl DiscoveryAdapter for ContainerAdapter {
 
     #[tracing::instrument(name = "adapter.watch.start", skip_all, fields(adapter = "container"))]
     async fn watch(&self) -> Option<BoxStream<'static, DiscoveryEvent>> {
-        let events: Vec<_> = self
-            .endpoints
-            .iter()
-            .filter_map(|ep| {
-                if ep.socket.as_ref().is_some_and(|p| !p.exists()) {
-                    None
-                } else {
-                    Some(DiscoveryEvent::heartbeat(format!(
-                        "container:{}",
-                        ep.source
-                    )))
-                }
-            })
-            .collect();
-        Some(Box::pin(stream::iter(events)))
+        None
     }
 }
 
@@ -545,11 +531,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_watch_stream_is_available() {
-        use futures::StreamExt;
+    async fn events_watch_stream_is_deferred() {
         use lazyadmin_core::graph::DiscoveryAdapter;
         let adapter = ContainerAdapter::new();
-        let mut stream = adapter.watch().await.unwrap();
-        let _ = stream.next().await;
+        assert!(adapter.watch().await.is_none());
+        assert!(!adapter.capabilities().watching);
     }
 }

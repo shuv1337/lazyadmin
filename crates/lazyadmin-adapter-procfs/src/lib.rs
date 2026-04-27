@@ -13,7 +13,7 @@ use lazyadmin_core::{
     redact::redact_cmdline,
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs, io,
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
@@ -170,9 +170,9 @@ impl DiscoveryAdapter for ProcfsAdapter {
                     state.interval.tick().await;
                     match state.adapter.discover_proc().await {
                         Ok(out) => {
-                            let current = listener_refs(&out);
+                            let current = listener_snapshots(&out);
                             if let Some(previous) = &state.previous {
-                                state.pending = diff_listener_sets(previous, &current).into();
+                                state.pending = diff_listener_snapshots(previous, &current).into();
                             }
                             state.previous = Some(current);
                             if state.pending.is_empty() {
@@ -350,31 +350,120 @@ impl ProcfsAdapter {
 struct WatchState {
     adapter: ProcfsAdapter,
     interval: tokio::time::Interval,
-    previous: Option<HashSet<EntityRef>>,
+    previous: Option<BTreeMap<String, ListenerWatchSnapshot>>,
     pending: VecDeque<DiscoveryEvent>,
     idle_ticks: u64,
     interval_ms: u64,
 }
 
-fn listener_refs(out: &DiscoveryOutput) -> HashSet<EntityRef> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ListenerWatchSnapshot {
+    entity: EntityRef,
+    protocol: Protocol,
+    family: AddressFamily,
+    bind_addr: Option<String>,
+    port: Option<u16>,
+    path: Option<PathBuf>,
+    state: ListenerState,
+    exposure: Exposure,
+    owners: Vec<EntityRef>,
+    dual_stack_state: DualStackState,
+}
+
+fn listener_snapshots(out: &DiscoveryOutput) -> BTreeMap<String, ListenerWatchSnapshot> {
     out.listeners
         .iter()
-        .map(|l| EntityRef::Listener(l.id.clone()))
+        .map(|l| {
+            let mut owners = l.owners.clone();
+            owners.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+            (
+                l.id.0.clone(),
+                ListenerWatchSnapshot {
+                    entity: EntityRef::Listener(l.id.clone()),
+                    protocol: l.protocol.clone(),
+                    family: l.family.clone(),
+                    bind_addr: l.bind_addr.clone(),
+                    port: l.port,
+                    path: l.path.clone(),
+                    state: l.state.clone(),
+                    exposure: l.exposure.clone(),
+                    owners,
+                    dual_stack_state: l.dual_stack_state.clone(),
+                },
+            )
+        })
         .collect()
 }
 
-fn diff_listener_sets(
-    previous: &HashSet<EntityRef>,
-    current: &HashSet<EntityRef>,
+fn diff_listener_snapshots(
+    previous: &BTreeMap<String, ListenerWatchSnapshot>,
+    current: &BTreeMap<String, ListenerWatchSnapshot>,
 ) -> Vec<DiscoveryEvent> {
     let mut events = Vec::new();
-    for added in current.difference(previous) {
-        events.push(DiscoveryEvent::added(added.clone()));
+    for (id, current_listener) in current {
+        match previous.get(id) {
+            None => events.push(DiscoveryEvent::added(current_listener.entity.clone())),
+            Some(previous_listener) => {
+                let changes = listener_field_changes(previous_listener, current_listener);
+                if !changes.is_empty() {
+                    events.push(DiscoveryEvent::changed(
+                        current_listener.entity.clone(),
+                        changes,
+                    ));
+                }
+            }
+        }
     }
-    for removed in previous.difference(current) {
-        events.push(DiscoveryEvent::removed(removed.clone()));
+    for (id, previous_listener) in previous {
+        if !current.contains_key(id) {
+            events.push(DiscoveryEvent::removed(previous_listener.entity.clone()));
+        }
     }
     events
+}
+
+fn listener_field_changes(
+    previous: &ListenerWatchSnapshot,
+    current: &ListenerWatchSnapshot,
+) -> Vec<FieldChange> {
+    let mut changes = Vec::new();
+    push_change(&mut changes, "state", &previous.state, &current.state);
+    push_change(
+        &mut changes,
+        "exposure",
+        &previous.exposure,
+        &current.exposure,
+    );
+    push_change(&mut changes, "owners", &previous.owners, &current.owners);
+    push_change(
+        &mut changes,
+        "dual_stack_state",
+        &previous.dual_stack_state,
+        &current.dual_stack_state,
+    );
+    push_change(
+        &mut changes,
+        "bind_addr",
+        &previous.bind_addr,
+        &current.bind_addr,
+    );
+    push_change(&mut changes, "port", &previous.port, &current.port);
+    changes
+}
+
+fn push_change<T: std::fmt::Debug + PartialEq>(
+    changes: &mut Vec<FieldChange>,
+    field: &str,
+    old: &T,
+    new: &T,
+) {
+    if old != new {
+        changes.push(FieldChange {
+            field: field.into(),
+            old: format!("{old:?}"),
+            new: format!("{new:?}"),
+        });
+    }
 }
 
 fn merge_sock_diag_with_proc(
@@ -772,6 +861,52 @@ mod tests {
             dual_stack_state_for(&raw, &HashMap::new(), Path::new("/nope"), true),
             DualStackState::Possible
         );
+    }
+
+    #[test]
+    fn watch_diff_is_stable_and_reports_changed_fields() {
+        let listener = |id: &str, state: ListenerState, owner_pid: i32| Listener {
+            id: ListenerId::new(id),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(8080),
+            path: None,
+            state,
+            netns: "host".into(),
+            socket_inode: Some(1),
+            exposure: Exposure::Loopback,
+            owners: vec![EntityRef::Process(ProcessKey {
+                pid: owner_pid,
+                boot_id: "boot".into(),
+                start_time_ticks: 1,
+            })],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        };
+        let previous = listener_snapshots(&DiscoveryOutput {
+            listeners: vec![listener("listener-a", ListenerState::Listen, 1)],
+            ..Default::default()
+        });
+        let current = listener_snapshots(&DiscoveryOutput {
+            listeners: vec![listener("listener-a", ListenerState::Bound, 2)],
+            ..Default::default()
+        });
+        let events = diff_listener_snapshots(&previous, &current);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, DiscoveryEventKind::Changed));
+        let fields: Vec<_> = events[0]
+            .changes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.field.as_str())
+            .collect();
+        assert!(fields.contains(&"state"));
+        assert!(fields.contains(&"owners"));
     }
 
     #[tokio::test]

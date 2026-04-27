@@ -54,9 +54,9 @@ Acceptance:
 ## Phase 2 — sock_diag implementation as opt-in
 
 - [x] Add a feature flag `sock_diag` to `lazyadmin-adapter-procfs` (preferred to keeping discovery unified) or split into a sibling crate `lazyadmin-adapter-sockdiag`. Decision in PLAN-11 Phase 1 doc.
-- [x] Implement TCPv4/TCPv6/UDPv4/UDPv6 listener enumeration via sock_diag.
-- [x] Implement Unix-socket listener enumeration only if cheap; otherwise document gap and keep `/proc/net/unix` as the source.
-- [x] Map sock_diag results into the same `Listener` structs the procfs adapter produces; provenance kind = `SockDiag`.
+- [ ] Implement TCPv4/TCPv6/UDPv4/UDPv6 listener enumeration via sock_diag. Current code keeps sock_diag opt-in plumbing and falls back safely; native netlink enumeration is deferred.
+- [ ] Implement Unix-socket listener enumeration only if cheap; otherwise document gap and keep `/proc/net/unix` as the source.
+- [ ] Map native sock_diag results into the same `Listener` structs the procfs adapter produces; provenance kind = `SockDiag`.
 - [x] Orchestrator merge logic:
   - [x] `preferred = "proc"` (default): no sock_diag work; behavior identical to v0.1.
   - [x] `preferred = "sock_diag"`: sock_diag is primary; on any error, log `SOCK_DIAG_DOWNGRADED` warning and fall back to proc.
@@ -81,22 +81,22 @@ cargo run -p lazyadmin-cli -- doctor --json | jq '.subsystems.adapters.sockets'
 
 Implements the v0.1 carry-over from PLAN-00.
 
-- [x] Add helper `probe_v6_only(pid: i32, fd: u32) -> Result<bool, ProbeError>`:
-  - [x] Open `/proc/<pid>/fd/<n>` with `O_PATH` to obtain a kernel-side FD reference. If kernel/permissions disallow, fall through.
-  - [x] Use `getsockopt(IPPROTO_IPV6, IPV6_V6ONLY)` on the resulting FD via `nix::sys::socket::getsockopt`.
+- [ ] Add helper `probe_v6_only(pid: i32, fd: u32) -> Result<bool, ProbeError>`:
+  - [ ] Open `/proc/<pid>/fd/<n>` with `O_PATH` to obtain a kernel-side FD reference. If kernel/permissions disallow, fall through.
+  - [ ] Use `getsockopt(IPPROTO_IPV6, IPV6_V6ONLY)` on the resulting FD via `nix::sys::socket::getsockopt`.
   - [x] Return distinct error variants for `PermissionDenied`, `NotAvailable`, `KernelRejected`, so the caller can decide between `unknown` and `possible`.
 - [x] Integrate into `lazyadmin-adapter-procfs`:
   - [x] After socket-inode → PID/FD resolution (already in v0.1), if listener is IPv6 wildcard `[::]`, attempt `probe_v6_only` for each owning FD.
-  - [x] On success, set `dual_stack_state` to `confirmed_dual_stack` (V6ONLY=false) or `confirmed_v6_only` (V6ONLY=true).
+  - [ ] On success, set `dual_stack_state` to `confirmed_dual_stack` (V6ONLY=false) or `confirmed_v6_only` (V6ONLY=true).
   - [x] On failure, leave `dual_stack_state = possible` and keep the v0.1 `possible_dual_stack` warning.
   - [x] Hide warning when state is `confirmed_v6_only` (no dual-stack risk) or surface only the `[::]` warning for `confirmed_dual_stack`.
-- [x] Add IPv6 `[::]` listener to integration tests, including a test where probing fails (simulated permission error fixture).
+- [ ] Add IPv6 `[::]` listener to integration tests, including a test where probing fails (simulated permission error fixture).
 - [x] Update `docs/adapter-protocol.md` to note the new field and provenance.
 
 Tests:
 
-- [x] dual-stack confirmed listener: state `confirmed_dual_stack`, warnings present but tagged confirmed.
-- [x] v6-only listener: state `confirmed_v6_only`, dual-stack warning suppressed.
+- [ ] dual-stack confirmed listener: state `confirmed_dual_stack`, warnings present but tagged confirmed.
+- [ ] v6-only listener: state `confirmed_v6_only`, dual-stack warning suppressed.
 - [x] probe failure: state `possible`, warning unchanged from v0.1.
 - [x] non-IPv6 listener: state `not_applicable`.
 
@@ -113,7 +113,7 @@ cargo test -p lazyadmin-adapter-procfs dualstack
   - [x] De-duplicate event storms within a configurable debounce window (default 250ms).
 - [x] Implement bounded fan-in:
   - [x] Each adapter pushes events to its own task-local sender.
-  - [x] Orchestrator merges into a single `mpsc::channel(channel_capacity)`.
+  - [x] Orchestrator/core merges into a bounded fan-in queue honoring `channel_capacity`.
   - [x] On overflow, drop oldest, increment `events_dropped` counter, emit `EVENTS_DROPPED` warning at next snapshot.
 - [x] Provide a CLI surface for events:
   - [x] `lazyadmin events --json` streams normalized events as JSON Lines until interrupted.
@@ -159,20 +159,20 @@ cargo test -p lazyadmin-adapter-procfs watch_loop
 
 ## Phase 6 — container `watch()` via Docker `/events`
 
-- [x] Wire `bollard::system::events()` into `lazyadmin-adapter-container`:
-  - [x] Filter to `type=container`, `type=network`, `type=volume` as needed; v0.2 needs container only.
-  - [x] Map raw Docker events (`start`, `stop`, `die`, `restart`, `kill`, `update`) to `DiscoveryEvent`.
-  - [x] Trigger an inspect refresh for the affected container ID and emit a normalized `Changed` event with field-level diffs (state, restart policy, published ports).
-- [x] Implement reconnection policy:
-  - [x] Exponential backoff up to 30s.
-  - [x] On reconnect, immediately request a list-containers refresh to avoid missed deltas.
-- [x] Document the policy in `docs/discovery-events-decision.md`.
-- [x] Podman: only enable events if the Podman socket implements Docker-compatible `/events`; otherwise skip with explicit health note. No new mutating Podman work in v0.2.
+- [ ] Wire `bollard::system::events()` into `lazyadmin-adapter-container`:
+  - [ ] Filter to `type=container`, `type=network`, `type=volume` as needed; v0.2 needs container only.
+  - [ ] Map raw Docker events (`start`, `stop`, `die`, `restart`, `kill`, `update`) to `DiscoveryEvent`.
+  - [ ] Trigger an inspect refresh for the affected container ID and emit a normalized `Changed` event with field-level diffs (state, restart policy, published ports).
+- [ ] Implement reconnection policy:
+  - [ ] Exponential backoff up to 30s.
+  - [ ] On reconnect, immediately request a list-containers refresh to avoid missed deltas.
+- [x] Document the deferred policy in `docs/discovery-events-decision.md`.
+- [ ] Podman: only enable events if the Podman socket implements Docker-compatible `/events`; otherwise skip with explicit health note. No new mutating Podman work in v0.2.
 
 Tests:
 
-- [x] fixture-driven event stream through bollard mock; verify mapping.
-- [x] integration test (ignored unless Docker available) starting and stopping a small busybox container.
+- [ ] fixture-driven event stream through bollard mock; verify mapping.
+- [ ] integration test (ignored unless Docker available) starting and stopping a small busybox container.
 
 Validation:
 
@@ -182,19 +182,19 @@ cargo test -p lazyadmin-adapter-container events
 
 ## Phase 7 — systemd `watch()` via D-Bus PropertiesChanged
 
-- [x] Wire `zbus` `PropertiesChanged` signal subscription on `org.freedesktop.systemd1` for:
-  - [x] units already represented in the graph (filter by unit path/name set).
-  - [x] manager-level `JobNew`/`JobRemoved` for activity hints.
-- [x] On signal, re-fetch unit properties and emit `Changed` events; on `JobRemoved` with `unit not found`, emit `Removed`.
-- [x] Cap refetch concurrency to avoid dogpile.
-- [x] Health: report number of subscribed units, missed signals (if `zbus` exposes that), and last-event timestamp.
-- [x] Allow disabling via `adapters.systemd.events_enabled` (default `true`).
+- [ ] Wire `zbus` `PropertiesChanged` signal subscription on `org.freedesktop.systemd1` for:
+  - [ ] units already represented in the graph (filter by unit path/name set).
+  - [ ] manager-level `JobNew`/`JobRemoved` for activity hints.
+- [ ] On signal, re-fetch unit properties and emit `Changed` events; on `JobRemoved` with `unit not found`, emit `Removed`.
+- [ ] Cap refetch concurrency to avoid dogpile.
+- [ ] Health: report number of subscribed units, missed signals (if `zbus` exposes that), and last-event timestamp.
+- [ ] Allow disabling via `adapters.systemd.events_enabled` (default `true`).
 
 Tests:
 
-- [x] mocked signal triggers re-fetch and `Changed` event.
-- [x] disabled config -> watch returns `None` and procfs cgroup correlation still works in poll mode.
-- [x] integration test (ignored) with a user systemd target unit.
+- [ ] mocked signal triggers re-fetch and `Changed` event.
+- [x] disabled/deferred config -> watch returns `None` and procfs cgroup correlation still works in poll mode.
+- [ ] integration test (ignored) with a user systemd target unit.
 
 Validation:
 
@@ -242,8 +242,8 @@ cargo test --workspace -- --ignored discovery_events_smoke
 ## Done criteria
 
 - [x] `Listener.dual_stack_state` is populated honestly: `confirmed_*` only when proven, `possible` otherwise.
-- [x] sock_diag adapter exists, opt-in, with parity tests passing against fixtures, and a documented decision record.
-- [x] `watch()` is implemented for procfs, container, and systemd adapters, with shutdown, reconnection, and bounded fan-in.
+- [ ] sock_diag adapter exists, opt-in, with parity tests passing against fixtures, and a documented decision record. Opt-in plumbing/fallback exists; native netlink enumeration and meaningful live parity remain deferred.
+- [ ] `watch()` is implemented for procfs, container, and systemd adapters, with shutdown, reconnection, and bounded fan-in. Procfs plus core bounded fan-in are implemented; container/systemd subscriptions are intentionally deferred and unavailable in v0.2.
 - [x] `lazyadmin events --json` streams `lazyadmin.discovery_event.v1` payloads.
 - [x] Doctor reports new subsystems and degraded states.
 - [x] No JSON contract regressions; old consumers continue to work without changes.
@@ -252,9 +252,9 @@ cargo test --workspace -- --ignored discovery_events_smoke
 ## Implementation notes
 
 - Completed as a v0.2 spike-safe discovery upgrade. Defaults remain unchanged (`adapters.sockets.preferred = "proc"`).
-- Native netlink sock_diag enumeration, Docker `/events` reconnection, and full systemd `PropertiesChanged` fan-out are documented limitations; the implemented paths validate opt-in plumbing, fallback/degraded reporting, event schema, CLI surfacing, and watch stream contracts without requiring live optional dependencies in CI.
+- Native netlink sock_diag enumeration, Docker `/events` reconnection, and full systemd `PropertiesChanged` fan-out are documented limitations. Container/systemd `watch()` now returns `None` rather than heartbeat stubs so PLAN-12 does not depend on unavailable streams.
 - Per-FD IPv6 probing never emits `confirmed_*` unless a future probe implementation returns direct evidence; current fallback labels IPv6 wildcard as `possible` and keeps the warning.
 
 ## Handoff notes for next plan
 
-PLAN-12 consumes the new `DiscoveryEvent` channel directly: the TUI snapshot controller subscribes to events and redraws on event arrival or tick, whichever is first. PLAN-12 does not need to touch any adapter code. If event arrival proves bursty in real environments, PLAN-12 may add a per-view debounce on top of the channel; do not push that debounce back into adapters.
+PLAN-12 may consume the new core `DiscoveryEvent` fan-in directly for procfs socket/listener changes. Container and systemd watch streams are unavailable in v0.2; PLAN-12 must continue polling snapshots for those subsystems until their native subscriptions are implemented. If event arrival proves bursty in real environments, PLAN-12 may add a per-view debounce on top of the channel; do not push that debounce back into adapters.

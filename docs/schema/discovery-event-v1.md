@@ -137,8 +137,8 @@ Common fields:
 
 When the event channel overflows:
 - Oldest events are dropped
-- `events_dropped` counter in `Snapshot.metadata` is incremented
-- An `EVENTS_DROPPED` warning is emitted at the next snapshot
+- The fan-in `events_dropped` counter is incremented
+- Runtimes that own a long-lived event fan-in should copy that count into `Snapshot.metadata.events_dropped`, doctor `subsystems.events.dropped`, and an `EVENTS_DROPPED` warning on the next snapshot
 
 ## Adapter-Specific Notes
 
@@ -148,13 +148,11 @@ When the event channel overflows:
 - Heartbeat every 5s when no changes
 
 ### container (Docker)
-- Subscribes to Docker `/events` API
-- Maps Docker events (`start`, `stop`, `die`, `restart`) to discovery events
-- Reconnects with exponential backoff up to 30s
-- Refreshes container state on event arrival
+- v0.2 does not expose a container `watch()` stream.
+- Docker `/events`, reconnect/backoff, and inspect-refresh mapping are deferred.
+- Consumers should use snapshot polling for container state until a later plan wires the Docker event API.
 
 ### systemd
-- Subscribes to D-Bus `PropertiesChanged` signals
-- Filters to units already in the graph
-- Caps refetch concurrency to avoid dogpile
-- Can be disabled via `adapters.systemd.events_enabled`
+- v0.2 does not expose a systemd `watch()` stream.
+- D-Bus `PropertiesChanged`, `JobNew`, and `JobRemoved` subscriptions are deferred.
+- Consumers should use snapshot polling for systemd state until a later plan wires D-Bus events.
