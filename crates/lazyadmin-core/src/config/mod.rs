@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     path::{Path, PathBuf},
 };
@@ -18,6 +18,58 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiConfig {
     pub refresh_interval_ms: u64,
+    #[serde(default)]
+    pub theme: UiThemeConfig,
+    #[serde(default)]
+    pub keybindings: UiKeybindingsConfig,
+    #[serde(default)]
+    pub refresh: UiRefreshConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiThemeConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiKeybindingsConfig {
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiRefreshConfig {
+    #[serde(default = "default_tick_ms")]
+    pub tick_ms: u64,
+    #[serde(default = "default_event_debounce_ms")]
+    pub event_debounce_ms: u64,
+    #[serde(default = "default_max_redraw_hz")]
+    pub max_redraw_hz: u64,
+}
+
+impl Default for UiRefreshConfig {
+    fn default() -> Self {
+        Self {
+            tick_ms: default_tick_ms(),
+            event_debounce_ms: default_event_debounce_ms(),
+            max_redraw_hz: default_max_redraw_hz(),
+        }
+    }
+}
+
+fn default_tick_ms() -> u64 {
+    500
+}
+fn default_event_debounce_ms() -> u64 {
+    100
+}
+fn default_max_redraw_hz() -> u64 {
+    30
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortsConfig {
@@ -109,6 +161,9 @@ impl Default for Config {
         Self {
             ui: UiConfig {
                 refresh_interval_ms: 1000,
+                theme: UiThemeConfig::default(),
+                keybindings: UiKeybindingsConfig::default(),
+                refresh: UiRefreshConfig::default(),
             },
             ports: PortsConfig {
                 common: vec![3000, 5173, 5432, 6379, 8080],
@@ -195,6 +250,12 @@ impl Config {
     }
     fn expand_paths(&mut self) {
         self.projects.roots = self.projects.roots.iter().map(|p| expand_path(p)).collect();
+        if let Some(path) = self.ui.theme.path.as_deref() {
+            self.ui.theme.path = Some(expand_path(path));
+        }
+        if let Some(path) = self.ui.keybindings.path.as_deref() {
+            self.ui.keybindings.path = Some(expand_path(path));
+        }
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -205,12 +266,262 @@ impl Config {
             self.adapters.events.channel_capacity > 0,
             "adapters.events.channel_capacity must be greater than 0"
         );
+        anyhow::ensure!(
+            (50..=60_000).contains(&self.ui.refresh.tick_ms),
+            "ui.refresh.tick_ms must be between 50 and 60000"
+        );
+        anyhow::ensure!(
+            (0..=5_000).contains(&self.ui.refresh.event_debounce_ms),
+            "ui.refresh.event_debounce_ms must be between 0 and 5000"
+        );
+        anyhow::ensure!(
+            (1..=120).contains(&self.ui.refresh.max_redraw_hz),
+            "ui.refresh.max_redraw_hz must be between 1 and 120"
+        );
+        if self.ui.theme.name.is_some() && self.ui.theme.path.is_some() {
+            anyhow::bail!("only one of ui.theme.name or ui.theme.path may be set");
+        }
+        keybindings::ResolvedKeybindings::from_config(self)?;
         let mut seen = HashSet::new();
         for p in &self.projects.roots {
             let key = p.to_string_lossy().to_string();
             anyhow::ensure!(seen.insert(key), "duplicate project root: {}", p.display());
         }
         Ok(())
+    }
+}
+
+pub mod keybindings {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum KeybindAction {
+        Quit,
+        Help,
+        NextPane,
+        PrevPane,
+        OpenPalette,
+        Filter,
+        ToggleFilter,
+        ToggleSystem,
+        Inspect,
+        Logs,
+        Ports,
+        ProcessTree,
+        Metrics,
+        Restart,
+        Stop,
+        FreePort,
+        Kill,
+        Open,
+        Edit,
+        CopyDiagnostic,
+        Run,
+        Refresh,
+    }
+
+    impl KeybindAction {
+        pub fn as_name(self) -> &'static str {
+            match self {
+                Self::Quit => "quit",
+                Self::Help => "help",
+                Self::NextPane => "next_pane",
+                Self::PrevPane => "prev_pane",
+                Self::OpenPalette => "open_palette",
+                Self::Filter => "filter",
+                Self::ToggleFilter => "toggle_filter",
+                Self::ToggleSystem => "toggle_system",
+                Self::Inspect => "inspect",
+                Self::Logs => "logs",
+                Self::Ports => "ports",
+                Self::ProcessTree => "process_tree",
+                Self::Metrics => "metrics",
+                Self::Restart => "restart",
+                Self::Stop => "stop",
+                Self::FreePort => "free_port",
+                Self::Kill => "kill",
+                Self::Open => "open",
+                Self::Edit => "edit",
+                Self::CopyDiagnostic => "copy_diag",
+                Self::Run => "run",
+                Self::Refresh => "refresh",
+            }
+        }
+        pub fn all() -> &'static [Self] {
+            &[
+                Self::Quit,
+                Self::Help,
+                Self::NextPane,
+                Self::PrevPane,
+                Self::OpenPalette,
+                Self::Filter,
+                Self::ToggleFilter,
+                Self::ToggleSystem,
+                Self::Inspect,
+                Self::Logs,
+                Self::Ports,
+                Self::ProcessTree,
+                Self::Metrics,
+                Self::Restart,
+                Self::Stop,
+                Self::FreePort,
+                Self::Kill,
+                Self::Open,
+                Self::Edit,
+                Self::CopyDiagnostic,
+                Self::Run,
+                Self::Refresh,
+            ]
+        }
+        pub fn parse(name: &str) -> Option<Self> {
+            Self::all().iter().copied().find(|a| a.as_name() == name)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct KeybindingsFile {
+        #[serde(default = "default_inherit")]
+        pub inherit: String,
+        #[serde(default)]
+        pub overrides: BTreeMap<String, String>,
+    }
+    fn default_inherit() -> String {
+        "default".into()
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ResolvedKeybindings {
+        pub bindings: BTreeMap<String, Vec<String>>,
+    }
+
+    impl ResolvedKeybindings {
+        pub fn default_map() -> BTreeMap<KeybindAction, Vec<String>> {
+            use KeybindAction::*;
+            BTreeMap::from([
+                (Quit, vec!["q".into(), "ctrl+c".into()]),
+                (Help, vec!["?".into()]),
+                (NextPane, vec!["tab".into()]),
+                (PrevPane, vec!["shift+tab".into()]),
+                (OpenPalette, vec![":".into()]),
+                (Filter, vec!["/".into()]),
+                (ToggleFilter, vec![]),
+                (ToggleSystem, vec!["S".into()]),
+                (Inspect, vec!["enter".into()]),
+                (Logs, vec!["l".into()]),
+                (Ports, vec!["p".into()]),
+                (ProcessTree, vec!["t".into()]),
+                (Metrics, vec!["m".into()]),
+                (Restart, vec!["r".into()]),
+                (Stop, vec!["s".into()]),
+                (FreePort, vec!["f".into()]),
+                (Kill, vec!["k".into()]),
+                (Open, vec!["o".into()]),
+                (Edit, vec!["e".into()]),
+                (CopyDiagnostic, vec!["y".into()]),
+                (Run, vec!["R".into()]),
+                (Refresh, vec!["F5".into()]),
+            ])
+        }
+        pub fn from_config(cfg: &Config) -> anyhow::Result<Self> {
+            let mut overrides = cfg.ui.keybindings.overrides.clone();
+            if let Some(path) = &cfg.ui.keybindings.path {
+                let text = std::fs::read_to_string(path)?;
+                let file: KeybindingsFile = toml::from_str(&text)?;
+                if file.inherit != "default" {
+                    anyhow::bail!("unsupported keybindings inherit preset: {}", file.inherit);
+                }
+                overrides.extend(file.overrides);
+            }
+            let mut map = Self::default_map();
+            for (name, spec) in overrides {
+                let action = KeybindAction::parse(&name).ok_or_else(|| {
+                    anyhow::anyhow!("unknown keybinding action `{name}`{}", suggestion(&name))
+                })?;
+                validate_key_spec(&spec)?;
+                map.insert(action, vec![spec]);
+            }
+            let mut seen: HashMap<String, KeybindAction> = HashMap::new();
+            for (action, specs) in &map {
+                for spec in specs {
+                    let norm = normalize_key(spec);
+                    if let Some(prev) = seen.insert(norm.clone(), *action) {
+                        if prev != *action {
+                            anyhow::bail!(
+                                "duplicate keybinding `{spec}` for {} and {}",
+                                prev.as_name(),
+                                action.as_name()
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(Self {
+                bindings: map
+                    .into_iter()
+                    .map(|(a, b)| (a.as_name().into(), b))
+                    .collect(),
+            })
+        }
+    }
+
+    pub fn validate_key_spec(spec: &str) -> anyhow::Result<()> {
+        let s = spec.trim();
+        anyhow::ensure!(!s.is_empty(), "keybinding spec cannot be empty");
+        let lower = s.to_ascii_lowercase();
+        let known = [
+            "tab",
+            "shift+tab",
+            "enter",
+            "esc",
+            "f5",
+            "up",
+            "down",
+            "left",
+            "right",
+        ];
+        if known.contains(&lower.as_str()) || lower.starts_with("ctrl+") || s.chars().count() == 1 {
+            Ok(())
+        } else {
+            anyhow::bail!("unsupported keybinding spec `{spec}`")
+        }
+    }
+    fn normalize_key(spec: &str) -> String {
+        let trimmed = spec.trim();
+        if trimmed.chars().count() == 1 {
+            trimmed.to_string()
+        } else {
+            trimmed.to_ascii_lowercase()
+        }
+    }
+    fn suggestion(name: &str) -> String {
+        let mut best = None;
+        for action in KeybindAction::all() {
+            let d = levenshtein(name, action.as_name());
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((action.as_name(), d));
+            }
+        }
+        best.filter(|(_, d)| *d <= 5)
+            .map(|(s, _)| format!("; did you mean `{s}`?"))
+            .unwrap_or_default()
+    }
+    fn levenshtein(a: &str, b: &str) -> usize {
+        let mut costs: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut last = i;
+            costs[0] = i + 1;
+            for (j, cb) in b.chars().enumerate() {
+                let old = costs[j + 1];
+                costs[j + 1] = if ca == cb {
+                    last
+                } else {
+                    1 + last.min(costs[j]).min(costs[j + 1])
+                };
+                last = old;
+            }
+        }
+        *costs.last().unwrap_or(&0)
     }
 }
 fn default_config_path() -> Option<PathBuf> {
@@ -248,5 +559,41 @@ mod tests {
     #[test]
     fn defaults_validate() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn keybindings_default_and_overrides_validate() {
+        let cfg = Config::default();
+        let resolved = keybindings::ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(resolved.bindings["quit"], vec!["q", "ctrl+c"]);
+        let mut cfg = Config::default();
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("quit".into(), "Q".into());
+        let resolved = keybindings::ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(resolved.bindings["quit"], vec!["Q"]);
+    }
+
+    #[test]
+    fn keybindings_reject_duplicate_and_unknown() {
+        let mut cfg = Config::default();
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("quit".into(), "o".into());
+        let err = keybindings::ResolvedKeybindings::from_config(&cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate keybinding"));
+        let mut cfg = Config::default();
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("quite".into(), "Q".into());
+        let err = keybindings::ResolvedKeybindings::from_config(&cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did you mean `quit`"));
     }
 }

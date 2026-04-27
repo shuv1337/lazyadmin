@@ -1506,6 +1506,8 @@ dependencies = [
 name = "lazyadmin-tui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
  "clap",
  "color-eyre",
  "crossterm 0.29.0",
@@ -1515,7 +1517,9 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "toml",
  "tracing",
 ]
 

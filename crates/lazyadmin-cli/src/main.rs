@@ -63,6 +63,7 @@ enum LogFormat {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    Tui(TuiArgs),
     Port {
         port: u16,
     },
@@ -91,6 +92,14 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[derive(Args, Debug)]
+struct TuiArgs {
+    #[arg(long)]
+    headless: bool,
+    #[arg(long)]
+    theme: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -215,13 +224,19 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             print_json(&snap)?;
             Ok(())
         }
+        Some(Command::Tui(args)) => run_tui_command(args, cli.json, cli.config.as_deref()).await,
         Some(Command::Diff(args)) => run_diff(args, cli.json).await,
         Some(Command::Config {
             command: ConfigCommand::Check,
         }) => {
             let cfg = Config::load(cli.config.as_deref()).map_err(|e| AppError::Other(eyre!(e)))?;
             if cli.json {
-                print_json(&serde_json::json!({"ok": true, "config": cfg}))?;
+                let keybindings =
+                    lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)
+                        .map_err(|e| AppError::Other(eyre!(e)))?;
+                print_json(
+                    &serde_json::json!({"ok": true, "config": cfg, "keybindings": keybindings}),
+                )?;
             } else {
                 println!("config ok");
             }
@@ -259,6 +274,35 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         }
         Some(Command::Free(args)) => run_free(args, cli.json).await,
     }
+}
+
+async fn run_tui_command(
+    args: TuiArgs,
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
+    let snap = build_snapshot(config_path).await?;
+    let theme_name = args.theme.as_deref().or(cfg.ui.theme.name.as_deref());
+    let (theme, _hint) = lazyadmin_tui::Theme::load(theme_name, cfg.ui.theme.path.as_deref())
+        .map_err(|e| AppError::Other(eyre!(e)))?
+        .downgrade_for_colors(256);
+    let keybindings = lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)
+        .map_err(|e| AppError::Other(eyre!(e)))?;
+    if args.headless {
+        let dump = lazyadmin_tui::headless_dump(&snap, 120, theme, keybindings);
+        if json {
+            print_json(&dump)?;
+        } else {
+            println!(
+                "lazyadmin TUI headless: {:?} panes={}",
+                dump.layout.mode,
+                dump.panes.len()
+            );
+        }
+        return Ok(());
+    }
+    lazyadmin_tui::run_tui(snap).await.map_err(AppError::Other)
 }
 
 async fn run_events(

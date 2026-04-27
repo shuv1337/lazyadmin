@@ -56,14 +56,14 @@ lazyadmin diff /tmp/before.json - --json
 
 ## TUI
 
-Run `lazyadmin` with no args to launch the Ratatui MVP. Responsive behavior:
+Run `lazyadmin` with no args to launch the Ratatui TUI, or use `lazyadmin tui --headless --json` for automation/debugging without entering raw terminal mode. Responsive behavior:
 
 - `>=100` columns: Groups, Workloads/Listeners, Inspector panes
 - `80–99` columns: inspector tab
 - `60–79` columns: single pane with view switching
 - `<60` columns: refuses with CLI hints
 
-Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, and `q`.
+Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `m`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, and `q`. Themes and keybindings are configurable; see [`docs/tui.md`](docs/tui.md), [`docs/themes.md`](docs/themes.md), and [`docs/keybindings.md`](docs/keybindings.md).
 
 ## Agent skill
 
@@ -80,6 +80,9 @@ Agents should check `command -v lazyadmin && lazyadmin doctor --json` once per s
 - [`docs/spec.md`](docs/spec.md)
 - [`docs/adapter-protocol.md`](docs/adapter-protocol.md)
 - [`docs/action-safety.md`](docs/action-safety.md)
+- [`docs/tui.md`](docs/tui.md)
+- [`docs/themes.md`](docs/themes.md)
+- [`docs/keybindings.md`](docs/keybindings.md)
 - [`docs/troubleshooting.md`](docs/troubleshooting.md)
 - [`docs/agent-integration.md`](docs/agent-integration.md)
 - [`docs/schema/snapshot-v1.md`](docs/schema/snapshot-v1.md)

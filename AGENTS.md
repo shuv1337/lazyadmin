@@ -7,7 +7,7 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
 - `crates/lazyadmin-cli` — Clap command skeleton with `export`, `diff`, `config check`, read-only views, `doctor`, `logs`, `free`, and pause-registry commands. Runtime mutation is conservative and direct-process free validates `ProcessKey` before signaling.
-- `crates/lazyadmin-tui` contains the Ratatui MVP foundation: responsive view models, keymap, command palette entries, terminal panic guard, and non-blocking snapshot-controller architecture. View-model tests cover 120/90/70/50 column modes; avoid launching the TUI interactively in automation.
+- `crates/lazyadmin-tui` contains the Ratatui interface: responsive rendering of core view-models, Process Tree and Metrics views, theme/keybinding support, terminal panic guard, and live-refresh coalescing. View/render tests cover 120/90/70/50 column modes; avoid launching the TUI interactively in automation and prefer `lazyadmin tui --headless --json`.
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
 - `docs/schema/` and `testdata/snapshots/` — initial public JSON contract docs and fixtures.
@@ -33,6 +33,8 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - Exact IPv6 dual-stack (`IPV6_V6ONLY`) detection is not proven from `/proc/net` alone. v0.1 should label it best-effort unless the adapter can prove the per-socket option.
 - PLAN-11 keeps sock_diag opt-in (`adapters.sockets.preferred = "proc"` by default). The v0.2 implementation has a feature-gated spike-safe sock_diag path for fallback/parity/provenance plumbing; native netlink enumeration remains deferred until live parity is proven.
 - Discovery events use `lazyadmin.discovery_event.v1`. In v0.2, procfs watch is debounced polling through the bounded fan-in; container/systemd watch streams are intentionally unavailable and should be refreshed by snapshot polling until native Docker `/events` and systemd D-Bus subscriptions land.
+- PLAN-12 TUI live refresh treats DiscoveryEvent messages as hints only; snapshot polling remains the authoritative state source, especially for container and systemd data.
+- TUI config knobs live under `[ui.theme]`, `[ui.keybindings]`, and `[ui.refresh]` (`tick_ms`, `event_debounce_ms`, `max_redraw_hz`). `lazyadmin config check --json` includes resolved keybindings for automation.
 - Event overflow counts are reusable via the core `EventDropCounter`; long-lived runtimes should pass that counter into snapshot/doctor builders. Stateless CLI `doctor`/`export` runs cannot observe historical fan-in drops and report that limitation explicitly.
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to v0.2, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 
@@ -62,6 +64,13 @@ cargo run -p lazyadmin-cli -- diff testdata/snapshots/empty.json testdata/snapsh
 cargo run -p lazyadmin-cli -- config check --json
 cargo run -p lazyadmin-cli -- doctor --json
 cargo run -p lazyadmin-cli -- events --once --json
+cargo run -p lazyadmin-cli -- tui --headless --json
+cargo test -p lazyadmin-tui render_views
+cargo test -p lazyadmin-tui live_refresh
+cargo test -p lazyadmin-tui process_tree
+cargo test -p lazyadmin-tui metrics
+cargo test -p lazyadmin-tui theme
+cargo test -p lazyadmin-tui keybindings
 ```
 
 Later plans may add Linux integration tests such as:
