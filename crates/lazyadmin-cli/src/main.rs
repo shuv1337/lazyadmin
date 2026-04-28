@@ -359,6 +359,34 @@ fn validate_tui_theme_config(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn event_streams_for_config(
+    cfg: &Config,
+) -> Vec<futures::stream::BoxStream<'static, lazyadmin_core::model::DiscoveryEvent>> {
+    if !cfg.adapters.events.enabled {
+        return Vec::new();
+    }
+    let mut streams = Vec::new();
+    if cfg.adapters.sockets.enabled {
+        let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
+        if let Some(stream) = procfs.watch().await {
+            streams.push(stream);
+        }
+    }
+    if cfg.adapters.container.enabled && cfg.adapters.container.events_enabled {
+        let container = lazyadmin_adapter_container::ContainerAdapter::new();
+        if let Some(stream) = container.watch().await {
+            streams.push(stream);
+        }
+    }
+    if cfg.adapters.systemd.enabled && cfg.adapters.systemd.events_enabled {
+        let systemd = lazyadmin_adapter_systemd::SystemdAdapter::new(true);
+        if let Some(stream) = systemd.watch().await {
+            streams.push(stream);
+        }
+    }
+    streams
+}
+
 fn spawn_tui_refresh_task(
     cfg: Config,
     config_path: Option<PathBuf>,
@@ -366,15 +394,10 @@ fn spawn_tui_refresh_task(
     event_tx: tokio::sync::mpsc::Sender<lazyadmin_core::model::DiscoveryEvent>,
 ) {
     tokio::spawn(async move {
-        let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
-        let procfs_stream = if cfg.adapters.events.enabled {
-            procfs.watch().await
-        } else {
-            None
-        };
-        let has_events = procfs_stream.is_some();
+        let streams = event_streams_for_config(&cfg).await;
+        let has_events = !streams.is_empty();
         let (mut events, drops) = EventFanIn::new(
-            procfs_stream.into_iter().collect(),
+            streams,
             cfg.adapters.events.channel_capacity,
             Duration::from_millis(cfg.ui.refresh.event_debounce_ms),
         );
@@ -432,13 +455,12 @@ async fn run_events(
     if !cfg.adapters.events.enabled {
         return unavailable("discovery events are disabled by config");
     }
-    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
-    let procfs_stream = procfs
-        .watch()
-        .await
-        .ok_or_else(|| AppError::Unavailable("procfs watch stream unavailable".into()))?;
+    let streams = event_streams_for_config(&cfg).await;
+    if streams.is_empty() {
+        return unavailable("no discovery event streams are available");
+    }
     let (mut stream, _drops) = EventFanIn::new(
-        vec![procfs_stream],
+        streams,
         cfg.adapters.events.channel_capacity,
         Duration::from_millis(250),
     );
@@ -493,7 +515,8 @@ async fn build_snapshot_with_event_drops(
     let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
     let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
     let tracked = lazyadmin_adapter_tracked::TrackedAdapter::new();
-    let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
+    let systemd =
+        lazyadmin_adapter_systemd::SystemdAdapter::new(cfg.adapters.systemd.events_enabled);
     let container = lazyadmin_adapter_container::ContainerAdapter::new();
     let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg.clone());
     let mut outputs = Vec::new();
@@ -945,7 +968,8 @@ async fn build_doctor_report(cfg: Config, event_drops: Option<&EventDropCounter>
     let dual_stack_errors = dual_stack_attempted.saturating_sub(dual_stack_succeeded);
     let container = lazyadmin_adapter_container::ContainerAdapter::new();
     let container_health = container.health().await;
-    let systemd = lazyadmin_adapter_systemd::SystemdAdapter;
+    let systemd =
+        lazyadmin_adapter_systemd::SystemdAdapter::new(cfg.adapters.systemd.events_enabled);
     let systemd_health = systemd.health().await;
     let observable_event_drops = event_drops.map(EventDropCounter::dropped);
     DoctorReport::new(checks).with_subsystems(DoctorSubsystems {
@@ -984,8 +1008,10 @@ async fn build_doctor_report(cfg: Config, event_drops: Option<&EventDropCounter>
                     },
                     DoctorAdapterWatch {
                         adapter: "container".into(),
-                        state: if container_health.available {
-                            "poll_only_events_deferred"
+                        state: if !cfg.adapters.container.events_enabled {
+                            "disabled"
+                        } else if container_health.available && container.capabilities().watching {
+                            "docker_events"
                         } else {
                             "unavailable"
                         }
@@ -995,8 +1021,10 @@ async fn build_doctor_report(cfg: Config, event_drops: Option<&EventDropCounter>
                     },
                     DoctorAdapterWatch {
                         adapter: "systemd".into(),
-                        state: if systemd_health.available {
-                            "poll_only_events_deferred"
+                        state: if !cfg.adapters.systemd.events_enabled {
+                            "disabled"
+                        } else if systemd_health.available && systemd.capabilities().watching {
+                            "dbus_signals"
                         } else {
                             "unavailable"
                         }

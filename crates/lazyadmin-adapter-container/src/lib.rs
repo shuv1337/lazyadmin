@@ -1,9 +1,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 use async_trait::async_trait;
-use bollard::{Docker, container::ListContainersOptions};
+use bollard::{
+    Docker,
+    container::ListContainersOptions,
+    models::{EventMessage, EventMessageTypeEnum},
+    system::EventsOptions,
+};
 use chrono::Utc;
-use futures::stream::BoxStream;
+use futures::{StreamExt, channel::mpsc, stream::BoxStream};
 use lazyadmin_core::{
     graph::{
         AdapterCapabilities, AdapterHealth, DiscoveryAdapter, DiscoveryContext, DiscoveryOutput,
@@ -11,7 +16,7 @@ use lazyadmin_core::{
     model::*,
 };
 use serde::Deserialize;
-use std::{collections::HashMap, env, path::PathBuf, time::Instant};
+use std::{collections::HashMap, env, path::PathBuf, time::Duration, time::Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContainerRuntimeKind {
@@ -174,7 +179,7 @@ impl DiscoveryAdapter for ContainerAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             polling: true,
-            watching: false,
+            watching: true,
         }
     }
     async fn health(&self) -> AdapterHealth {
@@ -266,7 +271,80 @@ impl DiscoveryAdapter for ContainerAdapter {
 
     #[tracing::instrument(name = "adapter.watch.start", skip_all, fields(adapter = "container"))]
     async fn watch(&self) -> Option<BoxStream<'static, DiscoveryEvent>> {
-        None
+        let endpoints = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| {
+                endpoint.source == "$DOCKER_HOST"
+                    || endpoint.socket.as_ref().is_some_and(|path| path.exists())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if endpoints.is_empty() {
+            return None;
+        }
+        let (tx, rx) = mpsc::unbounded();
+        for endpoint in endpoints {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                watch_container_endpoint(endpoint, tx).await;
+            });
+        }
+        drop(tx);
+        Some(Box::pin(rx))
+    }
+}
+
+async fn watch_container_endpoint(
+    endpoint: RuntimeEndpoint,
+    tx: mpsc::UnboundedSender<DiscoveryEvent>,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match docker_from_endpoint(&endpoint) {
+            Ok(docker) => {
+                let _ = tx.unbounded_send(DiscoveryEvent::heartbeat("container"));
+                let mut filters = HashMap::<String, Vec<String>>::new();
+                filters.insert("type".into(), vec!["container".into()]);
+                let mut stream = docker.events(Some(EventsOptions::<String> {
+                    filters,
+                    ..Default::default()
+                }));
+                while let Some(next) = stream.next().await {
+                    match next {
+                        Ok(message) => {
+                            backoff = Duration::from_secs(1);
+                            if let Some(event) = docker_event_to_discovery(&message) {
+                                tracing::debug!(name = "adapter.watch.event", adapter = "container", kind = ?event.kind);
+                                let _ = tx.unbounded_send(event);
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.unbounded_send(DiscoveryEvent::degraded(
+                                "container",
+                                format!(
+                                    "container event stream failed for {}: {err}",
+                                    endpoint.source
+                                ),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = tx.unbounded_send(DiscoveryEvent::degraded(
+                    "container",
+                    format!(
+                        "container event connection failed for {}: {err}",
+                        endpoint.source
+                    ),
+                ));
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+        let _ = tx.unbounded_send(DiscoveryEvent::heartbeat("container"));
     }
 }
 
@@ -494,9 +572,60 @@ fn project_from_root(root: PathBuf, e: &str) -> Project {
     }
 }
 
+pub fn docker_event_to_discovery(message: &EventMessage) -> Option<DiscoveryEvent> {
+    if message.typ != Some(EventMessageTypeEnum::CONTAINER) {
+        return None;
+    }
+    let action = message.action.as_deref()?;
+    let actor = message.actor.as_ref()?;
+    let id = actor.id.as_deref()?;
+    let entity = EntityRef::Workload(workload_ref_from_event(id, actor.attributes.as_ref()));
+    let mut event = match action {
+        "create" | "start" => DiscoveryEvent::added(entity),
+        "destroy" | "die" | "kill" | "oom" | "stop" => DiscoveryEvent::removed(entity),
+        "exec_create" | "exec_start" => return None,
+        "health_status" | "pause" | "rename" | "resize" | "restart" | "unpause" | "update" => {
+            DiscoveryEvent::changed(
+                entity,
+                vec![FieldChange {
+                    field: "container.action".into(),
+                    old: String::new(),
+                    new: action.into(),
+                }],
+            )
+        }
+        other => DiscoveryEvent::changed(
+            entity,
+            vec![FieldChange {
+                field: "container.action".into(),
+                old: String::new(),
+                new: other.into(),
+            }],
+        ),
+    };
+    event.adapter = Some("container".into());
+    Some(event)
+}
+
+fn workload_ref_from_event(id: &str, attrs: Option<&HashMap<String, String>>) -> WorkloadId {
+    if let Some(attrs) = attrs {
+        let project = attrs
+            .get("com.docker.compose.project")
+            .or_else(|| attrs.get("io.podman.compose.project"));
+        let service = attrs
+            .get("com.docker.compose.service")
+            .or_else(|| attrs.get("io.podman.compose.service"));
+        if let Some((project, service)) = project.zip(service) {
+            return WorkloadId::new(format!("compose:{project}/{service}"));
+        }
+    }
+    WorkloadId::new(format!("container:{}", &id[..12.min(id.len())]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bollard::models::EventActor;
     #[test]
     fn endpoint_config() {
         assert!(
@@ -530,11 +659,60 @@ mod tests {
         assert_eq!(out.workloads[0].id.0, "compose:acme/web");
     }
 
+    #[test]
+    fn events_map_container_actions() {
+        let mut attrs = HashMap::new();
+        attrs.insert("com.docker.compose.project".into(), "acme".into());
+        attrs.insert("com.docker.compose.service".into(), "web".into());
+        let message = EventMessage {
+            typ: Some(EventMessageTypeEnum::CONTAINER),
+            action: Some("restart".into()),
+            actor: Some(EventActor {
+                id: Some("abcdef1234567890".into()),
+                attributes: Some(attrs),
+            }),
+            ..Default::default()
+        };
+        let event = docker_event_to_discovery(&message).unwrap();
+        assert_eq!(event.adapter.as_deref(), Some("container"));
+        assert!(matches!(event.kind, DiscoveryEventKind::Changed));
+        assert_eq!(
+            event.entity,
+            Some(EntityRef::Workload(WorkloadId::new("compose:acme/web")))
+        );
+
+        let message = EventMessage {
+            typ: Some(EventMessageTypeEnum::CONTAINER),
+            action: Some("die".into()),
+            actor: Some(EventActor {
+                id: Some("abcdef1234567890".into()),
+                attributes: None,
+            }),
+            ..Default::default()
+        };
+        let event = docker_event_to_discovery(&message).unwrap();
+        assert!(matches!(event.kind, DiscoveryEventKind::Removed));
+        assert_eq!(
+            event.entity,
+            Some(EntityRef::Workload(WorkloadId::new(
+                "container:abcdef123456"
+            )))
+        );
+    }
+
     #[tokio::test]
-    async fn events_watch_stream_is_deferred() {
+    async fn events_watch_stream_is_native_when_endpoint_exists() {
         use lazyadmin_core::graph::DiscoveryAdapter;
-        let adapter = ContainerAdapter::new();
-        assert!(adapter.watch().await.is_none());
-        assert!(!adapter.capabilities().watching);
+        let adapter = ContainerAdapter {
+            endpoints: vec![RuntimeEndpoint {
+                source: "$DOCKER_HOST".into(),
+                uri: "tcp://127.0.0.1:1".into(),
+                socket: None,
+                kind: ContainerRuntimeKind::Docker,
+                flavor: ApiFlavor::DockerCompatible,
+            }],
+        };
+        assert!(adapter.watch().await.is_some());
+        assert!(adapter.capabilities().watching);
     }
 }

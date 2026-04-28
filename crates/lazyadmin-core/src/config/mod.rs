@@ -165,6 +165,8 @@ fn default_channel_capacity() -> usize {
 pub struct AdapterToggle {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub events_enabled: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectsConfig {
@@ -235,7 +237,10 @@ impl Default for SocketsAdapterConfig {
 
 impl Default for AdapterToggle {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            events_enabled: true,
+        }
     }
 }
 

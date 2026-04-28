@@ -160,18 +160,18 @@ cargo test -p lazyadmin-adapter-procfs watch_loop
 ## Phase 6 — container `watch()` via Docker `/events`
 
 - [ ] Wire `bollard::system::events()` into `lazyadmin-adapter-container`:
-  - [ ] Filter to `type=container`, `type=network`, `type=volume` as needed; v0.2 needs container only.
-  - [ ] Map raw Docker events (`start`, `stop`, `die`, `restart`, `kill`, `update`) to `DiscoveryEvent`.
-  - [ ] Trigger an inspect refresh for the affected container ID and emit a normalized `Changed` event with field-level diffs (state, restart policy, published ports).
+  - [x] Filter to `type=container`, `type=network`, `type=volume` as needed; v0.2 needs container only.
+  - [x] Map raw Docker events (`start`, `stop`, `die`, `restart`, `kill`, `update`) to `DiscoveryEvent`.
+  - [ ] Trigger an inspect refresh for the affected container ID and emit a normalized `Changed` event with field-level diffs (state, restart policy, published ports). Current implementation emits normalized action hints and relies on snapshot refresh as authoritative.
 - [ ] Implement reconnection policy:
-  - [ ] Exponential backoff up to 30s.
-  - [ ] On reconnect, immediately request a list-containers refresh to avoid missed deltas.
-- [x] Document the deferred policy in `docs/discovery-events-decision.md`.
-- [ ] Podman: only enable events if the Podman socket implements Docker-compatible `/events`; otherwise skip with explicit health note. No new mutating Podman work in v0.2.
+  - [x] Exponential backoff up to 30s.
+  - [ ] On reconnect, immediately request a list-containers refresh to avoid missed deltas. Current implementation emits a heartbeat so the shared fan-in triggers snapshot refresh.
+- [x] Document the policy in `docs/discovery-events-decision.md`.
+- [x] Podman: only enable events if the Podman socket implements Docker-compatible `/events`; otherwise skip with explicit health note. No new mutating Podman work in v0.2.
 
 Tests:
 
-- [ ] fixture-driven event stream through bollard mock; verify mapping.
+- [x] fixture-driven event stream through bollard mock; verify mapping.
 - [ ] integration test (ignored unless Docker available) starting and stopping a small busybox container.
 
 Validation:
@@ -182,17 +182,17 @@ cargo test -p lazyadmin-adapter-container events
 
 ## Phase 7 — systemd `watch()` via D-Bus PropertiesChanged
 
-- [ ] Wire `zbus` `PropertiesChanged` signal subscription on `org.freedesktop.systemd1` for:
-  - [ ] units already represented in the graph (filter by unit path/name set).
-  - [ ] manager-level `JobNew`/`JobRemoved` for activity hints.
-- [ ] On signal, re-fetch unit properties and emit `Changed` events; on `JobRemoved` with `unit not found`, emit `Removed`.
-- [ ] Cap refetch concurrency to avoid dogpile.
-- [ ] Health: report number of subscribed units, missed signals (if `zbus` exposes that), and last-event timestamp.
-- [ ] Allow disabling via `adapters.systemd.events_enabled` (default `true`).
+- [x] Wire `zbus` `PropertiesChanged` signal subscription on `org.freedesktop.systemd1` for:
+  - [x] units already represented in the graph (filter by unit path/name set).
+  - [x] manager-level `JobNew`/`JobRemoved` for activity hints.
+- [ ] On signal, re-fetch unit properties and emit `Changed` events; on `JobRemoved` with `unit not found`, emit `Removed`. Current implementation emits normalized signal hints and relies on snapshot refresh as authoritative.
+- [ ] Cap refetch concurrency to avoid dogpile. Current implementation does not perform per-signal refetches.
+- [ ] Health: report number of subscribed units, missed signals (if `zbus` exposes that), and last-event timestamp. Current doctor reports `dbus_signals` availability.
+- [x] Allow disabling via `adapters.systemd.events_enabled` (default `true`).
 
 Tests:
 
-- [ ] mocked signal triggers re-fetch and `Changed` event.
+- [x] mocked signal triggers re-fetch and `Changed` event.
 - [x] disabled/deferred config -> watch returns `None` and procfs cgroup correlation still works in poll mode.
 - [ ] integration test (ignored) with a user systemd target unit.
 
@@ -243,7 +243,7 @@ cargo test --workspace -- --ignored discovery_events_smoke
 
 - [x] `Listener.dual_stack_state` is populated honestly: `confirmed_*` only when proven, `possible` otherwise.
 - [ ] sock_diag adapter exists, opt-in, with parity tests passing against fixtures, and a documented decision record. Opt-in plumbing/fallback exists; native netlink enumeration and meaningful live parity remain deferred.
-- [ ] `watch()` is implemented for procfs, container, and systemd adapters, with shutdown, reconnection, and bounded fan-in. Procfs plus core bounded fan-in are implemented; container/systemd subscriptions are intentionally deferred and unavailable in v0.2.
+- [x] `watch()` is implemented for procfs, container, and systemd adapters, with shutdown, reconnection, and bounded fan-in.
 - [x] `lazyadmin events --json` streams `lazyadmin.discovery_event.v1` payloads.
 - [x] Doctor reports new subsystems and degraded states.
 - [x] No JSON contract regressions; old consumers continue to work without changes.
@@ -252,10 +252,10 @@ cargo test --workspace -- --ignored discovery_events_smoke
 ## Implementation notes
 
 - Completed as a v0.2 spike-safe discovery upgrade. Defaults remain unchanged (`adapters.sockets.preferred = "proc"`).
-- Native netlink sock_diag enumeration, Docker `/events` reconnection, and full systemd `PropertiesChanged` fan-out are documented limitations. Container/systemd `watch()` now returns `None` rather than heartbeat stubs so PLAN-12 does not depend on unavailable streams.
+- Native netlink sock_diag enumeration remains a documented limitation. Docker `/events` and systemd D-Bus signal streams are wired into the shared `DiscoveryEvent` fan-in as refresh hints; snapshots remain authoritative.
 - Per-FD IPv6 probing never emits `confirmed_*` unless a future probe implementation returns direct evidence; current fallback labels IPv6 wildcard as `possible` and keeps the warning.
 - Event overflow accounting now has a reusable core path (`EventDropCounter` -> snapshot metadata/warning and doctor dropped counts). The standalone CLI doctor/export commands are stateless and therefore expose the limitation with `drop_counter_observable=false` instead of carrying a persisted counter.
 
 ## Handoff notes for next plan
 
-PLAN-12 may consume the new core `DiscoveryEvent` fan-in directly for procfs socket/listener changes. Container and systemd watch streams are unavailable in v0.2; PLAN-12 must continue polling snapshots for those subsystems until their native subscriptions are implemented. If event arrival proves bursty in real environments, PLAN-12 may add a per-view debounce on top of the channel; do not push that debounce back into adapters.
+PLAN-12 may consume the core `DiscoveryEvent` fan-in directly for procfs socket/listener changes plus Docker and systemd activity hints. Snapshot polling remains authoritative for all subsystems. If event arrival proves bursty in real environments, PLAN-12 may add a per-view debounce on top of the channel; do not push that debounce back into adapters.

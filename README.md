@@ -91,4 +91,4 @@ Agents should check `command -v lazyadmin && lazyadmin doctor --json` once per s
 
 ## Scope
 
-v0.2 is Linux-first. TUI rendering/configuration, Process Tree, Metrics, keybindings, themes, live procfs refresh hints, and guarded interactive copy/open helpers are implemented. Native Docker/systemd event streams and some manager-aware runtime mutations remain later-track work.
+v0.2 is Linux-first. TUI rendering/configuration, Process Tree, Metrics, keybindings, themes, live procfs/container/systemd refresh hints, and guarded interactive copy/open helpers are implemented. Some manager-aware runtime mutations remain later-track work.

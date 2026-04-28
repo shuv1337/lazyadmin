@@ -1,6 +1,6 @@
 # v0.2 acceptance validation
 
-Environment: local Linux development checkout after PLAN-11 and PLAN-12. Container/systemd native event streams remain deferred per PLAN-11; TUI uses events as hints and snapshot polling as authoritative state.
+Environment: local Linux development checkout after PLAN-11 and PLAN-12. Container/systemd native event streams are available as refresh hints; TUI uses events as hints and snapshot polling as authoritative state.
 
 | # | Criterion | Status | Command/test | Notes |
 |---|---|---|---|---|

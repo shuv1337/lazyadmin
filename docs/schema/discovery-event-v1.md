@@ -148,11 +148,11 @@ When the event channel overflows:
 - Heartbeat every 5s when no changes
 
 ### container (Docker)
-- v0.2 does not expose a container `watch()` stream.
-- Docker `/events`, reconnect/backoff, and inspect-refresh mapping are deferred.
-- Consumers should use snapshot polling for container state until a later plan wires the Docker event API.
+- Container `watch()` uses Docker-compatible `/events` where the configured Docker or Podman endpoint supports it.
+- Raw container activity is normalized into workload-level `Added`, `Removed`, or `Changed` hints.
+- Consumers should still use snapshot polling for authoritative container state and field-level details.
 
 ### systemd
-- v0.2 does not expose a systemd `watch()` stream.
-- D-Bus `PropertiesChanged`, `JobNew`, and `JobRemoved` subscriptions are deferred.
-- Consumers should use snapshot polling for systemd state until a later plan wires D-Bus events.
+- Systemd `watch()` subscribes to D-Bus `PropertiesChanged`, `JobNew`, and `JobRemoved` signals on available system/user buses.
+- Signals are normalized into workload-level `Changed` hints.
+- Consumers should still use snapshot polling for authoritative systemd state and unit properties.

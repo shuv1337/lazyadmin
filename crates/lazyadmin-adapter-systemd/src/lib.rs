@@ -2,7 +2,7 @@
 #![deny(missing_debug_implementations)]
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::stream::BoxStream;
+use futures::{StreamExt, channel::mpsc, stream::BoxStream};
 use lazyadmin_core::{
     graph::{
         AdapterCapabilities, AdapterHealth, DiscoveryAdapter, DiscoveryContext, DiscoveryOutput,
@@ -10,9 +10,26 @@ use lazyadmin_core::{
     model::*,
 };
 use std::{fs, time::Duration};
+use zbus::{MatchRule, Message, MessageStream, MessageType};
 
-#[derive(Clone, Debug, Default)]
-pub struct SystemdAdapter;
+#[derive(Clone, Debug)]
+pub struct SystemdAdapter {
+    events_enabled: bool,
+}
+
+impl Default for SystemdAdapter {
+    fn default() -> Self {
+        Self {
+            events_enabled: true,
+        }
+    }
+}
+
+impl SystemdAdapter {
+    pub fn new(events_enabled: bool) -> Self {
+        Self { events_enabled }
+    }
+}
 fn prov(claim: &str, evidence: impl Into<String>, confidence: Confidence) -> Provenance {
     Provenance {
         adapter: "systemd".into(),
@@ -53,7 +70,7 @@ impl DiscoveryAdapter for SystemdAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             polling: true,
-            watching: false,
+            watching: self.events_enabled,
         }
     }
     #[tracing::instrument(name = "adapter.systemd.health", skip_all)]
@@ -140,8 +157,167 @@ impl DiscoveryAdapter for SystemdAdapter {
 
     #[tracing::instrument(name = "adapter.watch.start", skip_all, fields(adapter = "systemd"))]
     async fn watch(&self) -> Option<BoxStream<'static, DiscoveryEvent>> {
-        None
+        if !self.events_enabled {
+            return None;
+        }
+        let (tx, rx) = mpsc::unbounded();
+        let mut started = false;
+        for (scope, connection) in [
+            ("system", zbus::Connection::system().await),
+            ("user", zbus::Connection::session().await),
+        ] {
+            match connection {
+                Ok(connection) => {
+                    started = true;
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        watch_systemd_connection(scope, connection, tx).await;
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.unbounded_send(DiscoveryEvent::degraded(
+                        "systemd",
+                        format!("{scope} bus unavailable for systemd watch: {err}"),
+                    ));
+                }
+            }
+        }
+        drop(tx);
+        started.then_some(Box::pin(rx) as BoxStream<'static, DiscoveryEvent>)
     }
+}
+
+async fn watch_systemd_connection(
+    scope: &'static str,
+    connection: zbus::Connection,
+    tx: mpsc::UnboundedSender<DiscoveryEvent>,
+) {
+    let mut streams = futures::stream::SelectAll::new();
+    for rule in systemd_match_rules() {
+        match MessageStream::for_match_rule(rule, &connection, Some(128)).await {
+            Ok(stream) => streams.push(stream),
+            Err(err) => {
+                let _ = tx.unbounded_send(DiscoveryEvent::degraded(
+                    "systemd",
+                    format!("{scope} bus match registration failed: {err}"),
+                ));
+            }
+        }
+    }
+    let _ = tx.unbounded_send(DiscoveryEvent::heartbeat("systemd"));
+    while let Some(next) = streams.next().await {
+        match next {
+            Ok(message) => {
+                if let Some(event) = systemd_message_to_discovery(scope, &message) {
+                    tracing::debug!(name = "adapter.watch.event", adapter = "systemd", kind = ?event.kind);
+                    let _ = tx.unbounded_send(event);
+                }
+            }
+            Err(err) => {
+                let _ = tx.unbounded_send(DiscoveryEvent::degraded(
+                    "systemd",
+                    format!("{scope} bus stream failed: {err}"),
+                ));
+                break;
+            }
+        }
+    }
+}
+
+fn systemd_match_rules() -> Vec<MatchRule<'static>> {
+    [
+        "type='signal',sender='org.freedesktop.systemd1',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
+        "type='signal',sender='org.freedesktop.systemd1',interface='org.freedesktop.systemd1.Manager',member='JobNew'",
+        "type='signal',sender='org.freedesktop.systemd1',interface='org.freedesktop.systemd1.Manager',member='JobRemoved'",
+    ]
+    .into_iter()
+    .filter_map(|rule| MatchRule::try_from(rule).ok().map(MatchRule::into_owned))
+    .collect()
+}
+
+pub fn systemd_message_to_discovery(scope: &str, message: &Message) -> Option<DiscoveryEvent> {
+    let header = message.header();
+    if header.message_type() != MessageType::Signal {
+        return None;
+    }
+    let member = header.member()?.as_str();
+    let path = header.path().map(|p| p.as_str()).unwrap_or_default();
+    systemd_signal_to_discovery(scope, member, path)
+}
+
+pub fn systemd_signal_to_discovery(
+    scope: &str,
+    member: &str,
+    path: &str,
+) -> Option<DiscoveryEvent> {
+    let unit = unit_from_systemd_object_path(path).unwrap_or_else(|| format!("{scope}:activity"));
+    let entity = EntityRef::Workload(WorkloadId::new(format!("systemd:{unit}")));
+    let mut event = match member {
+        "JobRemoved" => DiscoveryEvent::changed(
+            entity,
+            vec![FieldChange {
+                field: "systemd.job".into(),
+                old: String::new(),
+                new: "removed".into(),
+            }],
+        ),
+        "JobNew" => DiscoveryEvent::changed(
+            entity,
+            vec![FieldChange {
+                field: "systemd.job".into(),
+                old: String::new(),
+                new: "new".into(),
+            }],
+        ),
+        "PropertiesChanged" => DiscoveryEvent::changed(
+            entity,
+            vec![FieldChange {
+                field: "systemd.properties".into(),
+                old: String::new(),
+                new: "changed".into(),
+            }],
+        ),
+        _ => return None,
+    };
+    event.adapter = Some("systemd".into());
+    Some(event)
+}
+
+pub fn unit_from_systemd_object_path(path: &str) -> Option<String> {
+    let encoded = path.strip_prefix("/org/freedesktop/systemd1/unit/")?;
+    Some(decode_systemd_unit_name(encoded))
+}
+
+fn decode_systemd_unit_name(encoded: &str) -> String {
+    let mut out = String::new();
+    let mut chars = encoded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '_' {
+            let a = chars.next();
+            let b = chars.next();
+            match (a, b) {
+                (Some(a), Some(b)) if a.is_ascii_hexdigit() && b.is_ascii_hexdigit() => {
+                    let hex = format!("{a}{b}");
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        out.push(byte as char);
+                    }
+                }
+                (Some(a), Some(b)) => {
+                    out.push('_');
+                    out.push(a);
+                    out.push(b);
+                }
+                (Some(a), None) => {
+                    out.push('_');
+                    out.push(a);
+                }
+                _ => out.push('_'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 #[cfg(test)]
 mod tests {
@@ -158,10 +334,31 @@ mod tests {
         assert_eq!(parse_restart_policy("always").policy, "always");
     }
 
+    #[test]
+    fn events_map_systemd_signals() {
+        assert_eq!(
+            unit_from_systemd_object_path("/org/freedesktop/systemd1/unit/ssh_2eservice"),
+            Some("ssh.service".into())
+        );
+        let event = systemd_signal_to_discovery(
+            "system",
+            "PropertiesChanged",
+            "/org/freedesktop/systemd1/unit/ssh_2eservice",
+        )
+        .unwrap();
+        assert_eq!(event.adapter.as_deref(), Some("systemd"));
+        assert!(matches!(event.kind, DiscoveryEventKind::Changed));
+        assert_eq!(
+            event.entity,
+            Some(EntityRef::Workload(WorkloadId::new("systemd:ssh.service")))
+        );
+    }
+
     #[tokio::test]
-    async fn events_watch_stream_is_deferred() {
+    async fn events_watch_stream_can_be_disabled() {
         use lazyadmin_core::graph::DiscoveryAdapter;
-        assert!(SystemdAdapter.watch().await.is_none());
-        assert!(!SystemdAdapter.capabilities().watching);
+        let adapter = SystemdAdapter::new(false);
+        assert!(adapter.watch().await.is_none());
+        assert!(!adapter.capabilities().watching);
     }
 }

@@ -297,7 +297,7 @@ cargo run -p lazyadmin-cli -- tui --headless --json
 
 - Implemented PLAN-12 as a v0.2 TUI polish pass with explicit `lazyadmin tui --headless --json`, snapshot-derived rendering, Process Tree, Metrics, themes, keybinding validation, live refresh coalescing, docs, and acceptance notes.
 - Follow-up fixed interactive runtime wiring: `lazyadmin tui` now receives resolved theme/keybindings/refresh settings, procfs `DiscoveryEvent`s trigger debounced snapshot refreshes, periodic polling remains authoritative, and keybinding overrides drive actual dispatch.
-- Live DiscoveryEvent handling intentionally treats procfs events as redraw/refresh hints; snapshot polling remains authoritative. Container/systemd native event streams remain deferred from PLAN-11.
+- Live DiscoveryEvent handling intentionally treats procfs, Docker-compatible container, and systemd D-Bus events as redraw/refresh hints; snapshot polling remains authoritative.
 - Process Tree and Metrics are v0.2 situational views with expand/collapse, selected-process inspector details, adapter event throughput/drop rows, and event-ring-backed sparklines.
 - Copy diagnostic uses clipboard APIs and command fallbacks before deterministic file fallback. Palette reload/theme entries re-read config and apply theme/keybinding changes without restart. Open is guarded to loopback/common HTTP ports unless config opts in.
 - Review follow-up fixed three release-readiness issues before final PLAN-12 review: `diff <before> -` now compares against the current snapshot, `free --dry-run --json` emits JSON, and partial config TOML files merge with defaults as documented. Free-port docs now accurately describe the current direct-process executor and mark manager-aware stop plans as deferred.
