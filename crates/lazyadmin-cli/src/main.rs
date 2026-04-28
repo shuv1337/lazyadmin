@@ -293,9 +293,9 @@ async fn run_tui_command(
     let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
     let snap = build_snapshot(config_path).await?;
     let theme_name = args.theme.as_deref().or(cfg.ui.theme.name.as_deref());
-    let (theme, _hint) = lazyadmin_tui::Theme::load(theme_name, cfg.ui.theme.path.as_deref())
+    let (theme, hint) = lazyadmin_tui::Theme::load(theme_name, cfg.ui.theme.path.as_deref())
         .map_err(|e| AppError::Other(eyre!(e)))?
-        .downgrade_for_colors(256);
+        .downgrade_for_colors(lazyadmin_tui::detected_color_count());
     let keybindings = lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)
         .map_err(|e| AppError::Other(eyre!(e)))?;
     if args.headless {
@@ -329,8 +329,25 @@ async fn run_tui_command(
         },
         theme,
         keybindings,
+        color_hint: hint,
+        allow_open_non_loopback: cfg.actions.open_non_loopback,
         snapshots: Some(snapshot_rx),
         discovery_events: Some(event_rx),
+        config_reload: Some(Box::new({
+            let config_path = config_path.map(std::path::Path::to_path_buf);
+            move || {
+                let cfg = Config::load(config_path.as_deref())?;
+                let theme = lazyadmin_tui::Theme::load(
+                    cfg.ui.theme.name.as_deref(),
+                    cfg.ui.theme.path.as_deref(),
+                )?
+                .downgrade_for_colors(lazyadmin_tui::detected_color_count())
+                .0;
+                let keybindings =
+                    lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)?;
+                Ok((theme, keybindings))
+            }
+        })),
     };
     lazyadmin_tui::run_tui_with_runtime(runtime)
         .await

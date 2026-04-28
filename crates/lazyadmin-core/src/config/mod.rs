@@ -93,6 +93,8 @@ pub struct ActionsConfig {
     pub require_confirmation: bool,
     #[serde(default)]
     pub free_multi_owner: FreeMultiOwner,
+    #[serde(default)]
+    pub open_non_loopback: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +212,7 @@ impl Default for ActionsConfig {
         Self {
             require_confirmation: true,
             free_multi_owner: FreeMultiOwner::StopAll,
+            open_non_loopback: false,
         }
     }
 }

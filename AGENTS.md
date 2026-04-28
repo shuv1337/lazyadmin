@@ -2,7 +2,7 @@
 
 ## Current state
 
-This repository now contains the v0.1 release-ready Rust workspace for `lazyadmin` after PLAN-01 through PLAN-05:
+This repository now contains the v0.2 Rust workspace for `lazyadmin` after PLAN-01 through PLAN-12:
 
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
@@ -11,7 +11,7 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
 - `docs/schema/` and `testdata/snapshots/` — initial public JSON contract docs and fixtures.
-- `PLAN-*.md` — implementation history/checklists derived from the spec and assumption review. PLAN-05 covers the TUI, agent skill, docs, CI, packaging, and v0.1 acceptance record.
+- `PLAN-*.md` — implementation history/checklists derived from the spec and assumption review. PLAN-05 covers the TUI, agent skill, docs, CI, packaging, and v0.1 acceptance record; PLAN-12 covers the v0.2 TUI polish.
 - `skills/lazyadmin-agent/` — shipped coding-agent skill with always-do rules, cheatsheet, schema notes, examples, and install script.
 - `scripts/build-skill-tarball.sh` — builds the release skill artifact `lazyadmin-agent-skill-v<version>.tar.gz`.
 
@@ -36,7 +36,7 @@ This repository now contains the v0.1 release-ready Rust workspace for `lazyadmi
 - PLAN-12 TUI live refresh treats DiscoveryEvent messages as hints only; snapshot polling remains the authoritative state source, especially for container and systemd data.
 - TUI config knobs live under `[ui.theme]`, `[ui.keybindings]`, and `[ui.refresh]` (`tick_ms`, `event_debounce_ms`, `max_redraw_hz`). `lazyadmin config check --json` includes resolved keybindings for automation.
 - Event overflow counts are reusable via the core `EventDropCounter`; long-lived runtimes should pass that counter into snapshot/doctor builders. Stateless CLI `doctor`/`export` runs cannot observe historical fan-in drops and report that limitation explicitly.
-- `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to v0.2, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
+- `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to a later release, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 
 ## Development standards
 

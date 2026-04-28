@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::{BTreeMap, HashSet, VecDeque},
     io, panic,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,7 +18,7 @@ use crossterm::{
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::{
     config::keybindings::{KeybindAction, ResolvedKeybindings},
-    model::{DiscoveryEvent, Exposure, ProcessKey, Snapshot},
+    model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot},
     snapshot::build_empty_snapshot,
 };
 use ratatui::{
@@ -27,7 +29,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Bar, BarChart, BarGroup, Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row,
-        Sparkline, Table, Wrap,
+        Sparkline, Table, TableState, Wrap,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, info, info_span};
+
+pub type ConfigReload = Box<dyn FnMut() -> anyhow::Result<(Theme, ResolvedKeybindings)> + Send>;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -55,7 +59,6 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct App {
     pub vm: ViewModel,
     pub snapshot: Snapshot,
@@ -69,6 +72,27 @@ pub struct App {
     pub theme: Theme,
     pub keybindings: ResolvedKeybindings,
     pub status: Option<String>,
+    pub allow_open_non_loopback: bool,
+    selected_process: Option<ProcessKey>,
+    collapsed_processes: HashSet<ProcessKey>,
+    event_ring: AdapterEventRing,
+    config_reload: Option<ConfigReload>,
+}
+
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("vm", &self.vm)
+            .field("pane", &self.pane)
+            .field("active_view", &self.active_view)
+            .field("query", &self.query)
+            .field("mode", &self.mode)
+            .field("should_quit", &self.should_quit)
+            .field("show_system", &self.show_system)
+            .field("status", &self.status)
+            .field("allow_open_non_loopback", &self.allow_open_non_loopback)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for App {
@@ -91,6 +115,11 @@ impl Default for App {
                     .collect(),
             },
             status: None,
+            allow_open_non_loopback: false,
+            selected_process: None,
+            collapsed_processes: HashSet::new(),
+            event_ring: AdapterEventRing::default(),
+            config_reload: None,
         }
     }
 }
@@ -100,8 +129,11 @@ pub struct TuiRuntime {
     pub config: AppConfig,
     pub theme: Theme,
     pub keybindings: ResolvedKeybindings,
+    pub color_hint: Option<String>,
+    pub allow_open_non_loopback: bool,
     pub snapshots: Option<mpsc::Receiver<Snapshot>>,
     pub discovery_events: Option<mpsc::Receiver<DiscoveryEvent>>,
+    pub config_reload: Option<ConfigReload>,
 }
 
 impl TuiRuntime {
@@ -116,8 +148,11 @@ impl TuiRuntime {
                     .map(|(a, b)| (a.as_name().into(), b))
                     .collect(),
             },
+            color_hint: None,
+            allow_open_non_loopback: false,
             snapshots: None,
             discovery_events: None,
+            config_reload: None,
         }
     }
 }
@@ -199,6 +234,22 @@ pub struct Theme {
     pub selection: ColorSpec,
     pub footer: ColorSpec,
     pub fallback_palette: PaletteMode,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ThemeFile {
+    name: Option<String>,
+    base_fg: Option<ColorSpec>,
+    base_bg: Option<ColorSpec>,
+    accent: Option<ColorSpec>,
+    ok: Option<ColorSpec>,
+    info: Option<ColorSpec>,
+    warning: Option<ColorSpec>,
+    degraded: Option<ColorSpec>,
+    error: Option<ColorSpec>,
+    selection: Option<ColorSpec>,
+    footer: Option<ColorSpec>,
+    fallback_palette: Option<PaletteMode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,13 +356,64 @@ impl Theme {
     pub fn load(name: Option<&str>, path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         tracing::info!("tui.theme.load");
         if let Some(path) = path {
-            let text = std::fs::read_to_string(path)?;
-            let mut theme: Theme = toml::from_str(&text)?;
-            theme.validate()?;
+            return Self::load_file(path, None);
+        }
+        let name = name.unwrap_or("default-dark");
+        if let Some(theme) = Self::builtin(name) {
             return Ok(theme);
         }
-        Self::builtin(name.unwrap_or("default-dark"))
-            .ok_or_else(|| anyhow::anyhow!("unknown theme `{}`", name.unwrap_or("default-dark")))
+        if let Some(path) = xdg_theme_path(name) {
+            return Self::load_file(&path, Some(name));
+        }
+        Err(anyhow::anyhow!("unknown theme `{name}`"))
+    }
+    fn load_file(path: &Path, override_name: Option<&str>) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let file: ThemeFile = toml::from_str(&text)?;
+        let mut theme = Theme::default_dark();
+        theme.name = override_name
+            .or(file.name.as_deref())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("custom")
+            })
+            .to_string();
+        if let Some(value) = file.base_fg {
+            theme.base_fg = value;
+        }
+        if let Some(value) = file.base_bg {
+            theme.base_bg = value;
+        }
+        if let Some(value) = file.accent {
+            theme.accent = value;
+        }
+        if let Some(value) = file.ok {
+            theme.ok = value;
+        }
+        if let Some(value) = file.info {
+            theme.info = value;
+        }
+        if let Some(value) = file.warning {
+            theme.warning = value;
+        }
+        if let Some(value) = file.degraded {
+            theme.degraded = value;
+        }
+        if let Some(value) = file.error {
+            theme.error = value;
+        }
+        if let Some(value) = file.selection {
+            theme.selection = value;
+        }
+        if let Some(value) = file.footer {
+            theme.footer = value;
+        }
+        if let Some(value) = file.fallback_palette {
+            theme.fallback_palette = value;
+        }
+        theme.validate()?;
+        Ok(theme)
     }
     pub fn validate(&mut self) -> anyhow::Result<()> {
         for c in [
@@ -337,6 +439,36 @@ impl Theme {
         }
         (self, None)
     }
+}
+
+fn xdg_theme_path(name: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let candidate = base.join("lazyadmin/themes").join(format!("{name}.toml"));
+    candidate.exists().then_some(candidate)
+}
+
+pub fn detected_color_count() -> u16 {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return 16;
+    }
+    if std::env::var("COLORTERM")
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("truecolor") || v.contains("24bit")
+        })
+        .unwrap_or(false)
+    {
+        return u16::MAX;
+    }
+    if std::env::var("TERM")
+        .map(|v| v.contains("256color"))
+        .unwrap_or(false)
+    {
+        return 256;
+    }
+    16
 }
 
 pub struct EventLoop {
@@ -559,6 +691,68 @@ pub struct MetricsVm {
     pub tracked_runs: usize,
     pub events_dropped: u64,
     pub event_rate: Vec<u64>,
+    pub adapters: Vec<AdapterMetricVm>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterMetricVm {
+    pub adapter: String,
+    pub latency_ms: Option<u64>,
+    pub throughput: u64,
+    pub drops: u64,
+    pub sparkline: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdapterEventRing {
+    events: BTreeMap<String, VecDeque<Instant>>,
+    drops: BTreeMap<String, u64>,
+    capacity: usize,
+}
+
+impl AdapterEventRing {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: BTreeMap::new(),
+            drops: BTreeMap::new(),
+            capacity: capacity.max(1),
+        }
+    }
+    pub fn record(&mut self, event: &DiscoveryEvent, now: Instant) {
+        let adapter = event.adapter.as_deref().unwrap_or("unknown").to_string();
+        let events = self.events.entry(adapter).or_default();
+        events.push_back(now);
+        while events.len() > self.capacity.max(32) {
+            events.pop_front();
+        }
+    }
+    pub fn set_dropped(&mut self, adapter: impl Into<String>, drops: u64) {
+        self.drops.insert(adapter.into(), drops);
+    }
+    pub fn metrics(&self, now: Instant) -> Vec<AdapterMetricVm> {
+        self.events
+            .iter()
+            .map(|(adapter, events)| {
+                let recent = events
+                    .iter()
+                    .filter(|seen| now.duration_since(**seen) <= Duration::from_secs(1))
+                    .count() as u64;
+                let sparkline = events
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .map(|seen| 60u64.saturating_sub(now.duration_since(*seen).as_secs().min(60)))
+                    .collect::<Vec<_>>();
+                AdapterMetricVm {
+                    adapter: adapter.clone(),
+                    latency_ms: None,
+                    throughput: recent,
+                    drops: self.drops.get(adapter).copied().unwrap_or(0),
+                    sparkline,
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -588,6 +782,26 @@ pub fn build_view_model(
     width: u16,
     show_system: bool,
     filter: &str,
+) -> ViewModel {
+    build_view_model_with_state(
+        snapshot,
+        width,
+        show_system,
+        filter,
+        None,
+        &HashSet::new(),
+        None,
+    )
+}
+
+pub fn build_view_model_with_state(
+    snapshot: &Snapshot,
+    width: u16,
+    show_system: bool,
+    filter: &str,
+    selected_process: Option<ProcessKey>,
+    collapsed_processes: &HashSet<ProcessKey>,
+    adapter_metrics: Option<Vec<AdapterMetricVm>>,
 ) -> ViewModel {
     let layout = match width {
         100..=u16::MAX => LayoutMode::ThreePane,
@@ -648,9 +862,10 @@ pub fn build_view_model(
         let m = SkimMatcherV2::default();
         rows.retain(|r| m.fuzzy_match(&r.search_text, filter).is_some());
     }
-    let inspector = rows
-        .first()
-        .map(inspector_for_row)
+    let inspector = selected_process
+        .as_ref()
+        .and_then(|key| inspector_for_process(snapshot, key))
+        .or_else(|| rows.first().map(inspector_for_row))
         .unwrap_or_else(|| InspectorVm {
             title: "No selection".into(),
             lines: vec!["No workloads/listeners discovered yet".into()],
@@ -658,7 +873,8 @@ pub fn build_view_model(
             provenance_expanded: false,
             diagnostic_markdown: "# lazyadmin diagnostic\nNo selection\n".into(),
         });
-    let mut process_tree = build_process_tree(snapshot, None);
+    let mut process_tree =
+        build_process_tree_with_collapsed(snapshot, selected_process.clone(), collapsed_processes);
     if !filter.is_empty() {
         let m = SkimMatcherV2::default();
         process_tree.rows.retain(|r| {
@@ -677,7 +893,7 @@ pub fn build_view_model(
         groups: groups(show_system),
         rows,
         process_tree,
-        metrics: build_metrics(snapshot, None),
+        metrics: build_metrics_with_adapters(snapshot, None, adapter_metrics.unwrap_or_default()),
         inspector,
         hidden_system_count: hidden,
         degraded: snapshot
@@ -694,6 +910,14 @@ pub fn build_view_model(
 }
 
 pub fn build_process_tree(snapshot: &Snapshot, selected: Option<ProcessKey>) -> ProcessTreeVm {
+    build_process_tree_with_collapsed(snapshot, selected, &HashSet::new())
+}
+
+pub fn build_process_tree_with_collapsed(
+    snapshot: &Snapshot,
+    selected: Option<ProcessKey>,
+    collapsed: &HashSet<ProcessKey>,
+) -> ProcessTreeVm {
     let mut children: std::collections::BTreeMap<Option<i32>, Vec<_>> =
         std::collections::BTreeMap::new();
     for p in &snapshot.processes {
@@ -714,7 +938,7 @@ pub fn build_process_tree(snapshot: &Snapshot, selected: Option<ProcessKey>) -> 
         roots
     };
     for root in roots {
-        push_process_row(root, 0, &children, snapshot, &mut rows);
+        push_process_row(root, 0, &children, snapshot, collapsed, &mut rows);
     }
     ProcessTreeVm { rows, selected }
 }
@@ -724,9 +948,11 @@ fn push_process_row(
     depth: usize,
     children: &std::collections::BTreeMap<Option<i32>, Vec<&lazyadmin_core::model::Process>>,
     snapshot: &Snapshot,
+    collapsed: &HashSet<ProcessKey>,
     rows: &mut Vec<ProcessTreeRow>,
 ) {
     let child_count = children.get(&Some(process.pid)).map_or(0, Vec::len);
+    let is_expanded = child_count > 0 && !collapsed.contains(&process.key);
     let runtime = process
         .systemd_unit
         .as_ref()
@@ -761,18 +987,26 @@ fn push_process_row(
         runtime,
         workload,
         warnings: Vec::new(),
-        expanded: true,
+        expanded: is_expanded,
     });
-    if child_count > 0 {
+    if is_expanded {
         if let Some(kids) = children.get(&Some(process.pid)) {
             for child in kids {
-                push_process_row(child, depth + 1, children, snapshot, rows);
+                push_process_row(child, depth + 1, children, snapshot, collapsed, rows);
             }
         }
     }
 }
 
 pub fn build_metrics(snapshot: &Snapshot, previous: Option<&Snapshot>) -> MetricsVm {
+    build_metrics_with_adapters(snapshot, previous, Vec::new())
+}
+
+pub fn build_metrics_with_adapters(
+    snapshot: &Snapshot,
+    previous: Option<&Snapshot>,
+    adapters: Vec<AdapterMetricVm>,
+) -> MetricsVm {
     let listeners_loopback = snapshot
         .listeners
         .iter()
@@ -801,6 +1035,7 @@ pub fn build_metrics(snapshot: &Snapshot, previous: Option<&Snapshot>) -> Metric
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
         event_rate: vec![rate],
+        adapters,
     }
 }
 fn inspector_for_row(row: &RowVm) -> InspectorVm {
@@ -827,6 +1062,105 @@ fn inspector_for_row(row: &RowVm) -> InspectorVm {
             row.owner, row.port, row.runtime
         ),
     }
+}
+
+fn inspector_for_process(snapshot: &Snapshot, key: &ProcessKey) -> Option<InspectorVm> {
+    let process = snapshot.processes.iter().find(|p| &p.key == key)?;
+    let ports = snapshot
+        .listeners
+        .iter()
+        .filter(|listener| {
+            listener
+                .owners
+                .iter()
+                .any(|owner| matches!(owner, EntityRef::Process(process_key) if process_key == key))
+        })
+        .filter_map(|listener| listener.port.map(|p| p.to_string()))
+        .collect::<Vec<_>>();
+    let workload = snapshot
+        .workloads
+        .iter()
+        .find(|workload| workload.pids.contains(key));
+    let project = workload
+        .and_then(|workload| workload.project.as_ref())
+        .and_then(|project_id| {
+            snapshot
+                .projects
+                .iter()
+                .find(|project| &project.id == project_id)
+        })
+        .map(|project| project.name.clone())
+        .unwrap_or_else(|| "-".into());
+    let tracked = process
+        .lazyadmin_run_id
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| {
+            workload
+                .and_then(|workload| workload.lazyadmin_run_id.as_ref())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "-".into());
+    let runtime = process
+        .systemd_unit
+        .as_ref()
+        .map(|unit| format!("systemd:{unit}"))
+        .or_else(|| {
+            process
+                .container_id
+                .as_ref()
+                .map(|container| format!("container:{container}"))
+        })
+        .unwrap_or_else(|| "direct".into());
+    Some(InspectorVm {
+        title: format!("pid {}", process.pid),
+        lines: vec![
+            format!(
+                "identity: pid {} start {}",
+                process.pid, process.start_time_ticks
+            ),
+            "state: running".into(),
+            format!("runtime: {runtime}"),
+            format!(
+                "ports/listeners: {}",
+                if ports.is_empty() {
+                    "-".into()
+                } else {
+                    ports.join(", ")
+                }
+            ),
+            format!("project: {project}"),
+            format!("tracked metadata: {tracked}"),
+            format!(
+                "logs: {}",
+                process
+                    .lazyadmin_run_id
+                    .as_ref()
+                    .map(|_| "tracked run logs available")
+                    .unwrap_or("no direct process log source")
+            ),
+            "warnings: -".into(),
+            "actions: open logs restart stop free-port copy-diagnostic".into(),
+        ],
+        provenance: process
+            .provenance
+            .iter()
+            .map(|p| format!("{}: {} ({:?})", p.adapter, p.claim, p.confidence))
+            .collect(),
+        provenance_expanded: true,
+        diagnostic_markdown: format!(
+            "# lazyadmin process diagnostic\n\n- pid: {}\n- start_time_ticks: {}\n- runtime: {}\n- ports: {}\n- project: {}\n",
+            process.pid,
+            process.start_time_ticks,
+            runtime,
+            if ports.is_empty() {
+                "-".into()
+            } else {
+                ports.join(", ")
+            },
+            project
+        ),
+    })
 }
 fn groups(show_system: bool) -> Vec<String> {
     [
@@ -1241,8 +1575,20 @@ fn render_process_tree(
         Row::new(["Process", "Runtime", "Workload", "Warnings"])
             .style(Style::default().fg(theme.accent.color())),
     )
-    .block(Block::default().title("Process Tree").borders(Borders::ALL));
-    frame.render_widget(table, area);
+    .block(Block::default().title("Process Tree").borders(Borders::ALL))
+    .row_highlight_style(Style::default().bg(theme.selection.color()));
+    let mut state = TableState::default();
+    if let Some(selected) = &view_model.process_tree.selected {
+        if let Some(index) = view_model
+            .process_tree
+            .rows
+            .iter()
+            .position(|row| &row.key == selected)
+        {
+            state.select(Some(index));
+        }
+    }
+    frame.render_stateful_widget(table, area, &mut state);
 }
 fn render_metrics(
     view_model: &ViewModel,
@@ -1254,6 +1600,7 @@ fn render_metrics(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Length(5),
             Constraint::Min(5),
         ])
@@ -1282,6 +1629,40 @@ fn render_metrics(
             .style(Style::default().fg(theme.accent.color())),
         chunks[1],
     );
+    let adapter_rows = view_model.metrics.adapters.iter().map(|adapter| {
+        Row::new(vec![
+            Cell::from(adapter.adapter.clone()),
+            Cell::from(adapter.throughput.to_string()),
+            Cell::from(adapter.drops.to_string()),
+            Cell::from(
+                adapter
+                    .latency_ms
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|| "-".into()),
+            ),
+        ])
+    });
+    frame.render_widget(
+        Table::new(
+            adapter_rows,
+            [
+                Constraint::Min(12),
+                Constraint::Length(12),
+                Constraint::Length(8),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(["Adapter", "Events/s", "Drops", "Latency"])
+                .style(Style::default().fg(theme.accent.color())),
+        )
+        .block(
+            Block::default()
+                .title("Adapter health")
+                .borders(Borders::ALL),
+        ),
+        chunks[2],
+    );
     let bars = [
         Bar::default()
             .label("loopback".into())
@@ -1299,7 +1680,7 @@ fn render_metrics(
             )
             .data(BarGroup::default().bars(&bars))
             .bar_style(Style::default().fg(theme.ok.color())),
-        chunks[2],
+        chunks[3],
     );
 }
 
@@ -1326,11 +1707,60 @@ pub fn copy_diagnostic_fallback(
     Ok(path)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyDiagnosticOutcome {
+    Clipboard,
+    File(PathBuf),
+}
+
+pub fn copy_diagnostic(markdown: &str) -> anyhow::Result<CopyDiagnosticOutcome> {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(markdown)) {
+        Ok(()) => Ok(CopyDiagnosticOutcome::Clipboard),
+        Err(_) => copy_diagnostic_via_command(markdown)
+            .map(|()| CopyDiagnosticOutcome::Clipboard)
+            .or_else(|_| copy_diagnostic_fallback(markdown, None).map(CopyDiagnosticOutcome::File)),
+    }
+}
+
+fn copy_diagnostic_via_command(markdown: &str) -> anyhow::Result<()> {
+    for program in ["wl-copy", "xclip"] {
+        let mut child = std::process::Command::new(program)
+            .args(if program == "xclip" {
+                vec!["-selection", "clipboard"]
+            } else {
+                Vec::new()
+            })
+            .stdin(std::process::Stdio::piped())
+            .spawn();
+        if let Ok(ref mut child) = child {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(markdown.as_bytes())?;
+            }
+            let status = child.wait()?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no clipboard command succeeded")
+}
+
 pub fn open_url_for_row(row: &RowVm, allow_non_loopback: bool) -> anyhow::Result<String> {
     let port = row
         .port
         .ok_or_else(|| anyhow::anyhow!("open requires a TCP port"))?;
-    let is_loopback = row.bind == "127.0.0.1" || row.bind == "::1" || row.bind == "localhost";
+    let common_http_ports = [80, 443, 3000, 5000, 5173, 5174, 8000, 8080, 8443];
+    if !common_http_ports.contains(&port) {
+        anyhow::bail!("refusing to open uncommon HTTP port {port}");
+    }
+    let is_loopback = row.bind == "localhost"
+        || row
+            .bind
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false);
     if !is_loopback && !allow_non_loopback {
         anyhow::bail!("refusing to open non-loopback listener by default");
     }
@@ -1342,6 +1772,12 @@ pub fn open_url_for_row(row: &RowVm, allow_non_loopback: bool) -> anyhow::Result
             row.bind.as_str()
         }
     ))
+}
+
+pub fn open_row_url(row: &RowVm, allow_non_loopback: bool) -> anyhow::Result<String> {
+    let url = open_url_for_row(row, allow_non_loopback)?;
+    open::that(&url)?;
+    Ok(url)
 }
 
 pub fn headless_dump(
@@ -1390,6 +1826,9 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         show_system: runtime.config.show_system,
         theme: runtime.theme,
         keybindings: runtime.keybindings,
+        status: runtime.color_hint,
+        allow_open_non_loopback: runtime.allow_open_non_loopback,
+        config_reload: runtime.config_reload,
         ..Default::default()
     };
     let mut refresh_state =
@@ -1399,6 +1838,7 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         while let Some(rx) = runtime.discovery_events.as_mut() {
             match rx.try_recv() {
                 Ok(event) => {
+                    app.event_ring.record(&event, Instant::now());
                     refresh_state.on_event(&event, Instant::now());
                     app.vm.degraded = refresh_state.degraded.clone();
                 }
@@ -1454,7 +1894,15 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
 }
 
 fn rebuild_view_model(app: &mut App, width: u16) {
-    app.vm = build_view_model(&app.snapshot, width, app.show_system, &app.query);
+    app.vm = build_view_model_with_state(
+        &app.snapshot,
+        width,
+        app.show_system,
+        &app.query,
+        app.selected_process.clone(),
+        &app.collapsed_processes,
+        Some(app.event_ring.metrics(Instant::now())),
+    );
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
@@ -1473,6 +1921,26 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
         }
         return;
     }
+    if matches!(app.mode, InputMode::Palette) {
+        match key.code {
+            KeyCode::Esc => {
+                app.query.clear();
+                app.mode = InputMode::Normal;
+            }
+            KeyCode::Enter => {
+                let command = app.query.clone();
+                app.query.clear();
+                app.mode = InputMode::Normal;
+                run_palette_command(app, &command, width);
+            }
+            KeyCode::Backspace => {
+                app.query.pop();
+            }
+            KeyCode::Char(c) => app.query.push(c),
+            _ => {}
+        }
+        return;
+    }
     if matches!(app.mode, InputMode::Help) && matches!(key.code, KeyCode::Esc | KeyCode::Char('?'))
     {
         app.mode = InputMode::Normal;
@@ -1486,12 +1954,44 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 rebuild_view_model(app, width);
             }
             Command::Filter => app.mode = InputMode::Filter,
+            Command::Palette => {
+                app.query.clear();
+                app.mode = InputMode::Palette;
+            }
             Command::Refresh => rebuild_view_model(app, width),
-            Command::Tree => app.active_view = ViewKind::ProcessTree,
+            Command::Tree => {
+                if app.active_view == ViewKind::ProcessTree {
+                    toggle_selected_process(app);
+                } else {
+                    app.active_view = ViewKind::ProcessTree;
+                    if app.selected_process.is_none() {
+                        app.selected_process =
+                            app.vm.process_tree.rows.first().map(|row| row.key.clone());
+                    }
+                }
+                rebuild_view_model(app, width);
+            }
             Command::Metrics => app.active_view = ViewKind::Metrics,
             Command::Logs => app.active_view = ViewKind::Logs,
             Command::Ports => app.active_view = ViewKind::Ports,
             Command::Help => app.mode = InputMode::Help,
+            Command::CopyDiagnostic => match copy_diagnostic(&app.vm.inspector.diagnostic_markdown)
+            {
+                Ok(CopyDiagnosticOutcome::Clipboard) => {
+                    app.status = Some("diagnostic copied".into());
+                }
+                Ok(CopyDiagnosticOutcome::File(path)) => {
+                    app.status = Some(format!("clipboard unavailable; wrote {}", path.display()));
+                }
+                Err(err) => app.status = Some(format!("copy failed: {err}")),
+            },
+            Command::Open => match app.vm.rows.first() {
+                Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
+                    Ok(url) => app.status = Some(format!("opened {url}")),
+                    Err(err) => app.status = Some(format!("open failed: {err}")),
+                },
+                None => app.status = Some("open failed: no selected listener".into()),
+            },
             Command::Kill => {
                 app.confirmation = Some(Confirmation {
                     command: cmd,
@@ -1501,6 +2001,58 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             }
             _ => CommandDispatcher::execute(&cmd),
         }
+    }
+}
+
+fn toggle_selected_process(app: &mut App) {
+    let selected = app
+        .selected_process
+        .clone()
+        .or_else(|| app.vm.process_tree.rows.first().map(|row| row.key.clone()));
+    if let Some(key) = selected {
+        if !app.collapsed_processes.insert(key.clone()) {
+            app.collapsed_processes.remove(&key);
+        }
+        app.selected_process = Some(key);
+    }
+}
+
+fn run_palette_command(app: &mut App, command: &str, width: u16) {
+    match command.trim() {
+        "reload" => {
+            if let Some(reload) = app.config_reload.as_mut() {
+                match reload() {
+                    Ok((theme, keybindings)) => {
+                        app.theme = theme;
+                        app.keybindings = keybindings;
+                        app.status = Some("config reloaded".into());
+                    }
+                    Err(err) => app.status = Some(format!("reload failed: {err}")),
+                }
+            } else {
+                app.status = Some("reload unavailable in this runtime".into());
+            }
+        }
+        "process-tree" | "show-process-tree" => {
+            app.active_view = ViewKind::ProcessTree;
+            rebuild_view_model(app, width);
+        }
+        "metrics" => {
+            app.active_view = ViewKind::Metrics;
+            rebuild_view_model(app, width);
+        }
+        value if value.starts_with("theme ") => {
+            let name = value.trim_start_matches("theme ").trim();
+            match Theme::load(Some(name), None) {
+                Ok(theme) => {
+                    app.theme = theme;
+                    app.status = Some(format!("theme {name} applied"));
+                }
+                Err(err) => app.status = Some(format!("theme failed: {err}")),
+            }
+        }
+        "" => {}
+        other => app.status = Some(format!("unknown command: {other}")),
     }
 }
 fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
@@ -1513,6 +2065,18 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         app.active_view,
         Some(&app.keybindings),
     );
+    if let Some(status) = &app.status {
+        let footer = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(status.clone()).style(Style::default().fg(app.theme.footer.color())),
+            footer,
+        );
+    }
     if matches!(app.mode, InputMode::Help) {
         let area = centered_rect(70, 70, f.area());
         let help = Paragraph::new(help_lines(&app.keybindings).join("\n"))
@@ -1795,6 +2359,27 @@ mod tests {
     }
 
     #[test]
+    fn process_tree_expand_collapse_preserves_selection_and_inspector() {
+        let mut snap = build_empty_snapshot();
+        snap.processes = vec![process(1, None, 1), process(2, Some(1), 2)];
+        let selected = snap.processes[0].key.clone();
+        let mut collapsed = HashSet::new();
+        collapsed.insert(selected.clone());
+        let vm = build_view_model_with_state(
+            &snap,
+            120,
+            false,
+            "",
+            Some(selected.clone()),
+            &collapsed,
+            None,
+        );
+        assert_eq!(vm.process_tree.selected, Some(selected));
+        assert_eq!(vm.process_tree.rows.len(), 1);
+        assert!(vm.inspector.title.contains("pid 1"));
+    }
+
+    #[test]
     fn metrics_counts_and_rates() {
         let prev = build_empty_snapshot();
         let mut snap = build_empty_snapshot();
@@ -1809,6 +2394,27 @@ mod tests {
         assert_eq!(metrics.tracked_runs, 0);
         assert!(metrics.event_rate.iter().all(|v| *v < 10));
         assert_eq!(metrics.warnings_by_severity[0].0, "Warning");
+    }
+
+    #[test]
+    fn metrics_adapter_ring_populates_health_rows() {
+        let mut ring = AdapterEventRing::with_capacity(8);
+        let now = Instant::now();
+        ring.record(&DiscoveryEvent::heartbeat("procfs"), now);
+        ring.record(
+            &DiscoveryEvent::heartbeat("procfs"),
+            now + Duration::from_millis(50),
+        );
+        ring.set_dropped("procfs", 3);
+        let metrics = build_metrics_with_adapters(
+            &build_empty_snapshot(),
+            None,
+            ring.metrics(now + Duration::from_millis(100)),
+        );
+        assert_eq!(metrics.adapters[0].adapter, "procfs");
+        assert_eq!(metrics.adapters[0].throughput, 2);
+        assert_eq!(metrics.adapters[0].drops, 3);
+        assert!(!metrics.adapters[0].sparkline.is_empty());
     }
 
     #[test]
@@ -1834,6 +2440,24 @@ mod tests {
     #[test]
     fn themes_validation_alias() {
         theme_builtins_validate_and_downgrade();
+    }
+
+    #[test]
+    fn theme_file_missing_keys_inherits_default_dark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.toml");
+        std::fs::write(
+            &path,
+            r##"
+name = "minimal"
+accent = "#123456"
+"##,
+        )
+        .unwrap();
+        let theme = Theme::load(None, Some(&path)).unwrap();
+        assert_eq!(theme.name, "minimal");
+        assert_eq!(theme.accent, ColorSpec("#123456".into()));
+        assert_eq!(theme.base_bg, Theme::default_dark().base_bg);
     }
 
     #[test]
@@ -1921,5 +2545,34 @@ mod tests {
             search_text: "".into(),
         };
         assert!(open_url_for_row(&row, false).is_err());
+        let mut row = row;
+        row.bind = "127.0.0.1".into();
+        row.port = Some(9999);
+        assert!(open_url_for_row(&row, false).is_err());
+        row.bind = "127.0.2.3".into();
+        row.port = Some(8080);
+        assert!(open_url_for_row(&row, false).is_ok());
+    }
+
+    #[test]
+    fn palette_reload_applies_config_callback() {
+        let mut app = App {
+            config_reload: Some(Box::new(|| {
+                let mut cfg = lazyadmin_core::config::Config::default();
+                cfg.ui
+                    .keybindings
+                    .overrides
+                    .insert("quit".into(), "Q".into());
+                Ok((
+                    Theme::builtin("high-contrast").unwrap(),
+                    ResolvedKeybindings::from_config(&cfg).unwrap(),
+                ))
+            })),
+            ..Default::default()
+        };
+        run_palette_command(&mut app, "reload", 120);
+        assert_eq!(app.theme.name, "high-contrast");
+        assert_eq!(app.keybindings.bindings["quit"], vec!["Q"]);
+        assert_eq!(app.status.as_deref(), Some("config reloaded"));
     }
 }
