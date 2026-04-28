@@ -284,7 +284,7 @@ cargo run -p lazyadmin-cli -- tui --headless --json
 - [x] Themes load, validate, and downgrade for limited-color terminals.
 - [ ] Help overlay, palette, copy-diagnostic, and open all work with sane fallbacks.
 - [x] Docs cover TUI, themes, keybindings, decision records.
-- [ ] `cargo fmt`/`clippy`/`test`/`doc` all pass.
+- [x] `cargo fmt`/`clippy`/`test`/`doc` all pass.
 - [x] `docs/acceptance-v0_2.md` records v0.2 acceptance with PASS/PARTIAL/DEFERRED entries.
 
 ## Handoff notes for v0.3
@@ -300,4 +300,5 @@ cargo run -p lazyadmin-cli -- tui --headless --json
 - Live DiscoveryEvent handling intentionally treats procfs events as redraw/refresh hints; snapshot polling remains authoritative. Container/systemd native event streams remain deferred from PLAN-11.
 - Process Tree and Metrics are v0.2 situational views, not complete interaction surfaces: expand/collapse, selected-process inspector details, per-adapter latency/throughput, and telemetry-backed sparklines remain unchecked.
 - Copy diagnostic has a deterministic file fallback helper; full interactive clipboard/open shell integration is deferred. Palette reload/theme entries are present as non-interactive/testable surfaces, not a complete runtime config reloader.
+- Review follow-up fixed three release-readiness issues before final PLAN-12 review: `diff <before> -` now compares against the current snapshot, `free --dry-run --json` emits JSON, and partial config TOML files merge with defaults as documented. Free-port docs now accurately describe the current direct-process executor and mark manager-aware stop plans as deferred.
 - Workspace version was not bumped to 0.2.0 and no tag was created because release/tagging still needs user review.

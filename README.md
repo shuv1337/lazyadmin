@@ -52,7 +52,7 @@ lazyadmin free 3000
 lazyadmin diff /tmp/before.json - --json
 ```
 
-`free` uses manager-aware planning and confirmation rather than unsafe first-line kill commands. See [`docs/action-safety.md`](docs/action-safety.md).
+`free` currently validates direct process owners before sending SIGTERM, requires one consolidated confirmation, rescans after execution, and never escalates to SIGKILL automatically. Manager-aware Compose/Docker/systemd stop plans are still deferred. See [`docs/action-safety.md`](docs/action-safety.md).
 
 ## TUI
 

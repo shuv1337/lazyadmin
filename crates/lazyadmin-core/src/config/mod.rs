@@ -5,18 +5,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
     pub ports: PortsConfig,
+    #[serde(default)]
     pub actions: ActionsConfig,
+    #[serde(default)]
     pub redaction: RedactionConfig,
+    #[serde(default)]
     pub adapters: AdaptersConfig,
+    #[serde(default)]
     pub projects: ProjectsConfig,
+    #[serde(default)]
     pub visibility: VisibilityConfig,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiConfig {
+    #[serde(default = "default_legacy_refresh_interval_ms")]
     pub refresh_interval_ms: u64,
     #[serde(default)]
     pub theme: UiThemeConfig,
@@ -71,38 +79,51 @@ fn default_event_debounce_ms() -> u64 {
 fn default_max_redraw_hz() -> u64 {
     30
 }
+fn default_legacy_refresh_interval_ms() -> u64 {
+    1000
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortsConfig {
+    #[serde(default = "default_common_ports")]
     pub common: Vec<u16>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionsConfig {
+    #[serde(default = "default_true")]
     pub require_confirmation: bool,
+    #[serde(default)]
     pub free_multi_owner: FreeMultiOwner,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreeMultiOwner {
+    #[default]
     StopAll,
     Prompt,
     Refuse,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionConfig {
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdaptersConfig {
+    #[serde(default)]
     pub sockets: SocketsAdapterConfig,
     #[serde(default)]
     pub events: EventsConfig,
+    #[serde(default)]
     pub systemd: AdapterToggle,
+    #[serde(default)]
     pub container: AdapterToggle,
+    #[serde(default)]
     pub tracked: AdapterToggle,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SocketsAdapterConfig {
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub preferred: SocketDiscoveryPreference,
@@ -140,92 +161,139 @@ fn default_channel_capacity() -> usize {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterToggle {
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectsConfig {
+    #[serde(default = "default_project_roots")]
     pub roots: Vec<PathBuf>,
+    #[serde(default = "default_project_markers")]
     pub markers: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibilityConfig {
+    #[serde(default)]
     pub system_service_denylist: SystemServiceDenylist,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemServiceDenylist {
+    #[serde(default = "default_system_service_denylist_units")]
     pub units: Vec<String>,
 }
 
-impl Default for Config {
+impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            ui: UiConfig {
-                refresh_interval_ms: 1000,
-                theme: UiThemeConfig::default(),
-                keybindings: UiKeybindingsConfig::default(),
-                refresh: UiRefreshConfig::default(),
-            },
-            ports: PortsConfig {
-                common: vec![3000, 5173, 5432, 6379, 8080],
-            },
-            actions: ActionsConfig {
-                require_confirmation: true,
-                free_multi_owner: FreeMultiOwner::StopAll,
-            },
-            redaction: RedactionConfig { enabled: true },
-            adapters: AdaptersConfig {
-                sockets: SocketsAdapterConfig {
-                    enabled: true,
-                    preferred: SocketDiscoveryPreference::Proc,
-                    confirm_dual_stack: true,
-                },
-                events: EventsConfig::default(),
-                systemd: AdapterToggle { enabled: true },
-                container: AdapterToggle { enabled: true },
-                tracked: AdapterToggle { enabled: true },
-            },
-            projects: ProjectsConfig {
-                roots: vec![
-                    PathBuf::from("~/src"),
-                    PathBuf::from("~/code"),
-                    PathBuf::from("~/work"),
-                ],
-                markers: vec![
-                    ".git",
-                    "package.json",
-                    "pyproject.toml",
-                    "Cargo.toml",
-                    "go.mod",
-                    "compose.yaml",
-                    "flake.nix",
-                    ".envrc",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            },
-            visibility: VisibilityConfig {
-                system_service_denylist: SystemServiceDenylist {
-                    units: vec![
-                        "systemd-resolved.service",
-                        "systemd-networkd.service",
-                        "systemd-timesyncd.service",
-                        "systemd-logind.service",
-                        "systemd-udevd.service",
-                        "NetworkManager.service",
-                        "dbus.service",
-                        "avahi-daemon.service",
-                        "cups.service",
-                        "chronyd.service",
-                        "sshd.service",
-                    ]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-                },
-            },
+            refresh_interval_ms: default_legacy_refresh_interval_ms(),
+            theme: UiThemeConfig::default(),
+            keybindings: UiKeybindingsConfig::default(),
+            refresh: UiRefreshConfig::default(),
         }
     }
+}
+
+impl Default for PortsConfig {
+    fn default() -> Self {
+        Self {
+            common: default_common_ports(),
+        }
+    }
+}
+
+fn default_common_ports() -> Vec<u16> {
+    vec![3000, 5173, 5432, 6379, 8080]
+}
+
+impl Default for ActionsConfig {
+    fn default() -> Self {
+        Self {
+            require_confirmation: true,
+            free_multi_owner: FreeMultiOwner::StopAll,
+        }
+    }
+}
+
+impl Default for RedactionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for SocketsAdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            preferred: SocketDiscoveryPreference::Proc,
+            confirm_dual_stack: true,
+        }
+    }
+}
+
+impl Default for AdapterToggle {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for ProjectsConfig {
+    fn default() -> Self {
+        Self {
+            roots: default_project_roots(),
+            markers: default_project_markers(),
+        }
+    }
+}
+
+fn default_project_roots() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("~/src"),
+        PathBuf::from("~/code"),
+        PathBuf::from("~/work"),
+    ]
+}
+
+fn default_project_markers() -> Vec<String> {
+    vec![
+        ".git",
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "compose.yaml",
+        "flake.nix",
+        ".envrc",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+impl Default for SystemServiceDenylist {
+    fn default() -> Self {
+        Self {
+            units: default_system_service_denylist_units(),
+        }
+    }
+}
+
+fn default_system_service_denylist_units() -> Vec<String> {
+    vec![
+        "systemd-resolved.service",
+        "systemd-networkd.service",
+        "systemd-timesyncd.service",
+        "systemd-logind.service",
+        "systemd-udevd.service",
+        "NetworkManager.service",
+        "dbus.service",
+        "avahi-daemon.service",
+        "cups.service",
+        "chronyd.service",
+        "sshd.service",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 impl Config {
@@ -595,5 +663,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("did you mean `quit`"));
+    }
+
+    #[test]
+    fn partial_config_merges_with_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "lazyadmin-partial-config-{}.toml",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[ui.keybindings.overrides]
+help = "esc"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(Some(&path)).unwrap();
+        let resolved = keybindings::ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(cfg.ui.refresh_interval_ms, 1000);
+        assert_eq!(cfg.adapters.events.channel_capacity, 256);
+        assert_eq!(resolved.bindings["help"], vec!["esc"]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn partial_nested_adapter_config_merges_with_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "lazyadmin-partial-adapter-config-{}.toml",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[adapters.sockets]
+preferred = "both"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert!(cfg.adapters.sockets.enabled);
+        assert_eq!(
+            cfg.adapters.sockets.preferred,
+            SocketDiscoveryPreference::Both
+        );
+        assert!(cfg.adapters.systemd.enabled);
+        assert!(cfg.adapters.container.enabled);
+
+        let _ = std::fs::remove_file(path);
     }
 }

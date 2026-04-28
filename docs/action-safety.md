@@ -16,7 +16,7 @@ Low-risk actions may use yes/no confirmation. High-risk or multi-owner actions r
 
 ## Free-port behavior
 
-Free-port resolves listeners, owners, and preferred manager-aware actions first. Priority is: Compose service, Docker container, systemd service/socket, lazyadmin tracked run, process group, PID, and only explicit SIGKILL later. If a workload is both tracked and a systemd scope, tracked-run semantics win.
+Free-port resolves listeners and validates direct process owners before signaling. The current executor can send SIGTERM to a process group or PID after the `ProcessKey` still matches, then rescans and reports the factual result. Manager-aware plans for Compose services, Docker containers, systemd services/sockets, and lazyadmin tracked runs are deferred until their verified executors are wired in; raw process signaling remains the conservative fallback, and SIGKILL is never automatic.
 
 After execution lazyadmin rescans and reports factual before/after state. A rebound listener may indicate a restart policy; lazyadmin reports it rather than claiming success or failure.
 

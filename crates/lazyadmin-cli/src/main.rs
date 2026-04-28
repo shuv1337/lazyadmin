@@ -22,7 +22,7 @@ use lazyadmin_core::{
         Snapshot,
     },
     selector::{Selector, parse_selector},
-    snapshot::{SnapshotBuilder, build_empty_snapshot},
+    snapshot::SnapshotBuilder,
 };
 use std::{
     collections::BTreeMap,
@@ -233,7 +233,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             Ok(())
         }
         Some(Command::Tui(args)) => run_tui_command(args, cli.json, cli.config.as_deref()).await,
-        Some(Command::Diff(args)) => run_diff(args, cli.json).await,
+        Some(Command::Diff(args)) => run_diff(args, cli.json, cli.config.as_deref()).await,
         Some(Command::Config {
             command: ConfigCommand::Check,
         }) => {
@@ -752,13 +752,13 @@ async fn run_run(args: RunArgs, json: bool) -> std::result::Result<(), AppError>
     Ok(())
 }
 
-async fn run_diff(args: DiffArgs, json: bool) -> std::result::Result<(), AppError> {
+async fn run_diff(
+    args: DiffArgs,
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
     let before = read_snapshot(&args.before)?;
-    let after = if args.after.as_os_str() == "-" {
-        build_empty_snapshot()
-    } else {
-        read_snapshot(&args.after)?
-    };
+    let after = read_diff_after_snapshot(&args.after, config_path).await?;
     let diff = diff_snapshots(&before, &after);
     if json {
         print_json(&diff)?;
@@ -769,6 +769,17 @@ async fn run_diff(args: DiffArgs, json: bool) -> std::result::Result<(), AppErro
         }
     }
     Ok(())
+}
+
+async fn read_diff_after_snapshot(
+    path: &PathBuf,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<Snapshot, AppError> {
+    if path.as_os_str() == "-" {
+        build_snapshot(config_path).await
+    } else {
+        read_snapshot(path)
+    }
 }
 
 fn read_snapshot(path: &PathBuf) -> std::result::Result<Snapshot, AppError> {
@@ -1250,18 +1261,19 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         dry_run: free_dry_run(args.port, &listeners, &actions),
         actions,
     };
-    if args.dry_run || (!args.yes_for_test_only && !json) {
-        render_free_plan(&plan);
-        if args.dry_run {
-            return Ok(());
+    if args.dry_run {
+        if json {
+            print_json(&plan)?;
+        } else {
+            render_free_plan(&plan);
         }
+        return Ok(());
+    }
+    if !args.yes_for_test_only && !json {
+        render_free_plan(&plan);
         if !confirm_free()? {
             return unavailable("free cancelled");
         }
-    }
-    if json && args.dry_run {
-        print_json(&plan)?;
-        return Ok(());
     }
     let futs = plan.actions.iter().map(execute_direct_action);
     let results = futures::future::join_all(futs).await;
@@ -1351,7 +1363,7 @@ fn free_dry_run(
     listeners: &[lazyadmin_core::model::Listener],
     actions: &[Action],
 ) -> Vec<DryRunLine> {
-    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; manager actions would be preferred over raw signals when discovered".into()) }];
+    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; current executor validates direct process owners before signaling".into()) }];
     for a in actions {
         v.extend(a.dry_run.clone());
     }
@@ -1598,5 +1610,13 @@ mod tests {
                 .dropped,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn diff_dash_after_uses_current_snapshot() {
+        let snap = read_diff_after_snapshot(&PathBuf::from("-"), None)
+            .await
+            .unwrap();
+        assert!(!snap.managers.is_empty());
     }
 }
