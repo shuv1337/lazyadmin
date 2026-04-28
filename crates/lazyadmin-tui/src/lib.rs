@@ -28,8 +28,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row,
-        Sparkline, Table, TableState, Wrap,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Gauge, List, ListItem,
+        Paragraph, Row, Sparkline, Table, TableState, Wrap,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -319,28 +319,36 @@ impl Theme {
     pub fn builtin(name: &str) -> Option<Self> {
         let mut t = Self {
             name: name.into(),
-            base_fg: ColorSpec("white".into()),
-            base_bg: ColorSpec("black".into()),
-            accent: ColorSpec("cyan".into()),
-            ok: ColorSpec("green".into()),
-            info: ColorSpec("blue".into()),
-            warning: ColorSpec("yellow".into()),
-            degraded: ColorSpec("magenta".into()),
-            error: ColorSpec("red".into()),
-            selection: ColorSpec("bright-blue".into()),
-            footer: ColorSpec("gray".into()),
+            base_fg: ColorSpec("#d7e2ed".into()),
+            base_bg: ColorSpec("#07131c".into()),
+            accent: ColorSpec("#f2b84b".into()),
+            ok: ColorSpec("#2dd4bf".into()),
+            info: ColorSpec("#7aa2f7".into()),
+            warning: ColorSpec("#f6c177".into()),
+            degraded: ColorSpec("#c678dd".into()),
+            error: ColorSpec("#ff5d5d".into()),
+            selection: ColorSpec("#1f4f66".into()),
+            footer: ColorSpec("#8aa0b2".into()),
             fallback_palette: PaletteMode::Truecolor,
         };
         match name {
             "default-dark" => Some(t),
             "default-light" => {
-                t.base_fg = ColorSpec("black".into());
-                t.base_bg = ColorSpec("white".into());
+                t.base_fg = ColorSpec("#17202a".into());
+                t.base_bg = ColorSpec("#f7f3ea".into());
+                t.accent = ColorSpec("#875f00".into());
+                t.info = ColorSpec("#245c9e".into());
+                t.selection = ColorSpec("#d9e8f2".into());
+                t.footer = ColorSpec("#53616f".into());
                 Some(t)
             }
             "high-contrast" => {
+                t.base_fg = ColorSpec("white".into());
+                t.base_bg = ColorSpec("black".into());
                 t.accent = ColorSpec("yellow".into());
-                t.selection = ColorSpec("cyan".into());
+                t.info = ColorSpec("cyan".into());
+                t.selection = ColorSpec("blue".into());
+                t.footer = ColorSpec("white".into());
                 t.fallback_palette = PaletteMode::Sixteen;
                 Some(t)
             }
@@ -348,6 +356,8 @@ impl Theme {
                 t.base_bg = ColorSpec("#002b36".into());
                 t.base_fg = ColorSpec("#839496".into());
                 t.accent = ColorSpec("#268bd2".into());
+                t.selection = ColorSpec("#073642".into());
+                t.footer = ColorSpec("#586e75".into());
                 Some(t)
             }
             _ => None,
@@ -652,6 +662,7 @@ pub struct RowVm {
     pub bind: String,
     pub owner: String,
     pub runtime: String,
+    pub exposure: String,
     pub project: String,
     pub badges: Vec<String>,
     pub search_text: String,
@@ -820,16 +831,9 @@ pub fn build_view_model_with_state(
             hidden += 1;
             continue;
         }
-        let owner = l
-            .owners
-            .first()
-            .map(|o| format!("{o:?}"))
-            .unwrap_or_else(|| "unknown".into());
-        let runtime = if is_system {
-            "SystemdSystem".to_string()
-        } else {
-            "direct".into()
-        };
+        let owner = listener_owner_label(l, snapshot);
+        let runtime = listener_runtime_label(l, snapshot, is_system);
+        let exposure = exposure_label(&l.exposure);
         let mut badges = Vec::new();
         if matches!(
             l.exposure,
@@ -844,8 +848,8 @@ pub fn build_view_model_with_state(
                 .unwrap_or_else(|| "-".into())
         });
         let search_text = format!(
-            "{:?} {} {} {} {:?}",
-            l.port, bind, owner, runtime, l.protocol
+            "{:?} {} {} {} {:?} {}",
+            l.port, bind, owner, runtime, l.protocol, exposure
         );
         rows.push(RowVm {
             id: l.id.to_string(),
@@ -853,6 +857,7 @@ pub fn build_view_model_with_state(
             bind,
             owner,
             runtime,
+            exposure,
             project: "-".into(),
             badges,
             search_text,
@@ -1038,28 +1043,190 @@ pub fn build_metrics_with_adapters(
         adapters,
     }
 }
+
+fn listener_owner_label(listener: &lazyadmin_core::model::Listener, snapshot: &Snapshot) -> String {
+    listener
+        .owners
+        .iter()
+        .find_map(|owner| match owner {
+            EntityRef::Workload(id) => snapshot
+                .workloads
+                .iter()
+                .find(|workload| &workload.id == id)
+                .map(|workload| compact_text(&workload.display_name, 38)),
+            EntityRef::Process(key) => snapshot
+                .processes
+                .iter()
+                .find(|process| &process.key == key)
+                .map(process_owner_label)
+                .or_else(|| Some(format!("pid {}", key.pid))),
+            EntityRef::Manager(id) => snapshot
+                .managers
+                .iter()
+                .find(|manager| &manager.id == id)
+                .map(|manager| compact_text(&manager.name, 38)),
+            EntityRef::Project(id) => snapshot
+                .projects
+                .iter()
+                .find(|project| &project.id == id)
+                .map(|project| compact_text(&project.name, 38)),
+            EntityRef::Run(id) => Some(format!("run {}", short_id(&id.to_string()))),
+            EntityRef::Listener(id) => Some(format!("listener {}", short_id(&id.to_string()))),
+            EntityRef::Action(id) => Some(format!("action {}", short_id(&id.to_string()))),
+        })
+        .unwrap_or_else(|| "unowned".into())
+}
+
+fn listener_runtime_label(
+    listener: &lazyadmin_core::model::Listener,
+    snapshot: &Snapshot,
+    is_system: bool,
+) -> String {
+    if let Some(label) = listener.owners.iter().find_map(|owner| match owner {
+        EntityRef::Workload(id) => snapshot
+            .workloads
+            .iter()
+            .find(|workload| &workload.id == id)
+            .map(|workload| runtime_kind_label(&workload.runtime)),
+        EntityRef::Manager(id) => snapshot
+            .managers
+            .iter()
+            .find(|manager| &manager.id == id)
+            .map(|manager| runtime_kind_label(&manager.kind)),
+        EntityRef::Process(key) => snapshot
+            .processes
+            .iter()
+            .find(|process| &process.key == key)
+            .map(process_runtime_label),
+        _ => None,
+    }) {
+        return label;
+    }
+    if is_system {
+        "systemd".into()
+    } else {
+        "direct".into()
+    }
+}
+
+fn process_owner_label(process: &lazyadmin_core::model::Process) -> String {
+    let command = process
+        .exe
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            process.cmdline.first().map(|cmd| {
+                std::path::Path::new(cmd)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(cmd)
+                    .to_string()
+            })
+        })
+        .filter(|cmd| !cmd.trim().is_empty())
+        .unwrap_or_else(|| "process".into());
+    compact_text(&format!("{command} pid {}", process.pid), 38)
+}
+
+fn process_runtime_label(process: &lazyadmin_core::model::Process) -> String {
+    if process.systemd_unit.is_some() {
+        "systemd".into()
+    } else if process.container_id.is_some() {
+        "container".into()
+    } else if process.lazyadmin_run_id.is_some() {
+        "tracked".into()
+    } else {
+        "direct".into()
+    }
+}
+
+fn runtime_kind_label(kind: &lazyadmin_core::model::RuntimeKind) -> String {
+    match kind {
+        lazyadmin_core::model::RuntimeKind::Direct => "direct",
+        lazyadmin_core::model::RuntimeKind::LazyadminTracked => "tracked",
+        lazyadmin_core::model::RuntimeKind::SystemdSystem
+        | lazyadmin_core::model::RuntimeKind::SystemdUser
+        | lazyadmin_core::model::RuntimeKind::SystemdSocket => "systemd",
+        lazyadmin_core::model::RuntimeKind::Docker => "docker",
+        lazyadmin_core::model::RuntimeKind::DockerCompose => "compose",
+        lazyadmin_core::model::RuntimeKind::Podman => "podman",
+        lazyadmin_core::model::RuntimeKind::PodmanCompose => "podman-compose",
+        lazyadmin_core::model::RuntimeKind::PodmanPod => "podman-pod",
+        lazyadmin_core::model::RuntimeKind::KubectlPortForward => "kubectl",
+        lazyadmin_core::model::RuntimeKind::SshTunnel => "ssh",
+        lazyadmin_core::model::RuntimeKind::Cloudflared => "cloudflared",
+        lazyadmin_core::model::RuntimeKind::Socat => "socat",
+        lazyadmin_core::model::RuntimeKind::Supervisor => "supervisor",
+        lazyadmin_core::model::RuntimeKind::Launchd => "launchd",
+        lazyadmin_core::model::RuntimeKind::Unknown => "unknown",
+    }
+    .into()
+}
+
+fn exposure_label(exposure: &Exposure) -> String {
+    match exposure {
+        Exposure::Loopback => "loopback",
+        Exposure::LanOrPublic => "lan/public",
+        Exposure::Public => "public",
+        Exposure::ContainerOnly => "container",
+        Exposure::UnixLocal => "unix",
+        Exposure::Unknown => "unknown",
+    }
+    .into()
+}
+
+fn short_id(value: &str) -> String {
+    compact_text(value, 12)
+}
+
+fn compact_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", value.chars().take(keep).collect::<String>())
+}
 fn inspector_for_row(row: &RowVm) -> InspectorVm {
     InspectorVm {
-        title: row.owner.clone(),
+        title: format!(
+            "Listener {}",
+            row.port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| short_id(&row.id))
+        ),
         lines: vec![
-            format!("identity: {}", row.id),
-            format!("state: unknown"),
-            format!("runtime: {}", row.runtime),
-            format!("ports/listeners: {:?}", row.port),
-            format!("project: {}", row.project),
-            "logs: no log source for raw direct processes unless manager metadata is available"
-                .into(),
-            format!("warnings: {}", row.badges.join(", ")),
-            "actions: open logs restart stop free-port copy-diagnostic".into(),
+            format!(
+                "Port: {}",
+                row.port
+                    .map(|port| port.to_string())
+                    .unwrap_or_else(|| "-".into())
+            ),
+            format!("Bind: {}", row.bind),
+            format!("Owner: {}", row.owner),
+            format!("Runtime: {}", row.runtime),
+            format!("Scope: {}", row.exposure),
+            format!("Project: {}", row.project),
+            "Logs: unavailable for direct processes".into(),
+            format!(
+                "Warnings: {}",
+                if row.badges.is_empty() {
+                    "-".into()
+                } else {
+                    row.badges.join(", ")
+                }
+            ),
+            "Actions: open  logs  restart  stop  free-port".into(),
         ],
         provenance: vec![
-            "▶ listener discovered via core snapshot services".into(),
-            "confidence: best-effort".into(),
+            format!("listener id {}", short_id(&row.id)),
+            "core snapshot services; confidence best-effort".into(),
         ],
         provenance_expanded: false,
         diagnostic_markdown: format!(
-            "# lazyadmin diagnostic\n\n- owner: {}\n- port: {:?}\n- runtime: {}\n- provenance: core snapshot\n",
-            row.owner, row.port, row.runtime
+            "# lazyadmin diagnostic\n\n- owner: {}\n- port: {:?}\n- bind: {}\n- runtime: {}\n- scope: {}\n- provenance: core snapshot\n",
+            row.owner, row.port, row.bind, row.runtime, row.exposure
         ),
     }
 }
@@ -1116,31 +1283,31 @@ fn inspector_for_process(snapshot: &Snapshot, key: &ProcessKey) -> Option<Inspec
         title: format!("pid {}", process.pid),
         lines: vec![
             format!(
-                "identity: pid {} start {}",
+                "Identity: pid {} start {}",
                 process.pid, process.start_time_ticks
             ),
-            "state: running".into(),
-            format!("runtime: {runtime}"),
+            "State: running".into(),
+            format!("Runtime: {runtime}"),
             format!(
-                "ports/listeners: {}",
+                "Ports: {}",
                 if ports.is_empty() {
                     "-".into()
                 } else {
                     ports.join(", ")
                 }
             ),
-            format!("project: {project}"),
-            format!("tracked metadata: {tracked}"),
+            format!("Project: {project}"),
+            format!("Tracked: {tracked}"),
             format!(
-                "logs: {}",
+                "Logs: {}",
                 process
                     .lazyadmin_run_id
                     .as_ref()
                     .map(|_| "tracked run logs available")
                     .unwrap_or("no direct process log source")
             ),
-            "warnings: -".into(),
-            "actions: open logs restart stop free-port copy-diagnostic".into(),
+            "Warnings: -".into(),
+            "Actions: open  logs  restart  stop  free-port".into(),
         ],
         provenance: process
             .provenance
@@ -1182,6 +1349,8 @@ fn groups(show_system: bool) -> Vec<String> {
         "Direct processes",
         "Logs",
         "Doctor",
+        "Process tree",
+        "Metrics",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1342,6 +1511,138 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
     render_view_kind(view_model, frame, area, theme, ViewKind::Everything, None);
 }
 
+fn panel_block(title: impl Into<String>, theme: &Theme, active: bool) -> Block<'static> {
+    let border = if active {
+        theme.accent.color()
+    } else {
+        theme.footer.color()
+    };
+    Block::default()
+        .title(format!(" {} ", title.into()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border).bg(theme.base_bg.color()))
+        .style(
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
+        )
+}
+
+fn quiet_block(title: impl Into<String>, theme: &Theme) -> Block<'static> {
+    Block::default()
+        .title(format!(" {} ", title.into()))
+        .borders(Borders::RIGHT)
+        .border_style(
+            Style::default()
+                .fg(theme.selection.color())
+                .bg(theme.base_bg.color()),
+        )
+        .style(
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )
+}
+
+fn title_for_view(view: ViewKind) -> &'static str {
+    match view {
+        ViewKind::Ports => "Ports",
+        ViewKind::Public => "Public",
+        ViewKind::Conflicts => "Conflicts",
+        ViewKind::Projects => "Projects",
+        ViewKind::Managers => "Managers",
+        ViewKind::Orphans => "Orphans",
+        ViewKind::TrackedRuns => "Tracked Runs",
+        ViewKind::Logs => "Logs",
+        ViewKind::Doctor => "Doctor",
+        ViewKind::ProcessTree => "Process Tree",
+        ViewKind::Metrics => "Metrics",
+        ViewKind::Everything => "Everything",
+    }
+}
+
+fn group_is_active(group: &str, view: ViewKind) -> bool {
+    matches!(
+        (group, view),
+        ("All/Everything", ViewKind::Everything)
+            | ("Ports", ViewKind::Ports)
+            | ("Public listeners", ViewKind::Public)
+            | ("Conflicts", ViewKind::Conflicts)
+            | ("Orphans", ViewKind::Orphans)
+            | ("Tracked runs", ViewKind::TrackedRuns)
+            | ("Projects", ViewKind::Projects)
+            | ("Logs", ViewKind::Logs)
+            | ("Doctor", ViewKind::Doctor)
+            | ("Process tree", ViewKind::ProcessTree)
+            | ("Metrics", ViewKind::Metrics)
+    )
+}
+
+fn render_header(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    view: ViewKind,
+) {
+    let total = view_model.rows.len();
+    let public = view_model
+        .rows
+        .iter()
+        .filter(|row| row.badges.iter().any(|badge| badge == "PUBLIC"))
+        .count();
+    let adapters = view_model.metrics.adapters.len();
+    let line = Line::from(vec![
+        Span::styled(
+            "lazyadmin",
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}  ", title_for_view(view)),
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{total} listeners"),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            format!("  {public} public"),
+            Style::default()
+                .fg(if public > 0 {
+                    theme.warning.color()
+                } else {
+                    theme.footer.color()
+                })
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            format!("  {adapters} adapters"),
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color()),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line)
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme.selection.color())),
+            )
+            .style(Style::default().bg(theme.base_bg.color())),
+        area,
+    );
+}
+
 fn render_view_kind(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -1351,23 +1652,35 @@ fn render_view_kind(
     keybindings: Option<&ResolvedKeybindings>,
 ) {
     tracing::debug!("tui.render");
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.base_bg.color())),
+        area,
+    );
     if view_model.layout == LayoutMode::Refuse {
-        let p = Paragraph::new("lazyadmin TUI needs 60+ columns. Try `lazyadmin ps --json`, `lazyadmin public`, or widen the terminal.").alignment(Alignment::Center).block(Block::default().title("lazyadmin").borders(Borders::ALL));
+        let p = Paragraph::new("lazyadmin TUI needs 60+ columns. Try `lazyadmin ps --json`, `lazyadmin public`, or widen the terminal.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.base_fg.color()).bg(theme.base_bg.color()))
+            .block(panel_block("lazyadmin", theme, true));
         frame.render_widget(p, area);
         return;
     }
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
         .split(area);
-    let body = vertical[0];
+    render_header(view_model, frame, vertical[0], theme, view);
+    let body = vertical[1];
     let chunks = match view_model.layout {
         LayoutMode::ThreePane => Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(24),
-                Constraint::Min(40),
-                Constraint::Length(34),
+                Constraint::Length(26),
+                Constraint::Min(48),
+                Constraint::Length(40),
             ])
             .split(body),
         _ => Layout::default()
@@ -1380,10 +1693,37 @@ fn render_view_kind(
             view_model
                 .groups
                 .iter()
-                .map(|g| ListItem::new(g.clone()))
+                .map(|g| {
+                    let active = group_is_active(g, view);
+                    let marker = if active { "› " } else { "  " };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            marker,
+                            Style::default()
+                                .fg(theme.accent.color())
+                                .bg(theme.base_bg.color()),
+                        ),
+                        Span::styled(
+                            g.clone(),
+                            Style::default()
+                                .fg(if active {
+                                    theme.base_fg.color()
+                                } else {
+                                    theme.footer.color()
+                                })
+                                .bg(theme.base_bg.color())
+                                .add_modifier(if active {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                    ]))
+                })
                 .collect::<Vec<_>>(),
         )
-        .block(Block::default().title("Views").borders(Borders::ALL));
+        .block(quiet_block("Views", theme))
+        .style(Style::default().bg(theme.base_bg.color()));
         frame.render_widget(groups, chunks[0]);
         render_main_pane(view_model, frame, chunks[1], theme, view, keybindings);
         render_inspector(view_model, frame, chunks[2], theme);
@@ -1407,8 +1747,12 @@ fn render_view_kind(
         status.push("lazyadmin ready — ? help, : palette".into());
     }
     frame.render_widget(
-        Paragraph::new(status.join(" │ ")).style(Style::default().fg(theme.footer.color())),
-        vertical[1],
+        Paragraph::new(status.join(" │ ")).style(
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ),
+        vertical[2],
     );
 }
 
@@ -1439,16 +1783,6 @@ fn render_rows_table(
     theme: &Theme,
     view: ViewKind,
 ) {
-    let title = match view {
-        ViewKind::Ports => "Ports",
-        ViewKind::Public => "Public",
-        ViewKind::Conflicts => "Conflicts",
-        ViewKind::Projects => "Projects",
-        ViewKind::Managers => "Managers",
-        ViewKind::Orphans => "Orphans",
-        ViewKind::TrackedRuns => "Tracked Runs",
-        _ => "Everything",
-    };
     let rows = view_model
         .rows
         .iter()
@@ -1457,34 +1791,80 @@ fn render_rows_table(
             ViewKind::Ports => r.port.is_some(),
             _ => true,
         })
-        .map(|r| {
+        .enumerate()
+        .map(|(idx, r)| {
+            let quiet = if idx % 2 == 0 {
+                theme.base_fg.color()
+            } else {
+                theme.footer.color()
+            };
+            let exposure_style = if r.badges.iter().any(|badge| badge == "PUBLIC") {
+                Style::default()
+                    .fg(theme.warning.color())
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color())
+            };
             Row::new(vec![
-                Cell::from(r.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into())),
-                Cell::from(r.bind.clone()),
-                Cell::from(r.owner.clone()),
-                Cell::from(r.runtime.clone()),
-                Cell::from(r.badges.join(" ")),
+                Cell::from(Span::styled(
+                    r.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    Style::default()
+                        .fg(theme.accent.color())
+                        .bg(theme.base_bg.color()),
+                )),
+                Cell::from(Span::styled(
+                    compact_text(&r.bind, 22),
+                    Style::default().fg(quiet).bg(theme.base_bg.color()),
+                )),
+                Cell::from(Span::styled(
+                    r.owner.clone(),
+                    Style::default()
+                        .fg(theme.base_fg.color())
+                        .bg(theme.base_bg.color()),
+                )),
+                Cell::from(Span::styled(
+                    r.runtime.clone(),
+                    Style::default()
+                        .fg(theme.info.color())
+                        .bg(theme.base_bg.color()),
+                )),
+                Cell::from(Span::styled(r.exposure.clone(), exposure_style)),
             ])
+            .style(Style::default().bg(theme.base_bg.color()))
         });
     let table = Table::new(
         rows,
         [
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(18),
-            Constraint::Min(16),
-            Constraint::Length(14),
-            Constraint::Length(18),
+            Constraint::Min(24),
+            Constraint::Length(12),
+            Constraint::Length(12),
         ],
     )
     .header(
-        Row::new(["Port", "Bind", "Owner", "Runtime", "Badges"]).style(
+        Row::new(["Port", "Bind", "Owner", "Runtime", "Scope"]).style(
             Style::default()
                 .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
                 .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(Block::default().title(title).borders(Borders::ALL))
-    .row_highlight_style(Style::default().bg(theme.selection.color()));
+    .block(panel_block(title_for_view(view), theme, true))
+    .style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color()),
+    )
+    .row_highlight_style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.selection.color())
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(table, area);
 }
 
@@ -1498,32 +1878,74 @@ fn render_inspector(
         .inspector
         .lines
         .iter()
-        .map(|l| Line::from(l.clone()))
+        .map(|line| inspector_line(line, theme))
         .collect();
-    lines.push(Line::from("provenance:"));
-    lines.extend(
-        view_model
-            .inspector
-            .provenance
-            .iter()
-            .map(|p| Line::from(format!("  {p}"))),
-    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Provenance",
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(view_model.inspector.provenance.iter().map(|p| {
+        Line::from(Span::styled(
+            format!("  {}", compact_text(p, 72)),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ))
+    }));
     let widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title(view_model.inspector.title.clone())
-                .borders(Borders::ALL),
-        )
-        .style(Style::default().fg(theme.base_fg.color()));
+        .block(panel_block(
+            view_model.inspector.title.clone(),
+            theme,
+            false,
+        ))
+        .style(
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
+        );
     frame.render_widget(widget, area);
+}
+
+fn inspector_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
+    if let Some((label, value)) = line.split_once(':') {
+        Line::from(vec![
+            Span::styled(
+                format!("{label:<10}"),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            ),
+            Span::styled(
+                compact_text(value.trim(), 80),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
+        ))
+    }
 }
 
 fn render_logs(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
     let p = Paragraph::new(view_model.inspector.lines.join("\n"))
         .wrap(Wrap { trim: false })
-        .block(Block::default().title("Logs preview").borders(Borders::ALL))
-        .style(Style::default().fg(theme.info.color()));
+        .block(panel_block("Logs preview", theme, true))
+        .style(
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color()),
+        );
     frame.render_widget(p, area);
 }
 fn render_doctor_view(
@@ -1544,7 +1966,9 @@ fn render_doctor_view(
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title("Doctor").borders(Borders::ALL)),
+        Paragraph::new(lines)
+            .block(panel_block("Doctor", theme, true))
+            .style(Style::default().bg(theme.base_bg.color())),
         area,
     );
 }
@@ -1555,12 +1979,34 @@ fn render_process_tree(
     theme: &Theme,
 ) {
     let rows = view_model.process_tree.rows.iter().map(|r| {
+        let marker = if r.expanded { "▾" } else { "▸" };
         Row::new(vec![
-            Cell::from(format!("{}{}", "  ".repeat(r.depth), r.label)),
-            Cell::from(r.runtime.clone()),
-            Cell::from(r.workload.clone().unwrap_or_default()),
-            Cell::from(r.warnings.join(",")),
+            Cell::from(Span::styled(
+                format!("{}{} {}", "  ".repeat(r.depth), marker, r.label),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                r.runtime.clone(),
+                Style::default()
+                    .fg(theme.info.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                r.workload.clone().unwrap_or_else(|| "-".into()),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                r.warnings.join(","),
+                Style::default()
+                    .fg(theme.warning.color())
+                    .bg(theme.base_bg.color()),
+            )),
         ])
+        .style(Style::default().bg(theme.base_bg.color()))
     });
     let table = Table::new(
         rows,
@@ -1572,11 +2018,24 @@ fn render_process_tree(
         ],
     )
     .header(
-        Row::new(["Process", "Runtime", "Workload", "Warnings"])
-            .style(Style::default().fg(theme.accent.color())),
+        Row::new(["Process", "Runtime", "Workload", "Warnings"]).style(
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color()),
+        ),
     )
-    .block(Block::default().title("Process Tree").borders(Borders::ALL))
-    .row_highlight_style(Style::default().bg(theme.selection.color()));
+    .block(panel_block("Process Tree", theme, true))
+    .style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color()),
+    )
+    .row_highlight_style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.selection.color())
+            .add_modifier(Modifier::BOLD),
+    );
     let mut state = TableState::default();
     if let Some(selected) = &view_model.process_tree.selected {
         if let Some(index) = view_model
@@ -1609,24 +2068,20 @@ fn render_metrics(
         (view_model.metrics.listeners_loopback + view_model.metrics.listeners_public).max(1) as u16;
     frame.render_widget(
         Gauge::default()
-            .block(
-                Block::default()
-                    .title("Events dropped")
-                    .borders(Borders::ALL),
-            )
+            .block(panel_block("Events dropped", theme, false))
             .gauge_style(Style::default().fg(theme.error.color()))
             .percent((view_model.metrics.events_dropped.min(100)) as u16),
         chunks[0],
     );
     frame.render_widget(
         Sparkline::default()
-            .block(
-                Block::default()
-                    .title("Adapter event rate")
-                    .borders(Borders::ALL),
-            )
+            .block(panel_block("Adapter event rate", theme, true))
             .data(&view_model.metrics.event_rate)
-            .style(Style::default().fg(theme.accent.color())),
+            .style(
+                Style::default()
+                    .fg(theme.accent.color())
+                    .bg(theme.base_bg.color()),
+            ),
         chunks[1],
     );
     let adapter_rows = view_model.metrics.adapters.iter().map(|adapter| {
@@ -1653,13 +2108,17 @@ fn render_metrics(
             ],
         )
         .header(
-            Row::new(["Adapter", "Events/s", "Drops", "Latency"])
-                .style(Style::default().fg(theme.accent.color())),
+            Row::new(["Adapter", "Events/s", "Drops", "Latency"]).style(
+                Style::default()
+                    .fg(theme.accent.color())
+                    .bg(theme.base_bg.color()),
+            ),
         )
-        .block(
-            Block::default()
-                .title("Adapter health")
-                .borders(Borders::ALL),
+        .block(panel_block("Adapter health", theme, false))
+        .style(
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
         ),
         chunks[2],
     );
@@ -1673,11 +2132,11 @@ fn render_metrics(
     ];
     frame.render_widget(
         BarChart::default()
-            .block(
-                Block::default()
-                    .title(format!("Listeners total {total}"))
-                    .borders(Borders::ALL),
-            )
+            .block(panel_block(
+                format!("Listeners total {total}"),
+                theme,
+                false,
+            ))
             .data(BarGroup::default().bars(&bars))
             .bar_style(Style::default().fg(theme.ok.color())),
         chunks[3],
@@ -2081,11 +2540,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(70, 70, f.area());
         let help = Paragraph::new(help_lines(&app.keybindings).join("\n"))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Help — active keybindings")
-                    .borders(Borders::ALL),
-            )
+            .block(panel_block("Help — active keybindings", &app.theme, true))
             .style(
                 Style::default()
                     .fg(app.theme.base_fg.color())
@@ -2202,7 +2657,10 @@ pub async fn run_default() -> Result<()> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lazyadmin_core::model::WarningSeverity;
+    use lazyadmin_core::model::{
+        AddressFamily, Confidence, DualStackState, Listener, ListenerId, ListenerState, Protocol,
+        WarningSeverity,
+    };
     use ratatui::backend::TestBackend;
     #[test]
     fn keymap_covers_plan_keys() {
@@ -2341,6 +2799,42 @@ mod tests {
             environment: Default::default(),
             provenance: vec![],
         }
+    }
+
+    fn listener_for_process(key: ProcessKey, port: u16) -> Listener {
+        let now = chrono::Utc::now();
+        Listener {
+            id: ListenerId::new(format!("tcp:127.0.0.1:{port}")),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(port),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "default".into(),
+            socket_inode: None,
+            exposure: Exposure::Loopback,
+            owners: vec![EntityRef::Process(key)],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: now,
+            last_seen: now,
+            dual_stack_state: DualStackState::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn row_owner_labels_are_compact_and_readable() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(1234, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, 8080));
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.rows[0].owner, "p1234 pid 1234");
+        assert!(!vm.rows[0].owner.contains("ProcessKey"));
+        assert_eq!(vm.rows[0].runtime, "direct");
+        assert_eq!(vm.rows[0].exposure, "loopback");
     }
 
     #[test]
@@ -2540,6 +3034,7 @@ accent = "#123456"
             bind: "0.0.0.0".into(),
             owner: "o".into(),
             runtime: "direct".into(),
+            exposure: "loopback".into(),
             project: "-".into(),
             badges: vec![],
             search_text: "".into(),
