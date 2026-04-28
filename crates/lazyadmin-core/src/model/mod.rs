@@ -83,6 +83,7 @@ pub enum RuntimeKind {
     SystemdSocket,
     Docker,
     DockerCompose,
+    Portless,
     Podman,
     PodmanCompose,
     PodmanPod,

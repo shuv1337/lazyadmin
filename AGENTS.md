@@ -7,6 +7,7 @@ This repository now contains the v0.2 Rust workspace for `lazyadmin` after PLAN-
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
 - `crates/lazyadmin-cli` — Clap command skeleton with `export`, `diff`, `config check`, read-only views, `doctor`, `logs`, `free`, and pause-registry commands. Runtime mutation is conservative and direct-process free validates `ProcessKey` before signaling.
+- `crates/lazyadmin-adapter-portless` — read-only portless route discovery for `PORTLESS_STATE_DIR`, `~/.portless`, and existing `/tmp/portless` legacy state. It emits `RuntimeKind::Portless` managers/workloads and never mutates portless state.
 - `crates/lazyadmin-tui` contains the Ratatui interface: responsive rendering of core view-models, Process Tree and Metrics views, theme/keybinding support, terminal panic guard, and live-refresh coalescing. View/render tests cover 120/90/70/50 column modes; avoid launching the TUI interactively in automation and prefer `lazyadmin tui --headless --json`.
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
@@ -37,6 +38,7 @@ This repository now contains the v0.2 Rust workspace for `lazyadmin` after PLAN-
 - TUI config knobs live under `[ui.theme]`, `[ui.keybindings]`, and `[ui.refresh]` (`tick_ms`, `event_debounce_ms`, `max_redraw_hz`). `lazyadmin config check --json` includes resolved keybindings for automation.
 - Event overflow counts are reusable via the core `EventDropCounter`; long-lived runtimes should pass that counter into snapshot/doctor builders. Stateless CLI `doctor`/`export` runs cannot observe historical fan-in drops and report that limitation explicitly.
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to a later release, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
+- Portless interop is read-only except for `free`: route state is read from `routes.json`, aliases use `pid = 0`, orphan cleanup is only a `doctor` hint to run `portless prune`, and `lazyadmin free <port>` sends `SIGTERM` to the portless CLI `ProcessKey` rather than the descendant dev-server process.
 
 ## Development standards
 
@@ -51,6 +53,8 @@ Run these before handing off foundation changes:
 
 ```bash
 cargo metadata --format-version=1
+cargo test -p lazyadmin-adapter-portless
+cargo test -p lazyadmin-cli --features integration-portless free_portless_app
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

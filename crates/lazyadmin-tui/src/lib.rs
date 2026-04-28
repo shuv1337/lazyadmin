@@ -19,6 +19,7 @@ use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::{
     config::keybindings::{KeybindAction, ResolvedKeybindings},
     model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot},
+    output::listener_rows,
     snapshot::build_empty_snapshot,
 };
 use ratatui::{
@@ -822,6 +823,7 @@ pub fn build_view_model_with_state(
     };
     let mut rows = Vec::new();
     let mut hidden = 0usize;
+    let projected_rows = listener_rows(snapshot);
     for l in &snapshot.listeners {
         let is_system = l
             .provenance
@@ -831,8 +833,13 @@ pub fn build_view_model_with_state(
             hidden += 1;
             continue;
         }
-        let owner = listener_owner_label(l, snapshot);
-        let runtime = listener_runtime_label(l, snapshot, is_system);
+        let projected = projected_rows.iter().find(|row| row.id == l.id);
+        let owner = projected
+            .and_then(|row| row.manager_detail.clone())
+            .unwrap_or_else(|| listener_owner_label(l, snapshot));
+        let runtime = projected
+            .and_then(|row| row.manager_label.clone())
+            .unwrap_or_else(|| listener_runtime_label(l, snapshot, is_system));
         let exposure = exposure_label(&l.exposure);
         let mut badges = Vec::new();
         if matches!(
@@ -1151,6 +1158,7 @@ fn runtime_kind_label(kind: &lazyadmin_core::model::RuntimeKind) -> String {
         | lazyadmin_core::model::RuntimeKind::SystemdSocket => "systemd",
         lazyadmin_core::model::RuntimeKind::Docker => "docker",
         lazyadmin_core::model::RuntimeKind::DockerCompose => "compose",
+        lazyadmin_core::model::RuntimeKind::Portless => "portless",
         lazyadmin_core::model::RuntimeKind::Podman => "podman",
         lazyadmin_core::model::RuntimeKind::PodmanCompose => "podman-compose",
         lazyadmin_core::model::RuntimeKind::PodmanPod => "podman-pod",

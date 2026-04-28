@@ -2,7 +2,7 @@ use crate::{config::Config, graph::Graph, model::*};
 use chrono::Utc;
 use futures::{Stream, stream::SelectAll};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     pin::Pin,
     sync::{
         Arc,
@@ -41,6 +41,7 @@ fn warn(code: &str, msg: impl Into<String>, entity: Option<EntityRef>) -> Warnin
 pub fn correlate(mut graph: Graph, _config: &Config) -> Graph {
     let start = Instant::now();
     classify_processes(&mut graph);
+    correlate_portless(&mut graph);
     detect_conflicts(&mut graph);
     tracing::debug!(
         listeners = graph.listeners.len(),
@@ -137,6 +138,148 @@ fn classify_processes(graph: &mut Graph) {
         }
     }
 }
+
+fn correlate_portless(graph: &mut Graph) {
+    let process_by_pid = processes_by_pid(graph);
+    let children = children_index(graph);
+    let listeners = graph.listeners.values().cloned().collect::<Vec<_>>();
+    let mut updates = Vec::new();
+    let mut edges = Vec::new();
+    let mut warnings = Vec::new();
+
+    for workload in graph
+        .workloads
+        .values()
+        .filter(|workload| workload.runtime == RuntimeKind::Portless)
+        .cloned()
+    {
+        let Some(route_pid) = portless_route_pid(&workload) else {
+            continue;
+        };
+        let candidates = process_by_pid.get(&route_pid).cloned().unwrap_or_default();
+        if candidates.len() != 1 {
+            warnings.push(warn(
+                "portless.route_pid_missing",
+                format!(
+                    "portless route {} references CLI pid {route_pid}, but procfs did not expose exactly one matching process",
+                    workload.display_name
+                ),
+                Some(EntityRef::Workload(workload.id.clone())),
+            ));
+            continue;
+        }
+        let cli_key = candidates[0].clone();
+        let descendants = descendant_processes(&cli_key, &children, 8);
+        let mut listener_ids = Vec::new();
+        let mut listener_owner_keys = Vec::new();
+        for listener in &listeners {
+            let matching_owners = listener
+                .owners
+                .iter()
+                .filter_map(|owner| match owner {
+                    EntityRef::Process(key) if descendants.contains(key) => Some(key.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if matching_owners.is_empty() {
+                continue;
+            }
+            listener_ids.push(listener.id.clone());
+            listener_owner_keys.extend(matching_owners);
+            edges.push(Edge {
+                kind: EdgeKind::WorkloadOwnsListener,
+                from: EntityRef::Workload(workload.id.clone()),
+                to: EntityRef::Listener(listener.id.clone()),
+                provenance: vec![prov(
+                    "procfs-descendant-of portless cli",
+                    format!("procfs-descendant-of portless cli pid {route_pid}"),
+                    Confidence::Medium,
+                )],
+            });
+        }
+        listener_owner_keys.sort_by(|a, b| {
+            (a.pid, a.start_time_ticks, &a.boot_id).cmp(&(b.pid, b.start_time_ticks, &b.boot_id))
+        });
+        listener_owner_keys.dedup();
+        listener_ids.sort();
+        listener_ids.dedup();
+        updates.push((workload.id, cli_key, listener_owner_keys, listener_ids));
+    }
+
+    for (workload_id, cli_key, pids, listeners) in updates {
+        if let Some(workload) = graph.workloads.get_mut(&workload_id) {
+            workload.source = Some(EntityRef::Process(cli_key));
+            workload.pids = pids;
+            workload.listeners = listeners;
+        }
+    }
+    for edge in edges {
+        if !graph.edges.iter().any(|existing| {
+            existing.kind == edge.kind && existing.from == edge.from && existing.to == edge.to
+        }) {
+            graph.edges.push(edge);
+        }
+    }
+    graph.warnings.extend(warnings);
+}
+
+fn processes_by_pid(graph: &Graph) -> HashMap<i32, Vec<ProcessKey>> {
+    let mut out: HashMap<i32, Vec<ProcessKey>> = HashMap::new();
+    for process in graph.processes.values() {
+        out.entry(process.pid)
+            .or_default()
+            .push(process.key.clone());
+    }
+    out
+}
+
+fn children_index(graph: &Graph) -> HashMap<i32, Vec<ProcessKey>> {
+    let mut out: HashMap<i32, Vec<ProcessKey>> = HashMap::new();
+    for process in graph.processes.values() {
+        if let Some(ppid) = process.ppid {
+            out.entry(ppid).or_default().push(process.key.clone());
+        }
+    }
+    out
+}
+
+fn descendant_processes(
+    root: &ProcessKey,
+    children: &HashMap<i32, Vec<ProcessKey>>,
+    depth_cap: usize,
+) -> HashSet<ProcessKey> {
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([(root.pid, 0usize)]);
+    while let Some((pid, depth)) = queue.pop_front() {
+        if depth >= depth_cap {
+            continue;
+        }
+        for child in children.get(&pid).into_iter().flatten() {
+            if seen.insert(child.clone()) {
+                queue.push_back((child.pid, depth + 1));
+            }
+        }
+    }
+    seen
+}
+
+fn portless_route_pid(workload: &Workload) -> Option<i32> {
+    workload
+        .provenance
+        .iter()
+        .find(|provenance| provenance.adapter == "portless")
+        .and_then(|provenance| extract_prefixed_i32(&provenance.evidence, "pid="))
+}
+
+fn extract_prefixed_i32(text: &str, prefix: &str) -> Option<i32> {
+    let start = text.find(prefix)? + prefix.len();
+    let digits = text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().ok()
+}
+
 fn detect_conflicts(graph: &mut Graph) {
     use std::collections::HashMap;
     let mut ports: HashMap<(String, Option<String>, Option<u16>), Vec<ListenerId>> = HashMap::new();
@@ -406,5 +549,110 @@ mod tests {
             fan_in.buffer.pop_front().unwrap().adapter.as_deref(),
             Some("c")
         );
+    }
+
+    #[test]
+    fn portless_correlation_resolves_cli_and_descendant_listener() {
+        let cli = ProcessKey {
+            pid: 100,
+            boot_id: "boot".into(),
+            start_time_ticks: 10,
+        };
+        let child = ProcessKey {
+            pid: 101,
+            boot_id: "boot".into(),
+            start_time_ticks: 11,
+        };
+        let listener_id = ListenerId::new("tcp:127.0.0.1:3737:99");
+        let workload_id = WorkloadId::new("portless:demo");
+        let mut graph = Graph::default();
+        graph
+            .processes
+            .insert(cli.clone(), process(cli.clone(), None));
+        graph
+            .processes
+            .insert(child.clone(), process(child.clone(), Some(100)));
+        graph.listeners.insert(
+            listener_id.clone(),
+            Listener {
+                id: listener_id.clone(),
+                protocol: Protocol::Tcp,
+                family: AddressFamily::Ipv4,
+                bind_addr: Some("127.0.0.1".into()),
+                port: Some(3737),
+                path: None,
+                state: ListenerState::Listen,
+                netns: "host".into(),
+                socket_inode: Some(99),
+                exposure: Exposure::Loopback,
+                owners: vec![EntityRef::Process(child.clone())],
+                confidence: Confidence::High,
+                provenance: vec![],
+                first_seen: Utc::now(),
+                last_seen: Utc::now(),
+                dual_stack_state: DualStackState::NotApplicable,
+            },
+        );
+        graph.workloads.insert(
+            workload_id.clone(),
+            Workload {
+                id: workload_id.clone(),
+                display_name: "demo".into(),
+                runtime: RuntimeKind::Portless,
+                state: WorkloadState::Running,
+                pids: vec![],
+                listeners: vec![],
+                project: None,
+                manager: None,
+                source: None,
+                actions: vec![],
+                health: None,
+                metrics: None,
+                restart_policy: None,
+                lazyadmin_run_id: None,
+                provenance: vec![Provenance {
+                    adapter: "portless".into(),
+                    claim: "route cli pid".into(),
+                    evidence: "routes.json pid=100 state_dir=/tmp/example hostname=demo port=3737"
+                        .into(),
+                    confidence: Confidence::High,
+                    timestamp: Utc::now(),
+                }],
+            },
+        );
+
+        let graph = correlate(graph, &Config::default());
+        let workload = graph.workloads.get(&workload_id).unwrap();
+        assert_eq!(workload.source, Some(EntityRef::Process(cli)));
+        assert_eq!(workload.pids, vec![child]);
+        assert_eq!(workload.listeners, vec![listener_id.clone()]);
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::WorkloadOwnsListener
+                && edge.from == EntityRef::Workload(workload_id.clone())
+                && edge.to == EntityRef::Listener(listener_id.clone())
+        }));
+    }
+
+    fn process(key: ProcessKey, ppid: Option<i32>) -> Process {
+        Process {
+            pid: key.pid,
+            start_time_ticks: key.start_time_ticks,
+            boot_id: key.boot_id.clone(),
+            key,
+            user: None,
+            exe: None,
+            cmdline: vec![],
+            cwd: None,
+            ppid,
+            pgid: None,
+            sid: None,
+            cgroup: None,
+            netns: None,
+            container_id: None,
+            systemd_unit: None,
+            lazyadmin_run_id: None,
+            environment: RedactedEnvironmentSummary::default(),
+            provenance: vec![],
+        }
     }
 }

@@ -18,9 +18,10 @@ use lazyadmin_core::{
     graph::{DiscoveryAdapter, DiscoveryContext},
     logs::{LogLine, LogOptions, LogStream, direct_unavailable},
     model::{
-        ActionId, DIFF_SCHEMA_VERSION, DangerLevel, EntityRef, Process, Protocol, RuntimeKind,
-        Snapshot,
+        ActionId, DIFF_SCHEMA_VERSION, DangerLevel, EntityRef, Listener, Process, Protocol,
+        RuntimeKind, Snapshot, Workload,
     },
+    output::listener_rows,
     selector::{Selector, parse_selector},
     snapshot::SnapshotBuilder,
 };
@@ -519,6 +520,7 @@ async fn build_snapshot_with_event_drops(
         lazyadmin_adapter_systemd::SystemdAdapter::new(cfg.adapters.systemd.events_enabled);
     let container = lazyadmin_adapter_container::ContainerAdapter::new();
     let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg.clone());
+    let portless = lazyadmin_adapter_portless::PortlessAdapter::new();
     let mut outputs = Vec::new();
     outputs.push(
         procfs
@@ -546,6 +548,12 @@ async fn build_snapshot_with_event_drops(
     );
     outputs.push(
         project
+            .discover(DiscoveryContext::default())
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?,
+    );
+    outputs.push(
+        portless
             .discover(DiscoveryContext::default())
             .await
             .map_err(|e| AppError::Other(eyre!(e)))?,
@@ -626,13 +634,20 @@ async fn run_view(
     if !brief && hidden > 0 {
         println!("{hidden} system workloads hidden by default view");
     }
-    for l in &snap.listeners {
+    let rows = listener_rows(&snap);
+    for row in &rows {
+        let manager = row
+            .manager_detail
+            .as_ref()
+            .map(|detail| format!(" ({detail})"))
+            .unwrap_or_default();
         println!(
-            "{:?} {}:{} owners={}",
-            l.protocol,
-            l.bind_addr.as_deref().unwrap_or("*"),
-            l.port.unwrap_or(0),
-            l.owners.len()
+            "{:?} {}:{} owners={}{}",
+            row.protocol,
+            row.bind_addr.as_deref().unwrap_or("*"),
+            row.port.unwrap_or(0),
+            row.owners_count,
+            manager
         );
     }
     Ok(())
@@ -926,6 +941,7 @@ async fn build_doctor_report(cfg: Config, event_drops: Option<&EventDropCounter>
         .discover(DiscoveryContext::default())
         .await
         .unwrap_or_default();
+    checks.extend(portless_doctor_checks(&proc_out));
     let active_socket_path = if proc_out
         .warnings
         .iter()
@@ -1065,6 +1081,205 @@ fn check_path(subsystem: &str, name: &str, path: &str, required: bool) -> Doctor
         hint: None,
     }
 }
+
+fn portless_doctor_checks(proc_out: &lazyadmin_core::graph::DiscoveryOutput) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let state_dirs = lazyadmin_adapter_portless::default_state_dirs();
+    if state_dirs.is_empty() {
+        checks.push(DoctorCheck {
+            subsystem: "adapter:portless".into(),
+            name: "state dir".into(),
+            severity: DoctorSeverity::Info,
+            summary: "no PORTLESS_STATE_DIR or HOME state directory resolved".into(),
+            hint: None,
+        });
+    }
+    let mut total_orphans = 0usize;
+    for state_dir in &state_dirs {
+        let routes_path = state_dir.join("routes.json");
+        if !state_dir.exists() {
+            checks.push(DoctorCheck {
+                subsystem: "adapter:portless".into(),
+                name: format!("state dir {}", state_dir.display()),
+                severity: DoctorSeverity::Info,
+                summary: "not present".into(),
+                hint: None,
+            });
+            continue;
+        }
+        match std::fs::read(&routes_path) {
+            Ok(bytes) => {
+                let mut warnings = Vec::new();
+                let routes =
+                    lazyadmin_adapter_portless::parse_routes(&bytes, state_dir, &mut warnings);
+                checks.push(DoctorCheck {
+                    subsystem: "adapter:portless".into(),
+                    name: format!("state dir {}", state_dir.display()),
+                    severity: if warnings
+                        .iter()
+                        .any(|warning| warning.code == "portless.routes_unparseable")
+                    {
+                        DoctorSeverity::Warning
+                    } else {
+                        DoctorSeverity::Ok
+                    },
+                    summary: format!(
+                        "{} route(s) readable from {}",
+                        routes.len(),
+                        routes_path.display()
+                    ),
+                    hint: warnings
+                        .iter()
+                        .find(|warning| warning.code == "portless.routes_unparseable")
+                        .map(|warning| warning.message.clone()),
+                });
+                total_orphans += routes
+                    .iter()
+                    .filter(|route| route.pid != 0 && !pid_alive(route.pid))
+                    .count();
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => checks.push(DoctorCheck {
+                subsystem: "adapter:portless".into(),
+                name: format!("state dir {}", state_dir.display()),
+                severity: DoctorSeverity::Info,
+                summary: format!("{} not found", routes_path.display()),
+                hint: None,
+            }),
+            Err(err) => checks.push(DoctorCheck {
+                subsystem: "adapter:portless".into(),
+                name: format!("state dir {}", state_dir.display()),
+                severity: DoctorSeverity::Warning,
+                summary: format!("{} unreadable: {err}", routes_path.display()),
+                hint: Some("Check file permissions; lazyadmin only reads portless state.".into()),
+            }),
+        }
+
+        let lock = state_dir.join("routes.lock");
+        if let Ok(metadata) = std::fs::metadata(&lock) {
+            let age = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .unwrap_or_default();
+            checks.push(DoctorCheck {
+                subsystem: "adapter:portless".into(),
+                name: format!("routes.lock {}", state_dir.display()),
+                severity: if age > Duration::from_secs(30) {
+                    DoctorSeverity::Warning
+                } else {
+                    DoctorSeverity::Ok
+                },
+                summary: format!("lock age {}s", age.as_secs()),
+                hint: (age > Duration::from_secs(30)).then_some(
+                    "portless uses a mkdir lock with a 10s stale threshold; investigate stuck writers."
+                        .into(),
+                ),
+            });
+        }
+
+        checks.extend(portless_proxy_checks(state_dir, proc_out));
+    }
+    checks.push(DoctorCheck {
+        subsystem: "adapter:portless".into(),
+        name: "binary".into(),
+        severity: if command_available("portless") {
+            DoctorSeverity::Ok
+        } else {
+            DoctorSeverity::Info
+        },
+        summary: if command_available("portless") {
+            portless_version_summary()
+        } else {
+            "portless not found on PATH".into()
+        },
+        hint: None,
+    });
+    checks.push(DoctorCheck {
+        subsystem: "adapter:portless".into(),
+        name: "orphan routes".into(),
+        severity: if total_orphans > 0 {
+            DoctorSeverity::Info
+        } else {
+            DoctorSeverity::Ok
+        },
+        summary: format!("{total_orphans} orphaned route(s)"),
+        hint: (total_orphans > 0).then_some(format!(
+            "run `portless prune` to clean up {total_orphans} orphaned route(s)"
+        )),
+    });
+    checks
+}
+
+fn portless_proxy_checks(
+    state_dir: &std::path::Path,
+    proc_out: &lazyadmin_core::graph::DiscoveryOutput,
+) -> Vec<DoctorCheck> {
+    let pidfile = state_dir.join("proxy.pid");
+    if !pidfile.exists() {
+        return Vec::new();
+    }
+    let pid = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok());
+    let port = std::fs::read_to_string(state_dir.join("proxy.port"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u16>().ok());
+    let alive = pid.is_some_and(pid_alive);
+    let listening = match (pid, port) {
+        (Some(pid), Some(port)) => proc_out.listeners.iter().any(|listener| {
+            listener.port == Some(port)
+                && listener.owners.iter().any(|owner| match owner {
+                    EntityRef::Process(key) => key.pid == pid,
+                    _ => false,
+                })
+        }),
+        (Some(_), None) => true,
+        _ => false,
+    };
+    vec![DoctorCheck {
+        subsystem: "adapter:portless".into(),
+        name: format!("proxy daemon {}", state_dir.display()),
+        severity: if alive && listening {
+            DoctorSeverity::Ok
+        } else {
+            DoctorSeverity::Warning
+        },
+        summary: format!(
+            "pid={} port={} alive={} listening={}",
+            pid.map_or_else(|| "unknown".into(), |pid| pid.to_string()),
+            port.map_or_else(|| "unknown".into(), |port| port.to_string()),
+            alive,
+            listening
+        ),
+        hint: (!alive).then_some("proxy pidfile points at a dead process".into()),
+    }]
+}
+
+fn pid_alive(pid: i32) -> bool {
+    std::path::Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn command_available(cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {cmd} >/dev/null 2>&1"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn portless_version_summary() -> String {
+    std::process::Command::new("portless")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|version| !version.is_empty())
+        .map(|version| format!("available ({version})"))
+        .unwrap_or_else(|| "available".into())
+}
+
 fn cmd_check(
     subsystem: &str,
     name: &str,
@@ -1269,33 +1484,8 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         tracing::warn!("--yes-for-test-only bypass used; this flag is for automated tests only");
     }
     let before = build_snapshot(None).await?;
-    let listeners: Vec<_> = before
-        .listeners
-        .iter()
-        .filter(|l| l.port == Some(args.port))
-        .cloned()
-        .collect();
-    let mut actions = Vec::new();
-    for l in &listeners {
-        for owner in &l.owners {
-            if let EntityRef::Process(key) = owner {
-                if let Some(p) = before.processes.iter().find(|p| &p.key == key) {
-                    actions.push(plan_direct_process(p, args.port));
-                }
-            }
-        }
-    }
-    if listeners.is_empty() {
-        // Some test/dev servers can be observed as a process before the socket appears.
-        // Keep this conservative: only plan direct SIGTERM when the port is explicit in cmdline.
-        let needle = args.port.to_string();
-        for p in before.processes.iter().filter(|p| {
-            p.cmdline.iter().any(|a| a == &needle)
-                && p.cmdline.iter().any(|a| a.contains("http.server"))
-        }) {
-            actions.push(plan_direct_process(p, args.port));
-        }
-    }
+    let parts = plan_free_for_snapshot(&before, args.port, true);
+    let mut actions = parts.actions();
     let plan = ActionPlan {
         id: format!("free-{}", args.port),
         created_at: chrono::Utc::now(),
@@ -1303,8 +1493,8 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         confirmation: ConfirmationPolicy::TypedPhrase {
             phrase: "free".into(),
         },
-        dry_run: free_dry_run(args.port, &listeners, &actions),
-        actions,
+        dry_run: free_dry_run(args.port, &parts.listeners, &actions),
+        actions: actions.clone(),
     };
     if args.dry_run {
         if json {
@@ -1320,13 +1510,36 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
             return unavailable("free cancelled");
         }
     }
-    let futs = plan.actions.iter().map(execute_direct_action);
-    let results = futures::future::join_all(futs).await;
+    let mut results = Vec::new();
+    if !parts.portless_actions.is_empty() {
+        results.extend(
+            futures::future::join_all(parts.portless_actions.iter().map(execute_portless_stop))
+                .await,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let direct_snapshot = if parts.portless_actions.is_empty() {
+        before.clone()
+    } else {
+        build_snapshot(None).await?
+    };
+    let direct_parts = plan_free_for_snapshot(&direct_snapshot, args.port, false);
+    actions = parts.portless_actions.clone();
+    actions.extend(direct_parts.direct_actions.clone());
+    results.extend(
+        futures::future::join_all(
+            direct_parts
+                .direct_actions
+                .iter()
+                .map(execute_direct_action),
+        )
+        .await,
+    );
     let after = build_snapshot(None).await?;
     let diff = diff_snapshots(&before, &after);
     let report = lazyadmin_core::actions::ActionExecutionReport {
         schema_version: "lazyadmin.action_report.v1".into(),
-        plan,
+        plan: ActionPlan { actions, ..plan },
         results,
         before_summary: listener_summary(args.port, &before),
         after_summary: listener_summary(args.port, &after),
@@ -1343,11 +1556,145 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         println!("After: {}", report.after_summary);
         if report.after_summary != "no listener" {
             println!(
-                "Listener remains; SIGKILL is not automatic. Consider pause-restart or explicit escalation."
+                "Listener remains; SIGKILL is not automatic. Consider pause-restart, lazyadmin doctor, or explicit escalation."
             );
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct FreePlanParts {
+    listeners: Vec<Listener>,
+    portless_actions: Vec<Action>,
+    direct_actions: Vec<Action>,
+}
+
+impl FreePlanParts {
+    fn actions(&self) -> Vec<Action> {
+        self.portless_actions
+            .iter()
+            .chain(self.direct_actions.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+fn plan_free_for_snapshot(snap: &Snapshot, port: u16, include_portless: bool) -> FreePlanParts {
+    let listeners: Vec<_> = snap
+        .listeners
+        .iter()
+        .filter(|listener| listener.port == Some(port))
+        .cloned()
+        .collect();
+    let mut parts = FreePlanParts {
+        listeners,
+        ..FreePlanParts::default()
+    };
+    let mut planned_processes = std::collections::HashSet::new();
+    let mut planned_portless = std::collections::BTreeSet::new();
+    for listener in &parts.listeners {
+        let portless_workloads = portless_workloads_for_listener(snap, listener);
+        if include_portless {
+            for workload in &portless_workloads {
+                if planned_portless.insert(workload.id.clone()) {
+                    if let Some(action) = plan_portless_stop(workload, port) {
+                        parts.portless_actions.push(action);
+                    }
+                }
+            }
+        }
+        if !portless_workloads.is_empty() {
+            continue;
+        }
+        for owner in &listener.owners {
+            if let EntityRef::Process(key) = owner {
+                if planned_processes.insert(key.clone()) {
+                    if let Some(process) = snap.processes.iter().find(|process| &process.key == key)
+                    {
+                        parts
+                            .direct_actions
+                            .push(plan_direct_process(process, port));
+                    }
+                }
+            }
+        }
+    }
+    if parts.listeners.is_empty() && include_portless {
+        // Some test/dev servers can be observed as a process before the socket appears.
+        // Keep this conservative: only plan direct SIGTERM when the port is explicit in cmdline.
+        let needle = port.to_string();
+        for process in snap.processes.iter().filter(|process| {
+            process.cmdline.iter().any(|arg| arg == &needle)
+                && process
+                    .cmdline
+                    .iter()
+                    .any(|arg| arg.contains("http.server"))
+        }) {
+            if planned_processes.insert(process.key.clone()) {
+                parts
+                    .direct_actions
+                    .push(plan_direct_process(process, port));
+            }
+        }
+    }
+    parts
+}
+
+fn portless_workloads_for_listener<'a>(
+    snap: &'a Snapshot,
+    listener: &Listener,
+) -> Vec<&'a Workload> {
+    let listener_ref = EntityRef::Listener(listener.id.clone());
+    snap.edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == lazyadmin_core::model::EdgeKind::WorkloadOwnsListener
+                && edge.to == listener_ref
+        })
+        .filter_map(|edge| match &edge.from {
+            EntityRef::Workload(id) => snap
+                .workloads
+                .iter()
+                .find(|workload| &workload.id == id && workload.runtime == RuntimeKind::Portless),
+            _ => None,
+        })
+        .collect()
+}
+
+fn plan_portless_stop(workload: &Workload, port: u16) -> Option<Action> {
+    let Some(EntityRef::Process(key)) = &workload.source else {
+        return None;
+    };
+    Some(Action {
+        id: ActionId::new(format!("portless-stop-{}", workload.id)),
+        label: format!("Stop portless app {}", workload.display_name),
+        kind: ActionKind::PortlessStop,
+        danger: DangerLevel::Destructive,
+        requirements: vec![
+            Requirement::ProcessKeyMatch { key: key.clone() },
+            Requirement::TypedPhrase {
+                phrase: "free".into(),
+            },
+        ],
+        dry_run: vec![DryRunLine {
+            summary: format!(
+                "stop portless app \"{}\" (manager: portless)",
+                workload.display_name
+            ),
+            detail: Some(format!(
+                "SIGTERM PID {} (portless cli); portless will killTree the dev-server and remove the route for port {port}",
+                key.pid
+            )),
+        }],
+        target: EntityRef::Process(key.clone()),
+        runtime: RuntimeKind::Portless,
+        confirmation: ConfirmationPolicy::TypedPhrase {
+            phrase: "free".into(),
+        },
+        timeout_ms: 5_000,
+        provenance: vec![format!("portless workload {}", workload.id)],
+    })
 }
 
 fn plan_direct_process(p: &Process, port: u16) -> Action {
@@ -1408,7 +1755,7 @@ fn free_dry_run(
     listeners: &[lazyadmin_core::model::Listener],
     actions: &[Action],
 ) -> Vec<DryRunLine> {
-    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; current executor validates direct process owners before signaling".into()) }];
+    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; portless routes are stopped through their CLI, direct owners use process-key guarded SIGTERM".into()) }];
     for a in actions {
         v.extend(a.dry_run.clone());
     }
@@ -1522,6 +1869,86 @@ async fn execute_direct_action(action: &Action) -> ActionResult {
         if gone { None } else { Some("timeout") },
     )
 }
+
+async fn execute_portless_stop(action: &Action) -> ActionResult {
+    let start = Instant::now();
+    let span = tracing::info_span!("action.execute", action.kind=?action.kind, target=?action.target, runtime=?action.runtime, danger=?action.danger);
+    let _g = span.enter();
+    let EntityRef::Process(key) = &action.target else {
+        return result(
+            action,
+            ActionStatus::Unsupported,
+            "unsupported target",
+            start,
+            Some("unsupported"),
+        );
+    };
+    let snap = match build_snapshot(None).await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return result(
+                action,
+                ActionStatus::Failed,
+                &format!("validation scan failed: {err}"),
+                start,
+                Some("validation"),
+            );
+        }
+    };
+    let Some(proc_) = snap.processes.iter().find(|process| &process.key == key) else {
+        return result(
+            action,
+            ActionStatus::Skipped,
+            "portless CLI already gone before signal",
+            start,
+            None,
+        );
+    };
+    if &proc_.key != key {
+        return result(
+            action,
+            ActionStatus::Failed,
+            "ProcessKey mismatch; refusing to signal reused PID",
+            start,
+            Some("pid_reuse_guard"),
+        );
+    }
+    match nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(proc_.pid),
+        nix::sys::signal::Signal::SIGTERM,
+    ) {
+        Ok(()) => {}
+        Err(err) => {
+            return result(
+                action,
+                ActionStatus::Failed,
+                &format!("SIGTERM failed: {err}"),
+                start,
+                Some("signal"),
+            );
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(action.timeout_ms.min(5_000))).await;
+    let after = build_snapshot(None).await.ok();
+    let gone = after
+        .as_ref()
+        .is_none_or(|snapshot| !snapshot.processes.iter().any(|process| process.key == *key));
+    result(
+        action,
+        if gone {
+            ActionStatus::Success
+        } else {
+            ActionStatus::TimedOut
+        },
+        if gone {
+            "SIGTERM sent to portless CLI and process disappeared"
+        } else {
+            "SIGTERM sent to portless CLI; process still present after timeout"
+        },
+        start,
+        if gone { None } else { Some("timeout") },
+    )
+}
 fn result(
     action: &Action,
     status: ActionStatus,
@@ -1603,6 +2030,10 @@ fn remove_pause(selector: &str) -> std::result::Result<bool, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazyadmin_core::model::{
+        AddressFamily, Confidence, DualStackState, Edge, EdgeKind, Exposure, ListenerId,
+        ListenerState, ProcessKey, RedactedEnvironmentSummary, WorkloadId, WorkloadState,
+    };
 
     #[tokio::test]
     async fn doctor_report_honors_socket_and_event_config() {
@@ -1663,5 +2094,266 @@ mod tests {
             .await
             .unwrap();
         assert!(!snap.managers.is_empty());
+    }
+
+    #[test]
+    fn free_planner_prefers_portless_cli_over_descendant_owner() {
+        let cli = process_key(100, 10);
+        let child = process_key(101, 11);
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(cli.clone(), None, vec!["portless"]));
+        snap.processes
+            .push(process(child.clone(), Some(100), vec!["node"]));
+        let listener_id = ListenerId::new("tcp:127.0.0.1:3737:1");
+        snap.listeners.push(listener(
+            listener_id.clone(),
+            3737,
+            vec![EntityRef::Process(child)],
+        ));
+        let workload_id = WorkloadId::new("portless:demo");
+        snap.workloads.push(Workload {
+            id: workload_id.clone(),
+            display_name: "demo.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![listener_id.clone()],
+            project: None,
+            manager: None,
+            source: Some(EntityRef::Process(cli.clone())),
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        snap.edges.push(Edge {
+            kind: EdgeKind::WorkloadOwnsListener,
+            from: EntityRef::Workload(workload_id),
+            to: EntityRef::Listener(listener_id),
+            provenance: vec![],
+        });
+
+        let plan = plan_free_for_snapshot(&snap, 3737, true);
+        assert_eq!(plan.portless_actions.len(), 1);
+        assert!(plan.direct_actions.is_empty());
+        assert_eq!(plan.portless_actions[0].kind, ActionKind::PortlessStop);
+        assert_eq!(plan.portless_actions[0].target, EntityRef::Process(cli));
+    }
+
+    #[test]
+    fn free_planner_handles_direct_and_mixed_ports() {
+        let direct = process_key(200, 20);
+        let cli = process_key(300, 30);
+        let child = process_key(301, 31);
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(direct.clone(), None, vec!["python"]));
+        snap.processes
+            .push(process(cli.clone(), None, vec!["portless"]));
+        snap.processes
+            .push(process(child.clone(), Some(300), vec!["node"]));
+        let direct_listener = ListenerId::new("tcp:127.0.0.1:8080:1");
+        let portless_listener = ListenerId::new("tcp:127.0.0.1:8080:2");
+        snap.listeners.push(listener(
+            direct_listener,
+            8080,
+            vec![EntityRef::Process(direct.clone())],
+        ));
+        snap.listeners.push(listener(
+            portless_listener.clone(),
+            8080,
+            vec![EntityRef::Process(child)],
+        ));
+        let workload_id = WorkloadId::new("portless:mixed");
+        snap.workloads.push(Workload {
+            id: workload_id.clone(),
+            display_name: "mixed.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![portless_listener.clone()],
+            project: None,
+            manager: None,
+            source: Some(EntityRef::Process(cli.clone())),
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        snap.edges.push(Edge {
+            kind: EdgeKind::WorkloadOwnsListener,
+            from: EntityRef::Workload(workload_id),
+            to: EntityRef::Listener(portless_listener),
+            provenance: vec![],
+        });
+
+        let plan = plan_free_for_snapshot(&snap, 8080, true);
+        assert_eq!(plan.portless_actions.len(), 1);
+        assert_eq!(plan.direct_actions.len(), 1);
+        assert_eq!(plan.portless_actions[0].target, EntityRef::Process(cli));
+        assert_eq!(plan.direct_actions[0].target, EntityRef::Process(direct));
+    }
+
+    #[test]
+    fn free_planner_dedupes_same_portless_workload() {
+        let cli = process_key(400, 40);
+        let child = process_key(401, 41);
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(cli.clone(), None, vec!["portless"]));
+        snap.processes
+            .push(process(child.clone(), Some(400), vec!["node"]));
+        let workload_id = WorkloadId::new("portless:dedupe");
+        snap.workloads.push(Workload {
+            id: workload_id.clone(),
+            display_name: "dedupe.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![],
+            project: None,
+            manager: None,
+            source: Some(EntityRef::Process(cli)),
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        for suffix in [1, 2] {
+            let listener_id = ListenerId::new(format!("tcp:127.0.0.1:9090:{suffix}"));
+            snap.listeners.push(listener(
+                listener_id.clone(),
+                9090,
+                vec![EntityRef::Process(child.clone())],
+            ));
+            snap.edges.push(Edge {
+                kind: EdgeKind::WorkloadOwnsListener,
+                from: EntityRef::Workload(workload_id.clone()),
+                to: EntityRef::Listener(listener_id),
+                provenance: vec![],
+            });
+        }
+
+        let plan = plan_free_for_snapshot(&snap, 9090, true);
+        assert_eq!(plan.portless_actions.len(), 1);
+        assert!(plan.direct_actions.is_empty());
+    }
+
+    #[test]
+    fn free_planner_refuses_portless_without_source_and_ignores_alias_without_listener() {
+        let child = process_key(501, 51);
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(child.clone(), None, vec!["node"]));
+        let listener_id = ListenerId::new("tcp:127.0.0.1:6060:1");
+        snap.listeners.push(listener(
+            listener_id.clone(),
+            6060,
+            vec![EntityRef::Process(child)],
+        ));
+        let workload_id = WorkloadId::new("portless:missing-source");
+        snap.workloads.push(Workload {
+            id: workload_id.clone(),
+            display_name: "missing-source.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![listener_id.clone()],
+            project: None,
+            manager: None,
+            source: None,
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        snap.workloads.push(Workload {
+            id: WorkloadId::new("portless:alias"),
+            display_name: "alias.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![],
+            project: None,
+            manager: None,
+            source: None,
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        snap.edges.push(Edge {
+            kind: EdgeKind::WorkloadOwnsListener,
+            from: EntityRef::Workload(workload_id),
+            to: EntityRef::Listener(listener_id),
+            provenance: vec![],
+        });
+
+        let plan = plan_free_for_snapshot(&snap, 6060, true);
+        assert!(plan.portless_actions.is_empty());
+        assert!(plan.direct_actions.is_empty());
+    }
+
+    fn process_key(pid: i32, start_time_ticks: u64) -> ProcessKey {
+        ProcessKey {
+            pid,
+            boot_id: "boot".into(),
+            start_time_ticks,
+        }
+    }
+
+    fn process(key: ProcessKey, ppid: Option<i32>, cmdline: Vec<&str>) -> Process {
+        Process {
+            pid: key.pid,
+            start_time_ticks: key.start_time_ticks,
+            boot_id: key.boot_id.clone(),
+            key,
+            user: None,
+            exe: None,
+            cmdline: cmdline.into_iter().map(str::to_string).collect(),
+            cwd: None,
+            ppid,
+            pgid: None,
+            sid: None,
+            cgroup: None,
+            netns: None,
+            container_id: None,
+            systemd_unit: None,
+            lazyadmin_run_id: None,
+            environment: RedactedEnvironmentSummary::default(),
+            provenance: vec![],
+        }
+    }
+
+    fn listener(id: ListenerId, port: u16, owners: Vec<EntityRef>) -> Listener {
+        Listener {
+            id,
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(port),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "host".into(),
+            socket_inode: None,
+            exposure: Exposure::Loopback,
+            owners,
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        }
     }
 }
