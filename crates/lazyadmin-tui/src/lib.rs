@@ -1235,10 +1235,9 @@ fn format_entity_ref(entity: &EntityRef, snapshot: &Snapshot) -> String {
             .processes
             .iter()
             .find(|process| &process.key == key)
-            .map(|process| {
-                let label = process_owner_label(process);
-                format!("pid {} {label}", key.pid)
-            })
+            // process_owner_label already returns "<command> pid <n>", so just
+            // use it directly rather than re-prefixing the pid.
+            .map(process_owner_label)
             .unwrap_or_else(|| format!("pid {}", key.pid)),
         EntityRef::Workload(id) => snapshot
             .workloads
