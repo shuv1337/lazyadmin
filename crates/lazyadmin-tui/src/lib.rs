@@ -2875,13 +2875,18 @@ fn copy_diagnostic_via_arboard(_markdown: &str) -> anyhow::Result<()> {
 }
 
 fn copy_diagnostic_via_command(markdown: &str) -> anyhow::Result<()> {
-    for program in ["wl-copy", "xclip"] {
+    // Order matters: try the GUI-clipboard daemons in their native habitat
+    // first, then fall back to less common ones. Each program's stdout/stderr
+    // is sent to /dev/null so any "no display" / "selection lost" warnings
+    // can't leak into the TUI's alternate screen (issue #7).
+    for program in ["wl-copy", "xclip", "xsel", "pbcopy"] {
+        let args: Vec<&str> = match program {
+            "xclip" => vec!["-selection", "clipboard"],
+            "xsel" => vec!["--clipboard", "--input"],
+            _ => Vec::new(),
+        };
         let mut child = std::process::Command::new(program)
-            .args(if program == "xclip" {
-                vec!["-selection", "clipboard"]
-            } else {
-                Vec::new()
-            })
+            .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
