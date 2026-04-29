@@ -320,29 +320,41 @@ impl Theme {
         Self::builtin("default-dark").unwrap()
     }
     pub fn builtin(name: &str) -> Option<Self> {
+        // Canonical Night Owl palette (Sarah Drasner). The default dark theme
+        // is Night Owl; `night-owl` is an explicit alias. Light/high-contrast/
+        // solarized variants override individual surfaces below.
         let mut t = Self {
             name: name.into(),
-            base_fg: ColorSpec("#d7e2ed".into()),
-            base_bg: ColorSpec("#07131c".into()),
-            accent: ColorSpec("#f2b84b".into()),
-            ok: ColorSpec("#2dd4bf".into()),
-            info: ColorSpec("#7aa2f7".into()),
-            warning: ColorSpec("#f6c177".into()),
-            degraded: ColorSpec("#c678dd".into()),
-            error: ColorSpec("#ff5d5d".into()),
-            selection: ColorSpec("#1f4f66".into()),
-            footer: ColorSpec("#8aa0b2".into()),
+            base_fg: ColorSpec("#d6deeb".into()),
+            base_bg: ColorSpec("#011627".into()),
+            accent: ColorSpec("#ecc48d".into()),
+            ok: ColorSpec("#addb67".into()),
+            info: ColorSpec("#82aaff".into()),
+            warning: ColorSpec("#f78c6c".into()),
+            degraded: ColorSpec("#c792ea".into()),
+            error: ColorSpec("#ef5350".into()),
+            selection: ColorSpec("#1d3b53".into()),
+            footer: ColorSpec("#637777".into()),
             fallback_palette: PaletteMode::Truecolor,
         };
         match name {
-            "default-dark" => Some(t),
-            "default-light" => {
-                t.base_fg = ColorSpec("#17202a".into());
-                t.base_bg = ColorSpec("#f7f3ea".into());
-                t.accent = ColorSpec("#875f00".into());
-                t.info = ColorSpec("#245c9e".into());
-                t.selection = ColorSpec("#d9e8f2".into());
-                t.footer = ColorSpec("#53616f".into());
+            "default-dark" | "night-owl" => {
+                t.name = name.into();
+                Some(t)
+            }
+            "default-light" | "night-owl-light" => {
+                // Night Owl light by Sarah Drasner.
+                t.name = name.into();
+                t.base_fg = ColorSpec("#403f53".into());
+                t.base_bg = ColorSpec("#fbfbfb".into());
+                t.accent = ColorSpec("#daaa01".into());
+                t.ok = ColorSpec("#2aa298".into());
+                t.info = ColorSpec("#288ed7".into());
+                t.warning = ColorSpec("#bc5454".into());
+                t.degraded = ColorSpec("#994cc3".into());
+                t.error = ColorSpec("#de3d3b".into());
+                t.selection = ColorSpec("#d3e8f8".into());
+                t.footer = ColorSpec("#90a7b2".into());
                 Some(t)
             }
             "high-contrast" => {
@@ -1497,7 +1509,11 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
         "process-tree",
         "metrics",
         "theme default-dark",
+        "theme night-owl",
+        "theme night-owl-light",
         "theme high-contrast",
+        "theme solarized-dark",
+        "theme default-light",
         "reload",
         "export-json",
         "diff",
@@ -3310,7 +3326,9 @@ mod tests {
     fn theme_builtins_validate_and_downgrade() {
         for name in [
             "default-dark",
+            "night-owl",
             "default-light",
+            "night-owl-light",
             "high-contrast",
             "solarized-dark",
         ] {
