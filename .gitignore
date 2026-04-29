@@ -4,3 +4,6 @@
 .vscode/
 *.tmp
 .DS_Store
+
+# Built skill tarballs are release artifacts, not source.
+/lazyadmin-agent-skill-v*.tar.gz

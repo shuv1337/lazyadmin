@@ -42,8 +42,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p lazyadmin-cli
-      - run: scripts/build-skill-tarball.sh
-      - run: tar -tzf lazyadmin-agent-skill-v*.tar.gz | grep 'lazyadmin-agent/SKILL.md'
+      - name: Build skill tarball
+        id: skill
+        run: echo "tarball=$(scripts/build-skill-tarball.sh)" >> "$GITHUB_OUTPUT"
+      - name: Verify tarball contents
+        # `tar -tzf` only accepts a single archive; the previous
+        # `lazyadmin-agent-skill-v*.tar.gz` glob would silently break the
+        # moment more than one tarball existed in the workspace.
+        run: tar -tzf "${{ steps.skill.outputs.tarball }}" | grep 'lazyadmin-agent/SKILL.md'
   integration-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.integration_linux
     runs-on: ubuntu-latest
