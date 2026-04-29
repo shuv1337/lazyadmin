@@ -1,0 +1,20 @@
+[package]
+name = "lazyadmin-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+lazyadmin-adapter-container = { path = "../lazyadmin-adapter-container" }
+lazyadmin-adapter-portless = { path = "../lazyadmin-adapter-portless" }
+lazyadmin-adapter-procfs = { path = "../lazyadmin-adapter-procfs" }
+lazyadmin-adapter-project = { path = "../lazyadmin-adapter-project" }
+lazyadmin-adapter-systemd = { path = "../lazyadmin-adapter-systemd" }
+lazyadmin-adapter-tracked = { path = "../lazyadmin-adapter-tracked" }
+lazyadmin-core = { path = "../lazyadmin-core" }
+tokio.workspace = true
+tracing.workspace = true
