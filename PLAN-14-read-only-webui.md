@@ -273,69 +273,69 @@ The copy must reinforce that events are refresh hints and snapshots are authorit
 
 ### Milestone 1: Runtime Extraction
 
-- [ ] Add `crates/lazyadmin-runtime/Cargo.toml`.
-- [ ] Move adapter assembly from `crates/lazyadmin-cli/src/main.rs` into runtime functions.
-- [ ] Move event stream assembly into runtime functions.
-- [ ] Preserve existing CLI behavior for `export`, `doctor`, `events`, and `tui`.
-- [ ] Add runtime tests that build an empty or fixture-backed snapshot without launching the TUI.
-- [ ] Validate that `Snapshot.metadata.events_dropped` still uses the shared counter for long-lived consumers.
+- [x] Add `crates/lazyadmin-runtime/Cargo.toml`.
+- [x] Move adapter assembly from `crates/lazyadmin-cli/src/main.rs` into runtime functions.
+- [x] Move event stream assembly into runtime functions.
+- [x] Preserve existing CLI behavior for `export`, `doctor`, `events`, and `tui`.
+- [x] Add runtime tests that build an empty or fixture-backed snapshot without launching the TUI.
+- [x] Validate that `Snapshot.metadata.events_dropped` still uses the shared counter for long-lived consumers.
 
 ### Milestone 2: Web Server Skeleton
 
-- [ ] Add `crates/lazyadmin-web/Cargo.toml`.
-- [ ] Implement local-only HTTP server.
-- [ ] Add `lazyadmin web` subcommand.
-- [ ] Serve `/api/health`.
-- [ ] Serve `/api/snapshot`.
-- [ ] Serve `/api/doctor`.
-- [ ] Serve `/api/events` as SSE when event streams are available.
-- [ ] Return structured JSON errors with stable `code`, `message`, and optional `details`.
+- [x] Add `crates/lazyadmin-web/Cargo.toml`.
+- [x] Implement local-only HTTP server.
+- [x] Add `lazyadmin web` subcommand.
+- [x] Serve `/api/health`.
+- [x] Serve `/api/snapshot`.
+- [x] Serve `/api/doctor`.
+- [x] Serve `/api/events` as SSE when event streams are available.
+- [x] Return structured JSON errors with stable `code`, `message`, and optional `details`.
 
 ### Milestone 3: Frontend Foundation
 
-- [ ] Choose the frontend toolchain and document it in the plan follow-up if it adds Node-based build requirements.
-- [ ] Add an app shell with top bar, nav, main grid, and inspector.
-- [ ] Load `/api/snapshot` and render real snapshot counts.
-- [ ] Add loading, empty, degraded, and API error states.
-- [ ] Store view state in the URL.
-- [ ] Ensure the app works with static fixture JSON for browser tests.
+- [x] Choose the frontend toolchain and document it in the plan follow-up if it adds Node-based build requirements.
+- [x] Add an app shell with top bar, nav, main grid, and inspector.
+- [x] Load `/api/snapshot` and render real snapshot counts.
+- [x] Add loading, empty, degraded, and API error states.
+- [x] Store view state in the URL.
+- [x] Ensure the app works with static fixture JSON for browser tests.
 
 ### Milestone 4: Dense Table Views
 
-- [ ] Implement Listeners view.
-- [ ] Implement Public view as a filtered Listeners view.
-- [ ] Implement Conflicts view with grouped warnings.
-- [ ] Implement Workloads view.
-- [ ] Implement Processes view.
-- [ ] Implement Warnings view.
-- [ ] Add column sorting, text filtering, enum filters, and system-service toggle.
+- [x] Implement Listeners view.
+- [x] Implement Public view as a filtered Listeners view.
+- [x] Implement Conflicts view with grouped warnings.
+- [x] Implement Workloads view.
+- [x] Implement Processes view.
+- [x] Implement Warnings view.
+- [x] Add column sorting, text filtering, enum filters, and system-service toggle.
 - [ ] Use virtualization or pagination before testing against large live snapshots.
 
 ### Milestone 5: Inspector And Relationships
 
-- [ ] Build entity lookup indexes from snapshot IDs.
+- [x] Build entity lookup indexes from snapshot IDs.
 - [ ] Resolve owner/workload/manager/project relationships through `edges`.
-- [ ] Render listener inspector.
-- [ ] Render process inspector.
-- [ ] Render workload inspector.
+- [x] Render listener inspector.
+- [x] Render process inspector.
+- [x] Render workload inspector.
 - [ ] Render manager/project/run inspectors.
 - [ ] Render provenance in a collapsed-by-default section.
 - [ ] Render redacted diagnostic details without raw environment values.
 
 ### Milestone 6: Refresh And Discovery Health
 
-- [ ] Poll `/api/snapshot` at a configurable interval.
-- [ ] Subscribe to `/api/events` when available.
-- [ ] Treat SSE events as refresh hints only.
-- [ ] Show event drop counts and degraded adapter state.
+- [x] Poll `/api/snapshot` at a configurable interval.
+- [x] Subscribe to `/api/events` when available.
+- [x] Treat SSE events as refresh hints only.
+- [x] Show event drop counts and degraded adapter state.
 - [ ] Avoid replacing the current visible table while the user is actively sorting/filtering unless the selected entity disappears.
-- [ ] Preserve selected entity across refresh using stable IDs.
+- [x] Preserve selected entity across refresh using stable IDs.
 
 ### Milestone 7: Documentation And Agent Skill
 
 - [ ] Add `docs/webui.md`.
 - [ ] Update `README.md` with `lazyadmin web` usage.
-- [ ] Update `AGENTS.md` with Web UI validation commands and local-only safety caveats.
+- [x] Update `AGENTS.md` with Web UI validation commands and local-only safety caveats.
 - [ ] Update `skills/lazyadmin-agent/` only after the command surface is real.
 - [ ] Add Web UI JSON/API notes to `docs/agent-integration.md` if agents are expected to use the read-only API.
 

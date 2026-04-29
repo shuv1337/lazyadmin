@@ -23,10 +23,10 @@ use lazyadmin_core::{
     },
     output::listener_rows,
     selector::{Selector, parse_selector},
-    snapshot::SnapshotBuilder,
 };
 use std::{
     collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
     path::PathBuf,
     process::ExitCode,
     time::{Duration, Instant},
@@ -65,6 +65,7 @@ enum LogFormat {
 #[derive(Subcommand, Debug)]
 enum Command {
     Tui(TuiArgs),
+    Web(WebArgs),
     Port {
         port: u16,
     },
@@ -101,6 +102,18 @@ struct TuiArgs {
     headless: bool,
     #[arg(long)]
     theme: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct WebArgs {
+    #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    bind: IpAddr,
+    #[arg(long, default_value_t = 7749)]
+    port: u16,
+    #[arg(long)]
+    no_open: bool,
+    #[arg(long, default_value_t = 2000)]
+    refresh_ms: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -234,6 +247,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             Ok(())
         }
         Some(Command::Tui(args)) => run_tui_command(args, cli.json, cli.config.as_deref()).await,
+        Some(Command::Web(args)) => run_web(args, cli.config).await,
         Some(Command::Diff(args)) => run_diff(args, cli.json, cli.config.as_deref()).await,
         Some(Command::Config {
             command: ConfigCommand::Check,
@@ -360,32 +374,32 @@ fn validate_tui_theme_config(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_web(args: WebArgs, config_path: Option<PathBuf>) -> std::result::Result<(), AppError> {
+    let options = lazyadmin_web::WebOptions {
+        bind: args.bind,
+        port: args.port,
+        config_path,
+        refresh_interval: Duration::from_millis(args.refresh_ms),
+    };
+    let (info, handle) = lazyadmin_web::bind(options)
+        .await
+        .map_err(|e| AppError::Other(eyre!(e)))?;
+    println!("lazyadmin web listening on {}", info.url);
+    if !args.no_open {
+        // Auto-open is intentionally a no-op in v1; --no-open is reserved for
+        // future behavior so smoke tests and scripts can opt out preemptively.
+        eprintln!("(browser auto-open is not implemented in v1; open the URL manually)");
+    }
+    handle
+        .await
+        .map_err(|e| AppError::Other(eyre!(e)))?
+        .map_err(|e| AppError::Other(eyre!(e)))
+}
+
 async fn event_streams_for_config(
     cfg: &Config,
 ) -> Vec<futures::stream::BoxStream<'static, lazyadmin_core::model::DiscoveryEvent>> {
-    if !cfg.adapters.events.enabled {
-        return Vec::new();
-    }
-    let mut streams = Vec::new();
-    if cfg.adapters.sockets.enabled {
-        let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
-        if let Some(stream) = procfs.watch().await {
-            streams.push(stream);
-        }
-    }
-    if cfg.adapters.container.enabled && cfg.adapters.container.events_enabled {
-        let container = lazyadmin_adapter_container::ContainerAdapter::new();
-        if let Some(stream) = container.watch().await {
-            streams.push(stream);
-        }
-    }
-    if cfg.adapters.systemd.enabled && cfg.adapters.systemd.events_enabled {
-        let systemd = lazyadmin_adapter_systemd::SystemdAdapter::new(true);
-        if let Some(stream) = systemd.watch().await {
-            streams.push(stream);
-        }
-    }
-    streams
+    lazyadmin_runtime::event_streams_for_config(cfg).await
 }
 
 fn spawn_tui_refresh_task(
@@ -513,74 +527,9 @@ async fn build_snapshot_with_event_drops(
     config_path: Option<&std::path::Path>,
     event_drops: Option<&EventDropCounter>,
 ) -> std::result::Result<Snapshot, AppError> {
-    let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
-    let procfs = lazyadmin_adapter_procfs::ProcfsAdapter::new(cfg.clone());
-    let tracked = lazyadmin_adapter_tracked::TrackedAdapter::new();
-    let systemd =
-        lazyadmin_adapter_systemd::SystemdAdapter::new(cfg.adapters.systemd.events_enabled);
-    let container = lazyadmin_adapter_container::ContainerAdapter::new();
-    let project = lazyadmin_adapter_project::ProjectAdapter::new(cfg.clone());
-    let portless = lazyadmin_adapter_portless::PortlessAdapter::new();
-    let mut outputs = Vec::new();
-    outputs.push(
-        procfs
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    outputs.push(
-        tracked
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    outputs.push(
-        systemd
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    outputs.push(
-        container
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    outputs.push(
-        project
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    outputs.push(
-        portless
-            .discover(DiscoveryContext::default())
-            .await
-            .map_err(|e| AppError::Other(eyre!(e)))?,
-    );
-    let mut snap = if let Some(event_drops) = event_drops {
-        SnapshotBuilder::from_adapter_outputs_with_config_and_event_drops(
-            outputs,
-            &cfg,
-            event_drops,
-        )
-    } else {
-        SnapshotBuilder::from_adapter_outputs_with_config(outputs, &cfg)
-    };
-    let runs = lazyadmin_adapter_tracked::Registry::default()
-        .list()
-        .unwrap_or_default();
-    for run in runs {
-        if let Some(pid) = run.pid {
-            for process in &mut snap.processes {
-                if process.pid == pid as i32 {
-                    process.lazyadmin_run_id =
-                        Some(lazyadmin_core::model::RunId::new(run.id.clone()));
-                }
-            }
-        }
-    }
-    Ok(snap)
+    lazyadmin_runtime::build_snapshot_with_event_drops(config_path, event_drops)
+        .await
+        .map_err(|e| AppError::Other(eyre!(e)))
 }
 
 async fn run_view(

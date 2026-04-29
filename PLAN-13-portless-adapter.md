@@ -2,7 +2,7 @@
 
 Source: this plan; aligned with `lazyadmin-spec-v0_2.md` §10 (discovery adapters), §11 (correlation), §14.3 (free-port algorithm), §23 (adapter trait design).
 Depends on: `PLAN-10..12` (v0.2 baseline shipped).
-Status: revised proposal — not yet implemented.
+Status: implemented; real-portless dogfood passed; released as v0.3.0.
 
 ## What changed in this revision
 
@@ -263,15 +263,15 @@ cargo test -p lazyadmin-cli --features integration-portless free_portless_app
 ### Phase 5 — release prep
 
 - [x] Run the full validation block from `AGENTS.md`, including `cargo metadata --format-version=1`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, CLI JSON smokes, and one-filter-at-a-time TUI tests.
-- [ ] Manual dogfood with a real portless install:
+- [x] Manual dogfood with a real portless install:
   - `portless myapp -- node fake-dev-server.mjs` (start a route)
   - `lazyadmin ps` (expect `portless` label on `:<port>`)
   - `lazyadmin doctor` (expect `adapter:portless` group, all `Ok`)
   - `lazyadmin free <port>` (expect the route to disappear and the dev-server tree to die)
   - kill -9 the portless CLI to create an orphan; confirm `lazyadmin doctor` flags it and recommends `portless prune`.
-- [ ] Tag as a minor version bump (additive surface only).
+- [x] Tag as a minor version bump (additive surface only).
 
-Validation note: `portless` is not installed in this environment, so real-portless manual dogfood remains open. The synthetic `integration-portless` test was implemented and passed.
+Validation note: real-portless dogfood passed with `portless 0.11.1` using an isolated `PORTLESS_STATE_DIR` and `PORTLESS_PORT=18080`; synthetic `integration-portless` also exists. `lazyadmin ps` labeled the route, `lazyadmin doctor` reported `adapter:portless` checks, `lazyadmin free <port>` removed the route and listener, and a SIGKILL-created orphan produced the expected `portless prune` hint.
 
 ## Risks
 
