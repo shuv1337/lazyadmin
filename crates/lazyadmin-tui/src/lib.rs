@@ -1005,55 +1005,105 @@ fn doctor_search_text(row: &DoctorRowVm) -> String {
     )
 }
 
+fn listener_to_summary_row(
+    listener: &lazyadmin_core::model::Listener,
+    snapshot: &Snapshot,
+    details: String,
+) -> SummaryRowVm {
+    let bind = listener.bind_addr.clone().unwrap_or_else(|| {
+        listener
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".into())
+    });
+    let endpoint = match listener.port {
+        Some(port) => format!("{bind}:{port}"),
+        None => bind.clone(),
+    };
+    let owner = listener_owner_label(listener, snapshot);
+    SummaryRowVm {
+        name: endpoint,
+        kind: format!("{:?}", listener.protocol).to_ascii_lowercase(),
+        state: owner,
+        details,
+    }
+}
+
+/// Build the Conflicts projection.
+///
+/// Mirrors `lazyadmin conflicts` (see `lazyadmin-cli/src/main.rs`): a listener is
+/// in conflict when a `CONFLICT` warning references it OR when it has >1 owner.
 fn build_conflict_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
-    snapshot
+    use std::collections::HashSet;
+    let conflict_ids: HashSet<_> = snapshot
         .warnings
         .iter()
-        .filter(|warning| warning.code.to_ascii_lowercase().contains("conflict"))
-        .map(|warning| SummaryRowVm {
-            name: warning.code.clone(),
-            kind: format!("{:?}", warning.severity),
-            state: warning
-                .entity
-                .as_ref()
-                .map(format_entity_ref)
-                .unwrap_or_else(|| "snapshot".into()),
-            details: warning.message.clone(),
+        .filter(|w| w.code == "CONFLICT")
+        .filter_map(|w| match &w.entity {
+            Some(EntityRef::Listener(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    snapshot
+        .listeners
+        .iter()
+        .filter(|listener| conflict_ids.contains(&listener.id) || listener.owners.len() > 1)
+        .map(|listener| {
+            let details = if listener.owners.len() > 1 {
+                format!("{} owners contend for this socket", listener.owners.len())
+            } else {
+                "listed in CONFLICT warning".into()
+            };
+            listener_to_summary_row(listener, snapshot, details)
         })
         .collect()
 }
 
+/// Build the Orphans projection.
+///
+/// Listeners with no resolved owner (no workload/process/manager backing them).
+/// Also includes any `ORPHAN`-coded warnings that point at a listener we couldn't
+/// match by ID.
 fn build_orphan_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
-    let mut rows = snapshot
-        .warnings
+    use std::collections::HashSet;
+    let mut seen: HashSet<lazyadmin_core::model::ListenerId> = HashSet::new();
+    let mut rows: Vec<SummaryRowVm> = snapshot
+        .listeners
         .iter()
-        .filter(|warning| warning.code.to_ascii_lowercase().contains("orphan"))
-        .map(|warning| SummaryRowVm {
-            name: warning.code.clone(),
-            kind: format!("{:?}", warning.severity),
-            state: warning
-                .entity
-                .as_ref()
-                .map(format_entity_ref)
-                .unwrap_or_else(|| "snapshot".into()),
-            details: warning.message.clone(),
+        .filter(|listener| listener.owners.is_empty())
+        .map(|listener| {
+            seen.insert(listener.id.clone());
+            listener_to_summary_row(
+                listener,
+                snapshot,
+                "no owning workload/process discovered".into(),
+            )
         })
-        .collect::<Vec<_>>();
-    rows.extend(
-        snapshot
-            .listeners
-            .iter()
-            .filter(|listener| listener.owners.is_empty())
-            .map(|listener| SummaryRowVm {
-                name: listener
-                    .port
-                    .map(|port| format!("port {port}"))
-                    .unwrap_or_else(|| short_id(&listener.id.to_string())),
-                kind: "listener".into(),
-                state: listener.bind_addr.clone().unwrap_or_else(|| "-".into()),
-                details: "no owning workload/process discovered".into(),
-            }),
-    );
+        .collect();
+    for warning in &snapshot.warnings {
+        if !warning.code.to_ascii_uppercase().contains("ORPHAN") {
+            continue;
+        }
+        let listener_match = match &warning.entity {
+            Some(EntityRef::Listener(id)) => snapshot
+                .listeners
+                .iter()
+                .find(|listener| &listener.id == id),
+            _ => None,
+        };
+        match listener_match {
+            Some(listener) if !seen.contains(&listener.id) => {
+                seen.insert(listener.id.clone());
+                rows.push(listener_to_summary_row(
+                    listener,
+                    snapshot,
+                    warning.message.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
     rows
 }
 
@@ -3657,16 +3707,27 @@ mod tests {
             started_at: None,
             provenance: vec![],
         });
-        snap.warnings.push(lazyadmin_core::model::Warning {
-            severity: WarningSeverity::Warning,
-            code: "CONFLICT".into(),
-            message: "same port".into(),
-            entity: None,
-            provenance: vec![],
-        });
+        // Multi-owner listener mirrors the CLI `conflicts` shape: a real socket
+        // contended for, not a free-floating warning.
+        let proc = process(7777, None, 1);
+        let proc_key = proc.key.clone();
+        snap.processes.push(proc);
+        let mut conflicting = listener_for_process(proc_key, 8081);
+        conflicting.owners.push(EntityRef::Process(ProcessKey {
+            pid: 7778,
+            boot_id: "boot".into(),
+            start_time_ticks: 2,
+        }));
+        snap.listeners.push(conflicting);
         let vm = build_view_model(&snap, 120, false, "");
+        // The conflicts row's full endpoint may be column-truncated at 120 cols
+        // when the inspector pane is showing. Assert against the view-model so
+        // we exercise the projection shape independently, then assert a
+        // truncation-safe prefix in the rendered buffer below.
+        assert_eq!(vm.conflicts.len(), 1);
+        assert_eq!(vm.conflicts[0].name, "127.0.0.1:8081");
         for (view, expected) in [
-            (ViewKind::Conflicts, "same port"),
+            (ViewKind::Conflicts, "127.0.0.1"),
             (ViewKind::Orphans, "No orphan"),
             (ViewKind::TrackedRuns, "npm run dev"),
             (ViewKind::Projects, "/tmp/demo"),
@@ -3694,8 +3755,109 @@ mod tests {
                 text.contains(expected),
                 "{view:?} missing {expected}: {text}"
             );
-            assert!(!text.contains("Port") || !text.contains("Bind") || !text.contains("Owner"));
+            // Each special view must render its own panel title, not the
+            // Everything table's header. The Everything header is "Listeners";
+            // the special views use their own panel titles.
+            let title = title_for_view(view);
+            assert!(
+                text.contains(title),
+                "{view:?} missing its panel title {title}: {text}"
+            );
         }
+    }
+
+    /// Conflicts/Orphans projections must align with the CLI shape. The CLI's
+    /// `conflicts` view (lazyadmin-cli/src/main.rs) selects listeners that are
+    /// referenced by a CONFLICT warning OR have more than one owner; the TUI's
+    /// `conflict_rows` must agree on which listener IDs participate.
+    fn cli_conflict_listener_ids(snapshot: &Snapshot) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let conflict_ids: HashSet<_> = snapshot
+            .warnings
+            .iter()
+            .filter(|w| w.code == "CONFLICT")
+            .filter_map(|w| match &w.entity {
+                Some(EntityRef::Listener(id)) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        snapshot
+            .listeners
+            .iter()
+            .filter(|l| conflict_ids.contains(&l.id) || l.owners.len() > 1)
+            .map(|l| l.id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn conflict_and_orphan_projections_match_cli_listener_shape() {
+        let mut snap = build_empty_snapshot();
+        // Conflict by multi-owner: two owners, no warning.
+        let p1 = process(1001, None, 1);
+        let p1_key = p1.key.clone();
+        snap.processes.push(p1);
+        let mut multi_owner = listener_for_process(p1_key, 8001);
+        multi_owner.owners.push(EntityRef::Process(ProcessKey {
+            pid: 1002,
+            boot_id: "boot".into(),
+            start_time_ticks: 2,
+        }));
+        let multi_owner_id = multi_owner.id.to_string();
+        snap.listeners.push(multi_owner);
+        // Conflict by warning entity: single-owner listener flagged via warning.
+        let p3 = process(1003, None, 3);
+        let p3_key = p3.key.clone();
+        snap.processes.push(p3);
+        let warned = listener_for_process(p3_key, 8002);
+        let warned_id = warned.id.clone();
+        let warned_id_str = warned_id.to_string();
+        snap.listeners.push(warned);
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "CONFLICT".into(),
+            message: "duplicate bind".into(),
+            entity: Some(EntityRef::Listener(warned_id)),
+            provenance: vec![],
+        });
+        // Orphan: listener with no owners at all.
+        let now = chrono::Utc::now();
+        let orphan = Listener {
+            id: ListenerId::new("tcp:0.0.0.0:9999".to_string()),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("0.0.0.0".into()),
+            port: Some(9999),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "default".into(),
+            socket_inode: None,
+            exposure: Exposure::LanOrPublic,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: now,
+            last_seen: now,
+            dual_stack_state: DualStackState::Unknown,
+        };
+        snap.listeners.push(orphan);
+        // Sanity: the TUI projections must surface the same listener IDs the
+        // CLI would project, no more, no less.
+        let expected_conflict_ids = cli_conflict_listener_ids(&snap);
+        assert_eq!(expected_conflict_ids.len(), 2);
+        assert!(expected_conflict_ids.contains(&multi_owner_id));
+        assert!(expected_conflict_ids.contains(&warned_id_str));
+
+        let vm = build_view_model(&snap, 120, false, "");
+        // Conflicts: each row's `name` is `bind:port`, derived from the listener.
+        let conflict_endpoints: std::collections::HashSet<_> =
+            vm.conflicts.iter().map(|r| r.name.clone()).collect();
+        assert_eq!(conflict_endpoints.len(), 2);
+        assert!(conflict_endpoints.contains("127.0.0.1:8001"));
+        assert!(conflict_endpoints.contains("127.0.0.1:8002"));
+
+        // Orphans: only the unowned listener appears.
+        assert_eq!(vm.orphans.len(), 1);
+        assert_eq!(vm.orphans[0].name, "0.0.0.0:9999");
     }
 
     #[test]
