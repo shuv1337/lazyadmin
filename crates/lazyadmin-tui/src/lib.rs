@@ -29,7 +29,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Gauge, List, ListItem,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem,
         Paragraph, Row, Sparkline, Table, TableState, Wrap,
     },
 };
@@ -2375,7 +2375,13 @@ fn rebuild_view_model(app: &mut App, width: u16) {
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     if matches!(app.mode, InputMode::Filter) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => app.mode = InputMode::Normal,
+            KeyCode::Esc => {
+                app.query.clear();
+                app.mode = InputMode::Normal;
+                app.status = Some("filter cleared".into());
+                rebuild_view_model(app, width);
+            }
+            KeyCode::Enter => app.mode = InputMode::Normal,
             KeyCode::Backspace => {
                 app.query.pop();
                 rebuild_view_model(app, width);
@@ -2440,7 +2446,11 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             }
             Command::Metrics => app.active_view = ViewKind::Metrics,
             Command::Logs => app.active_view = ViewKind::Logs,
-            Command::Ports => app.active_view = ViewKind::Ports,
+            Command::Ports => {
+                app.active_view = ViewKind::Ports;
+                app.selected_process = None;
+                rebuild_view_model(app, width);
+            }
             Command::Help => app.mode = InputMode::Help,
             Command::CopyDiagnostic => match copy_diagnostic(&app.vm.inspector.diagnostic_markdown)
             {
@@ -2532,15 +2542,20 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         app.active_view,
         Some(&app.keybindings),
     );
-    if let Some(status) = &app.status {
-        let footer = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(1),
-            width: area.width,
-            height: 1,
-        };
+    let footer = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let status = match app.mode {
+        InputMode::Filter => format!("Filter: {}  (Enter apply, Esc clear)", app.query),
+        InputMode::Palette => format!("Command: {}  (Enter run, Esc cancel)", app.query),
+        _ => app.status.clone().unwrap_or_default(),
+    };
+    if !status.is_empty() {
         f.render_widget(
-            Paragraph::new(status.clone()).style(Style::default().fg(app.theme.footer.color())),
+            Paragraph::new(status).style(Style::default().fg(app.theme.footer.color())),
             footer,
         );
     }
@@ -2554,7 +2569,27 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
                     .fg(app.theme.base_fg.color())
                     .bg(app.theme.base_bg.color()),
             );
+        f.render_widget(Clear, area);
         f.render_widget(help, area);
+    }
+    if matches!(app.mode, InputMode::Palette) {
+        let area = centered_rect(50, 45, f.area());
+        let entries = palette_entries(&app.query);
+        let mut lines = vec![format!("Command: {}", app.query), "".into()];
+        lines.extend(entries.iter().take(12).map(|entry| format!("  {entry}")));
+        if entries.len() > 12 {
+            lines.push(format!("  … {} more", entries.len() - 12));
+        }
+        let palette = Paragraph::new(lines.join("\n"))
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Command palette", &app.theme, true))
+            .style(
+                Style::default()
+                    .fg(app.theme.base_fg.color())
+                    .bg(app.theme.base_bg.color()),
+            );
+        f.render_widget(Clear, area);
+        f.render_widget(palette, area);
     }
 }
 

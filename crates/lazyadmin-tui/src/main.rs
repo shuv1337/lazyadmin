@@ -28,5 +28,18 @@ async fn main() -> color_eyre::Result<()> {
         println!("{}", serde_json::to_string_pretty(&vm)?);
         return Ok(());
     }
-    lazyadmin_tui::run_default().await
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new("lazyadmin").arg("tui").exec();
+        return Err(color_eyre::eyre::eyre!(
+            "failed to launch `lazyadmin tui` from lazyadmin-tui shim: {err}"
+        ));
+    }
+
+    #[cfg(not(unix))]
+    {
+        lazyadmin_tui::run_default().await
+    }
 }
