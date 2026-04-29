@@ -196,6 +196,7 @@ pub struct Confirmation {
     pub command: Command,
     pub typed: String,
     pub required: String,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -617,9 +618,17 @@ impl Drop for SnapshotController {
 
 pub struct CommandDispatcher;
 impl CommandDispatcher {
-    pub fn plan(command: &Command, _row: Option<&RowVm>) -> String {
-        format!("Dry run: {command:?} would use lazyadmin-core action planning/execution services")
+    pub fn plan(command: &Command, row: Option<&RowVm>) -> String {
+        Self::plan_for_target(command, &action_target(row))
     }
+
+    pub fn plan_for_target(command: &Command, target: &str) -> String {
+        format!(
+            "Dry run: {command:?} would target {} via lazyadmin-core action planning/execution services",
+            target
+        )
+    }
+
     pub fn execute(command: &Command) {
         info!(?command, "tui command dispatch requested");
     }
@@ -655,6 +664,11 @@ pub struct ViewModel {
     pub layout: LayoutMode,
     pub groups: Vec<String>,
     pub rows: Vec<RowVm>,
+    pub conflicts: Vec<SummaryRowVm>,
+    pub orphans: Vec<SummaryRowVm>,
+    pub projects: Vec<SummaryRowVm>,
+    pub tracked_runs: Vec<SummaryRowVm>,
+    pub doctor: DoctorVm,
     pub process_tree: ProcessTreeVm,
     pub metrics: MetricsVm,
     pub inspector: InspectorVm,
@@ -681,6 +695,71 @@ pub struct RowVm {
     pub project: String,
     pub badges: Vec<String>,
     pub search_text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRowVm {
+    pub name: String,
+    pub kind: String,
+    pub state: String,
+    pub details: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorVm {
+    pub rows: Vec<DoctorRowVm>,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+}
+
+/// Severity classification for a Doctor row, kept in lock-step with
+/// `lazyadmin_core::model::WarningSeverity` via an exhaustive `From` impl.
+/// Renderers must match on this enum, not on the string `severity` field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorSeverity {
+    Error,
+    Warning,
+    #[default]
+    Info,
+}
+
+impl From<&lazyadmin_core::model::WarningSeverity> for DoctorSeverity {
+    fn from(value: &lazyadmin_core::model::WarningSeverity) -> Self {
+        match value {
+            lazyadmin_core::model::WarningSeverity::Error => DoctorSeverity::Error,
+            lazyadmin_core::model::WarningSeverity::Warning => DoctorSeverity::Warning,
+            lazyadmin_core::model::WarningSeverity::Info => DoctorSeverity::Info,
+        }
+    }
+}
+
+impl DoctorSeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            DoctorSeverity::Error => "Error",
+            DoctorSeverity::Warning => "Warning",
+            DoctorSeverity::Info => "Info",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorRowVm {
+    /// Stringly-typed severity label, retained for the public JSON contract
+    /// (e.g. `lazyadmin tui --headless --json`). Always equal to
+    /// `severity_kind.label()`.
+    pub severity: String,
+    /// Strongly-typed severity classification used by the renderer and any
+    /// code that branches on severity. Renamed in serde so the legacy field
+    /// stays the human-friendly one.
+    #[serde(default, rename = "severity_kind")]
+    pub severity_kind: DoctorSeverity,
+    pub check: String,
+    pub entity: String,
+    pub details: String,
+    pub suggested_action: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorVm {
@@ -913,11 +992,31 @@ pub fn build_view_model_with_state(
             m.fuzzy_match(&text, filter).is_some()
         });
     }
+    let mut conflicts = build_conflict_rows(snapshot);
+    let mut orphans = build_orphan_rows(snapshot);
+    let mut projects = build_project_rows(snapshot);
+    let mut tracked_runs = build_tracked_run_rows(snapshot);
+    let mut doctor = build_doctor_vm(snapshot);
+    if !filter.is_empty() {
+        let m = SkimMatcherV2::default();
+        conflicts.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        orphans.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        projects.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        tracked_runs.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        doctor
+            .rows
+            .retain(|r| m.fuzzy_match(&doctor_search_text(r), filter).is_some());
+    }
     ViewModel {
         width,
         layout,
         groups: groups(show_system),
         rows,
+        conflicts,
+        orphans,
+        projects,
+        tracked_runs,
+        doctor,
         process_tree,
         metrics: build_metrics_with_adapters(snapshot, None, adapter_metrics.unwrap_or_default()),
         inspector,
@@ -932,6 +1031,250 @@ pub fn build_view_model_with_state(
             .as_ref()
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
+    }
+}
+
+fn summary_search_text(row: &SummaryRowVm) -> String {
+    format!("{} {} {} {}", row.name, row.kind, row.state, row.details)
+}
+
+fn doctor_search_text(row: &DoctorRowVm) -> String {
+    format!(
+        "{} {} {} {} {}",
+        row.severity, row.check, row.entity, row.details, row.suggested_action
+    )
+}
+
+fn listener_to_summary_row(
+    listener: &lazyadmin_core::model::Listener,
+    snapshot: &Snapshot,
+    details: String,
+) -> SummaryRowVm {
+    let bind = listener.bind_addr.clone().unwrap_or_else(|| {
+        listener
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".into())
+    });
+    let endpoint = match listener.port {
+        Some(port) => format!("{bind}:{port}"),
+        None => bind.clone(),
+    };
+    let owner = listener_owner_label(listener, snapshot);
+    SummaryRowVm {
+        name: endpoint,
+        kind: format!("{:?}", listener.protocol).to_ascii_lowercase(),
+        state: owner,
+        details,
+    }
+}
+
+/// Build the Conflicts projection.
+///
+/// Mirrors `lazyadmin conflicts` (see `lazyadmin-cli/src/main.rs`): a listener is
+/// in conflict when a `CONFLICT` warning references it OR when it has >1 owner.
+fn build_conflict_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    use std::collections::HashSet;
+    let conflict_ids: HashSet<_> = snapshot
+        .warnings
+        .iter()
+        .filter(|w| w.code == "CONFLICT")
+        .filter_map(|w| match &w.entity {
+            Some(EntityRef::Listener(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    snapshot
+        .listeners
+        .iter()
+        .filter(|listener| conflict_ids.contains(&listener.id) || listener.owners.len() > 1)
+        .map(|listener| {
+            let details = if listener.owners.len() > 1 {
+                format!("{} owners contend for this socket", listener.owners.len())
+            } else {
+                "listed in CONFLICT warning".into()
+            };
+            listener_to_summary_row(listener, snapshot, details)
+        })
+        .collect()
+}
+
+/// Build the Orphans projection.
+///
+/// Listeners with no resolved owner (no workload/process/manager backing them).
+/// Also includes any `ORPHAN`-coded warnings that point at a listener we couldn't
+/// match by ID.
+fn build_orphan_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<lazyadmin_core::model::ListenerId> = HashSet::new();
+    let mut rows: Vec<SummaryRowVm> = snapshot
+        .listeners
+        .iter()
+        .filter(|listener| listener.owners.is_empty())
+        .map(|listener| {
+            seen.insert(listener.id.clone());
+            listener_to_summary_row(
+                listener,
+                snapshot,
+                "no owning workload/process discovered".into(),
+            )
+        })
+        .collect();
+    for warning in &snapshot.warnings {
+        if !warning.code.to_ascii_uppercase().contains("ORPHAN") {
+            continue;
+        }
+        let listener_match = match &warning.entity {
+            Some(EntityRef::Listener(id)) => snapshot
+                .listeners
+                .iter()
+                .find(|listener| &listener.id == id),
+            _ => None,
+        };
+        match listener_match {
+            Some(listener) if !seen.contains(&listener.id) => {
+                seen.insert(listener.id.clone());
+                rows.push(listener_to_summary_row(
+                    listener,
+                    snapshot,
+                    warning.message.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn build_project_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .projects
+        .iter()
+        .map(|project| SummaryRowVm {
+            name: project.name.clone(),
+            kind: project
+                .package_manager
+                .clone()
+                .unwrap_or_else(|| "project".into()),
+            state: format!("{} marker(s)", project.markers.len()),
+            details: project.root.display().to_string(),
+        })
+        .collect()
+}
+
+fn build_tracked_run_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .tracked_runs
+        .iter()
+        .map(|run| SummaryRowVm {
+            name: run
+                .tag
+                .clone()
+                .unwrap_or_else(|| short_id(&run.id.to_string())),
+            kind: "tracked run".into(),
+            state: format!("{:?}", run.state),
+            details: if run.command.is_empty() {
+                "-".into()
+            } else {
+                run.command.join(" ")
+            },
+        })
+        .collect()
+}
+
+fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
+    let mut vm = DoctorVm::default();
+    for warning in &snapshot.warnings {
+        let severity_kind = DoctorSeverity::from(&warning.severity);
+        match severity_kind {
+            DoctorSeverity::Error => vm.error_count += 1,
+            DoctorSeverity::Warning => vm.warning_count += 1,
+            DoctorSeverity::Info => vm.info_count += 1,
+        }
+        vm.rows.push(DoctorRowVm {
+            severity: severity_kind.label().to_string(),
+            severity_kind,
+            check: warning.code.clone(),
+            entity: warning
+                .entity
+                .as_ref()
+                .map(|entity| format_entity_ref(entity, snapshot))
+                .unwrap_or_else(|| "snapshot".into()),
+            details: warning.message.clone(),
+            suggested_action: suggested_action_for_warning(&warning.code),
+        });
+    }
+    vm
+}
+
+/// Render an `EntityRef` as a short, human-readable label by resolving it
+/// against the snapshot. Falls back to a stable identifier when the referent
+/// can't be located (which can happen across a partial snapshot refresh).
+fn format_entity_ref(entity: &EntityRef, snapshot: &Snapshot) -> String {
+    let label = match entity {
+        EntityRef::Listener(id) => snapshot
+            .listeners
+            .iter()
+            .find(|listener| &listener.id == id)
+            .map(|listener| {
+                let bind = listener.bind_addr.clone().unwrap_or_else(|| {
+                    listener
+                        .path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "-".into())
+                });
+                match listener.port {
+                    Some(port) => format!("listener {bind}:{port}"),
+                    None => format!("listener {bind}"),
+                }
+            })
+            .unwrap_or_else(|| format!("listener {}", short_id(&id.to_string()))),
+        EntityRef::Process(key) => snapshot
+            .processes
+            .iter()
+            .find(|process| &process.key == key)
+            // process_owner_label already returns "<command> pid <n>", so just
+            // use it directly rather than re-prefixing the pid.
+            .map(process_owner_label)
+            .unwrap_or_else(|| format!("pid {}", key.pid)),
+        EntityRef::Workload(id) => snapshot
+            .workloads
+            .iter()
+            .find(|workload| &workload.id == id)
+            .map(|workload| format!("workload {}", workload.display_name))
+            .unwrap_or_else(|| format!("workload {}", short_id(&id.to_string()))),
+        EntityRef::Manager(id) => snapshot
+            .managers
+            .iter()
+            .find(|manager| &manager.id == id)
+            .map(|manager| format!("manager {}", manager.name))
+            .unwrap_or_else(|| format!("manager {}", short_id(&id.to_string()))),
+        EntityRef::Project(id) => snapshot
+            .projects
+            .iter()
+            .find(|project| &project.id == id)
+            .map(|project| format!("project {}", project.name))
+            .unwrap_or_else(|| format!("project {}", short_id(&id.to_string()))),
+        EntityRef::Run(id) => format!("run {}", short_id(&id.to_string())),
+        EntityRef::Action(id) => format!("action {}", short_id(&id.to_string())),
+    };
+    compact_text(&label, 32)
+}
+
+fn suggested_action_for_warning(code: &str) -> String {
+    let code = code.to_ascii_lowercase();
+    if code.contains("public") {
+        "bind to loopback or confirm exposure".into()
+    } else if code.contains("conflict") {
+        "inspect duplicate owners/listeners".into()
+    } else if code.contains("orphan") {
+        "prune stale route or restart manager".into()
+    } else if code.contains("degraded") {
+        "check adapter permissions and refresh".into()
+    } else {
+        "inspect details and source provenance".into()
     }
 }
 
@@ -1600,6 +1943,57 @@ fn group_is_active(group: &str, view: ViewKind) -> bool {
     )
 }
 
+/// CLI command(s) the user can run instead when the TUI refuses to render at
+/// the current width. Issue #6 acceptance criterion: the refusal screen must
+/// list at least one matching CLI command for the active view.
+fn cli_hints_for_view(view: ViewKind) -> &'static [&'static str] {
+    match view {
+        ViewKind::Everything => &["lazyadmin ps --json", "lazyadmin export --json"],
+        ViewKind::Ports => &["lazyadmin ps --json"],
+        ViewKind::Public => &["lazyadmin public --json"],
+        ViewKind::Conflicts => &["lazyadmin conflicts --json"],
+        ViewKind::Orphans => &["lazyadmin doctor --json"],
+        ViewKind::TrackedRuns => &["lazyadmin export --json"],
+        ViewKind::Projects => &["lazyadmin projects --json"],
+        ViewKind::Logs => &["lazyadmin logs"],
+        ViewKind::Doctor => &["lazyadmin doctor --json"],
+        ViewKind::ProcessTree => &["lazyadmin ps --json"],
+        ViewKind::Metrics => &["lazyadmin export --json"],
+        ViewKind::Managers => &["lazyadmin ps --json"],
+    }
+}
+
+fn narrow_refusal_message(view: ViewKind) -> String {
+    let hints = cli_hints_for_view(view);
+    let formatted = hints
+        .iter()
+        .map(|cmd| format!("`{cmd}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "lazyadmin TUI needs 60+ columns to show the {view_title} view.\n\
+         Try {formatted} or widen the terminal.",
+        view_title = title_for_view(view),
+    )
+}
+
+fn group_view_kind(group: &str) -> Option<ViewKind> {
+    match group {
+        "All/Everything" => Some(ViewKind::Everything),
+        "Ports" => Some(ViewKind::Ports),
+        "Public listeners" => Some(ViewKind::Public),
+        "Conflicts" => Some(ViewKind::Conflicts),
+        "Orphans" => Some(ViewKind::Orphans),
+        "Tracked runs" => Some(ViewKind::TrackedRuns),
+        "Projects" => Some(ViewKind::Projects),
+        "Logs" => Some(ViewKind::Logs),
+        "Doctor" => Some(ViewKind::Doctor),
+        "Process tree" => Some(ViewKind::ProcessTree),
+        "Metrics" => Some(ViewKind::Metrics),
+        _ => None,
+    }
+}
+
 fn render_header(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -1684,10 +2078,15 @@ fn render_view_kind(
         Block::default().style(Style::default().bg(theme.base_bg.color())),
         area,
     );
-    if view_model.layout == LayoutMode::Refuse {
-        let p = Paragraph::new("lazyadmin TUI needs 60+ columns. Try `lazyadmin ps --json`, `lazyadmin public`, or widen the terminal.")
+    if view_model.layout == LayoutMode::Refuse || area.width < 60 {
+        let p = Paragraph::new(narrow_refusal_message(ctx.view))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.base_fg.color()).bg(theme.base_bg.color()))
+            .wrap(Wrap { trim: false })
+            .style(
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )
             .block(panel_block("lazyadmin", theme, true));
         frame.render_widget(p, area);
         return;
@@ -1723,7 +2122,29 @@ fn render_view_kind(
                 .iter()
                 .map(|g| {
                     let active = group_is_active(g, ctx.view);
-                    let marker = if active { "› " } else { "  " };
+                    let navigable = group_view_kind(g).is_some();
+                    let marker = if active {
+                        "› "
+                    } else if navigable {
+                        "  "
+                    } else {
+                        "· "
+                    };
+                    let label_style = if active {
+                        Style::default()
+                            .fg(theme.base_fg.color())
+                            .bg(theme.base_bg.color())
+                            .add_modifier(Modifier::BOLD)
+                    } else if navigable {
+                        Style::default()
+                            .fg(theme.footer.color())
+                            .bg(theme.base_bg.color())
+                    } else {
+                        Style::default()
+                            .fg(theme.info.color())
+                            .bg(theme.base_bg.color())
+                            .add_modifier(Modifier::DIM)
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             marker,
@@ -1731,21 +2152,7 @@ fn render_view_kind(
                                 .fg(theme.accent.color())
                                 .bg(theme.base_bg.color()),
                         ),
-                        Span::styled(
-                            g.clone(),
-                            Style::default()
-                                .fg(if active {
-                                    theme.base_fg.color()
-                                } else {
-                                    theme.footer.color()
-                                })
-                                .bg(theme.base_bg.color())
-                                .add_modifier(if active {
-                                    Modifier::BOLD
-                                } else {
-                                    Modifier::empty()
-                                }),
-                        ),
+                        Span::styled(g.clone(), label_style),
                     ]))
                 })
                 .collect::<Vec<_>>(),
@@ -1787,8 +2194,17 @@ fn render_view_kind(
     if status.is_empty() {
         status.push("lazyadmin ready — ? help, : palette".into());
     }
+    let status_text = format!(
+        "{:<width$}",
+        status.join(" │ "),
+        width = vertical[2].width as usize
+    );
     frame.render_widget(
-        Paragraph::new(status.join(" │ ")).style(
+        Block::default().style(Style::default().bg(theme.base_bg.color())),
+        vertical[2],
+    );
+    frame.render_widget(
+        Paragraph::new(status_text).style(
             Style::default()
                 .fg(theme.footer.color())
                 .bg(theme.base_bg.color()),
@@ -1810,6 +2226,42 @@ fn render_main_pane(
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
         ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
         ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme, active),
+        ViewKind::Conflicts => render_summary_table(
+            &view_model.conflicts,
+            "Conflicts",
+            "No listener conflicts detected.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::Orphans => render_summary_table(
+            &view_model.orphans,
+            "Orphans",
+            "No orphan listeners or routes detected.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::Projects => render_summary_table(
+            &view_model.projects,
+            "Projects",
+            "No projects discovered. Configure project roots or run discovery.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::TrackedRuns => render_summary_table(
+            &view_model.tracked_runs,
+            "Tracked Runs",
+            "No lazyadmin tracked runs are active.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
         _ => render_rows_table(
             view_model,
             frame,
@@ -1823,6 +2275,97 @@ fn render_main_pane(
     if let Some(keybindings) = ctx.keybindings {
         let _ = help_lines(keybindings);
     }
+}
+
+fn render_empty_state(
+    title: &str,
+    message: &str,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+) {
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .block(panel_block(title, theme, active))
+            .style(
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            ),
+        area,
+    );
+}
+
+fn render_summary_table(
+    rows: &[SummaryRowVm],
+    title: &str,
+    empty_message: &str,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+) {
+    if rows.is_empty() {
+        render_empty_state(title, empty_message, frame, area, theme, active);
+        return;
+    }
+    let table_rows = rows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(Span::styled(
+                compact_text(&row.name, 24),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.kind, 14),
+                Style::default()
+                    .fg(theme.info.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.state, 18),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.details, 64),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )),
+        ])
+        .style(Style::default().bg(theme.base_bg.color()))
+    });
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(24),
+            Constraint::Length(14),
+            Constraint::Length(18),
+            Constraint::Min(20),
+        ],
+    )
+    .header(
+        Row::new(["Name", "Kind", "State", "Details"]).style(
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(panel_block(title, theme, active))
+    .style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color()),
+    );
+    frame.render_widget(table, area);
 }
 
 fn render_rows_table(
@@ -2026,23 +2569,85 @@ fn render_doctor_view(
     theme: &Theme,
     active: bool,
 ) {
-    let lines = view_model
-        .rows
-        .iter()
-        .flat_map(|r| r.badges.iter())
-        .map(|b| {
-            Line::from(Span::styled(
-                b.clone(),
-                Style::default().fg(theme.warning.color()),
-            ))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel_block("Doctor", theme, active))
-            .style(Style::default().bg(theme.base_bg.color())),
-        area,
+    let title = format!(
+        "Doctor — {} error(s), {} warning(s), {} info",
+        view_model.doctor.error_count,
+        view_model.doctor.warning_count,
+        view_model.doctor.info_count
     );
+    if view_model.doctor.rows.is_empty() {
+        render_empty_state(
+            &title,
+            "No health warnings detected.",
+            frame,
+            area,
+            theme,
+            active,
+        );
+        return;
+    }
+    let rows = view_model.doctor.rows.iter().map(|row| {
+        let severity_color = match row.severity_kind {
+            DoctorSeverity::Error => theme.error.color(),
+            DoctorSeverity::Warning => theme.warning.color(),
+            DoctorSeverity::Info => theme.info.color(),
+        };
+        Row::new(vec![
+            Cell::from(Span::styled(
+                row.severity_kind.label().to_string(),
+                Style::default()
+                    .fg(severity_color)
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.check, 18),
+                Style::default()
+                    .fg(theme.accent.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.entity, 22),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.details, 36),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.suggested_action, 36),
+                Style::default()
+                    .fg(theme.info.color())
+                    .bg(theme.base_bg.color()),
+            )),
+        ])
+        .style(Style::default().bg(theme.base_bg.color()))
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Length(18),
+            Constraint::Length(22),
+            Constraint::Min(24),
+            Constraint::Length(30),
+        ],
+    )
+    .header(
+        Row::new(["Severity", "Check", "Entity", "Details", "Suggested action"]).style(
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(panel_block(title, theme, active))
+    .style(Style::default().bg(theme.base_bg.color()));
+    frame.render_widget(table, area);
 }
 fn render_process_tree(
     view_model: &ViewModel,
@@ -2221,6 +2826,7 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
     keybindings
         .bindings
         .iter()
+        .filter(|(_, b)| !b.is_empty())
         .map(|(a, b)| format!("{a}: {}", b.join(", ")))
         .collect()
 }
@@ -2247,23 +2853,42 @@ pub enum CopyDiagnosticOutcome {
 }
 
 pub fn copy_diagnostic(markdown: &str) -> anyhow::Result<CopyDiagnosticOutcome> {
-    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(markdown)) {
-        Ok(()) => Ok(CopyDiagnosticOutcome::Clipboard),
-        Err(_) => copy_diagnostic_via_command(markdown)
-            .map(|()| CopyDiagnosticOutcome::Clipboard)
-            .or_else(|_| copy_diagnostic_fallback(markdown, None).map(CopyDiagnosticOutcome::File)),
-    }
+    copy_diagnostic_via_command(markdown)
+        .map(|()| CopyDiagnosticOutcome::Clipboard)
+        .or_else(|_| {
+            copy_diagnostic_via_arboard(markdown).map(|()| CopyDiagnosticOutcome::Clipboard)
+        })
+        .or_else(|_| copy_diagnostic_fallback(markdown, None).map(CopyDiagnosticOutcome::File))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_diagnostic_via_arboard(markdown: &str) -> anyhow::Result<()> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(markdown))
+        .map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+fn copy_diagnostic_via_arboard(_markdown: &str) -> anyhow::Result<()> {
+    anyhow::bail!("arboard clipboard disabled on linux TUI to avoid terminal stderr leaks")
 }
 
 fn copy_diagnostic_via_command(markdown: &str) -> anyhow::Result<()> {
-    for program in ["wl-copy", "xclip"] {
+    // Order matters: try the GUI-clipboard daemons in their native habitat
+    // first, then fall back to less common ones. Each program's stdout/stderr
+    // is sent to /dev/null so any "no display" / "selection lost" warnings
+    // can't leak into the TUI's alternate screen (issue #7).
+    for program in ["wl-copy", "xclip", "xsel", "pbcopy"] {
+        let args: Vec<&str> = match program {
+            "xclip" => vec!["-selection", "clipboard"],
+            "xsel" => vec!["--clipboard", "--input"],
+            _ => Vec::new(),
+        };
         let mut child = std::process::Command::new(program)
-            .args(if program == "xclip" {
-                vec!["-selection", "clipboard"]
-            } else {
-                Vec::new()
-            })
+            .args(args)
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn();
         if let Ok(ref mut child) = child {
             use std::io::Write;
@@ -2448,7 +3073,15 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
         .filter(|(_, row)| match app.active_view {
             ViewKind::Public => row.badges.iter().any(|badge| badge == "PUBLIC"),
             ViewKind::Ports => row.port.is_some(),
-            ViewKind::ProcessTree | ViewKind::Metrics | ViewKind::Logs | ViewKind::Doctor => false,
+            ViewKind::Conflicts
+            | ViewKind::Orphans
+            | ViewKind::TrackedRuns
+            | ViewKind::Projects
+            | ViewKind::Managers
+            | ViewKind::ProcessTree
+            | ViewKind::Metrics
+            | ViewKind::Logs
+            | ViewKind::Doctor => false,
             _ => true,
         })
         .map(|(idx, _)| idx)
@@ -2500,6 +3133,96 @@ fn selected_row(app: &App) -> Option<&RowVm> {
     visible_row_indices(app)
         .get(app.selected_row)
         .and_then(|idx| app.vm.rows.get(*idx))
+}
+
+fn action_target(row: Option<&RowVm>) -> String {
+    row.map(|row| {
+        let endpoint = row
+            .port
+            .map(|port| format!("{}:{port}", row.bind))
+            .unwrap_or_else(|| row.bind.clone());
+        let project = if row.project.trim().is_empty() || row.project == "-" {
+            "no project".into()
+        } else {
+            row.project.clone()
+        };
+        format!(
+            "{endpoint} owned by {} ({project}, {})",
+            row.owner, row.runtime
+        )
+    })
+    .unwrap_or_else(|| "no selected row".into())
+}
+
+fn start_confirmation(app: &mut App, command: Command, required: &str) {
+    let target = action_target(selected_row(app));
+    app.confirmation = Some(Confirmation {
+        command,
+        typed: String::new(),
+        required: required.into(),
+        target: target.clone(),
+    });
+    app.status = Some(format!(
+        "confirm {required} for {target}; type {required} then Enter, Esc cancels"
+    ));
+}
+
+/// Confirmation modal owns ALL key input while it is open. This is intentional
+/// for safety: it prevents global shortcuts (k, l, q, …) from running silently
+/// while the user is mid-typing a destructive confirmation. Anything we don't
+/// explicitly recognize is simply swallowed.
+fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
+    let Some(mut confirmation) = app.confirmation.take() else {
+        return false;
+    };
+    // Ctrl+C is the universal "get me out" reflex; treat it as Esc rather than
+    // letting it land as `Char('c')` and silently grow the typed buffer.
+    let is_ctrl_c =
+        matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            app.status = Some(format!(
+                "cancelled {:?} for {}",
+                confirmation.command, confirmation.target
+            ));
+        }
+        KeyCode::Enter => {
+            if confirmation.typed == confirmation.required {
+                let target = confirmation.target.clone();
+                let command = confirmation.command.clone();
+                CommandDispatcher::execute(&command);
+                app.status = Some(format!(
+                    "{}; awaiting action executor for {target}",
+                    CommandDispatcher::plan_for_target(&command, &target)
+                ));
+            } else {
+                app.status = Some(format!(
+                    "confirmation failed for {}; type {} exactly",
+                    confirmation.target, confirmation.required
+                ));
+                confirmation.typed.clear();
+                app.confirmation = Some(confirmation);
+            }
+        }
+        KeyCode::Backspace => {
+            confirmation.typed.pop();
+            app.confirmation = Some(confirmation);
+        }
+        KeyCode::Char(_) if is_ctrl_c => {
+            app.status = Some(format!(
+                "cancelled {:?} for {}",
+                confirmation.command, confirmation.target
+            ));
+        }
+        KeyCode::Char(c) => {
+            confirmation.typed.push(c);
+            app.confirmation = Some(confirmation);
+        }
+        _ => {
+            app.confirmation = Some(confirmation);
+        }
+    }
+    true
 }
 
 fn navigable_views() -> &'static [ViewKind] {
@@ -2574,6 +3297,9 @@ fn cycle_pane(app: &mut App, delta: isize, width: u16) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
+    if handle_confirmation_key(app, key) {
+        return;
+    }
     if matches!(app.mode, InputMode::Filter) {
         match key.code {
             KeyCode::Esc => {
@@ -2698,9 +3424,15 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                     app.status = Some("diagnostic copied".into());
                 }
                 Ok(CopyDiagnosticOutcome::File(path)) => {
-                    app.status = Some(format!("clipboard unavailable; wrote {}", path.display()));
+                    app.status = Some(format!(
+                        "clipboard unavailable; diagnostic written to {}",
+                        path.display()
+                    ));
                 }
-                Err(err) => app.status = Some(format!("copy failed: {err}")),
+                Err(_) => app.status = Some(
+                    "clipboard unavailable; copy fallback failed, diagnostic remains in inspector"
+                        .into(),
+                ),
             },
             Command::Open => match selected_row(app) {
                 Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
@@ -2709,13 +3441,32 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 },
                 None => app.status = Some("open failed: no selected listener".into()),
             },
-            Command::Kill => {
-                app.confirmation = Some(Confirmation {
-                    command: cmd,
-                    typed: String::new(),
-                    required: "kill".into(),
-                })
+            Command::Kill => match selected_row(app) {
+                Some(_) => start_confirmation(app, cmd, "kill"),
+                None => app.status = Some("kill failed: no selected listener".into()),
+            },
+            Command::Restart | Command::Stop | Command::Free | Command::Run => {
+                match selected_row(app) {
+                    Some(row) => {
+                        app.status = Some(CommandDispatcher::plan(&cmd, Some(row)));
+                    }
+                    None => {
+                        app.status =
+                            Some(format!("{cmd:?} failed: no selected listener", cmd = cmd));
+                    }
+                }
             }
+            Command::Edit => match selected_row(app) {
+                Some(row) => {
+                    app.status = Some(format!(
+                        "edit not implemented for {}",
+                        action_target(Some(row))
+                    ));
+                }
+                None => {
+                    app.status = Some("edit failed: no selected listener".into());
+                }
+            },
             _ => CommandDispatcher::execute(&cmd),
         }
     }
@@ -2835,6 +3586,45 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         f.render_widget(Clear, area);
         f.render_widget(palette, area);
     }
+    if let Some(confirmation) = &app.confirmation {
+        let area = centered_rect(62, 38, f.area());
+        let body = vec![
+            Line::from(vec![
+                Span::styled("Action: ", Style::default().fg(app.theme.footer.color())),
+                Span::raw(format!("{:?}", confirmation.command)),
+            ]),
+            Line::from(vec![
+                Span::styled("Target: ", Style::default().fg(app.theme.footer.color())),
+                Span::raw(confirmation.target.clone()),
+            ]),
+            Line::from(""),
+            Line::from(format!(
+                "Type '{}' then Enter to continue.",
+                confirmation.required
+            )),
+            Line::from("Esc cancels. Other global keys are disabled while confirming."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Input: ", Style::default().fg(app.theme.footer.color())),
+                Span::styled(
+                    confirmation.typed.clone(),
+                    Style::default()
+                        .fg(app.theme.accent.color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ];
+        let prompt = Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Confirm action", &app.theme, true))
+            .style(
+                Style::default()
+                    .fg(app.theme.base_fg.color())
+                    .bg(app.theme.base_bg.color()),
+            );
+        f.render_widget(Clear, area);
+        f.render_widget(prompt, area);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -2945,8 +3735,8 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use lazyadmin_core::model::{
-        AddressFamily, Confidence, DualStackState, Listener, ListenerId, ListenerState, Protocol,
-        WarningSeverity,
+        AddressFamily, Confidence, DualStackState, Listener, ListenerId, ListenerState, Project,
+        ProjectId, Protocol, RunId, TrackedRun, WarningSeverity, WorkloadState,
     };
     use ratatui::backend::TestBackend;
     #[test]
@@ -2974,13 +3764,44 @@ mod tests {
     }
     #[test]
     fn action_confirmation_requires_text() {
-        let mut app = App::default();
+        let mut app = app_with_listener(8080);
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
             120,
         );
         assert_eq!(app.confirmation.as_ref().unwrap().required, "kill");
+        assert!(app.confirmation.as_ref().unwrap().target.contains("8080"));
+    }
+
+    /// Mutating action shortcuts must refuse rather than silently arm a
+    /// confirmation/dry-run against "no selected row".
+    #[test]
+    fn mutating_actions_refuse_when_no_row_is_selected() {
+        for (key, expected_substr) in [
+            ('k', "kill failed"),
+            ('r', "Restart failed"),
+            ('s', "Stop failed"),
+            ('f', "Free failed"),
+            ('R', "Run failed"),
+            ('e', "edit failed"),
+        ] {
+            let mut app = App::default();
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                120,
+            );
+            assert!(
+                app.confirmation.is_none(),
+                "{key} must not arm a confirmation against no row"
+            );
+            let status = app.status.as_deref().unwrap_or_default();
+            assert!(
+                status.contains(expected_substr),
+                "{key} status missing {expected_substr}: {status}"
+            );
+        }
     }
     #[test]
     fn view_model_widths() {
@@ -3032,6 +3853,402 @@ mod tests {
             .draw(|f| render(&vm, f, f.area(), &Theme::default_dark()))
             .unwrap();
         assert!(format!("{:?}", terminal.backend().buffer()).contains("hidden"));
+    }
+
+    /// Every view kind must produce a refusal message that names at least one
+    /// matching CLI command. Issue #6 acceptance criterion 3.
+    #[test]
+    fn narrow_refusal_lists_view_specific_cli_hint() {
+        for view in [
+            ViewKind::Everything,
+            ViewKind::Ports,
+            ViewKind::Public,
+            ViewKind::Conflicts,
+            ViewKind::Orphans,
+            ViewKind::TrackedRuns,
+            ViewKind::Projects,
+            ViewKind::Logs,
+            ViewKind::Doctor,
+            ViewKind::ProcessTree,
+            ViewKind::Metrics,
+            ViewKind::Managers,
+        ] {
+            let message = narrow_refusal_message(view);
+            assert!(
+                message.contains("60+ columns"),
+                "{view:?} message lost size hint: {message}"
+            );
+            let hints = cli_hints_for_view(view);
+            assert!(!hints.is_empty(), "{view:?} has no CLI hint configured");
+            for hint in hints {
+                assert!(
+                    message.contains(hint),
+                    "{view:?} message missing hint {hint}: {message}"
+                );
+            }
+            // Title of the active view should appear so the user knows which
+            // view was refused.
+            assert!(
+                message.contains(title_for_view(view)),
+                "{view:?} message missing view title: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_render_refuses_even_if_view_model_was_built_wide() {
+        let vm = build_view_model(&build_empty_snapshot(), 120, false, "");
+        let backend = TestBackend::new(50, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Projects,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("60+ columns"));
+        // Refusal message references the active view's CLI command but must
+        // NOT have rendered the Projects panel/table itself.
+        assert!(text.contains("lazyadmin projects"));
+        assert!(!text.contains("No projects"));
+    }
+
+    #[test]
+    fn special_views_render_projections_or_empty_states_not_listener_table() {
+        let mut snap = build_empty_snapshot();
+        snap.projects.push(Project {
+            id: ProjectId::new("p1"),
+            root: std::path::PathBuf::from("/tmp/demo"),
+            name: "demo".into(),
+            markers: vec![],
+            git_remote: None,
+            package_manager: Some("npm".into()),
+            dev_commands: vec![],
+            provenance: vec![],
+        });
+        snap.tracked_runs.push(TrackedRun {
+            id: RunId::new("run1"),
+            tag: Some("api".into()),
+            command: vec!["npm".into(), "run".into(), "dev".into()],
+            cwd: None,
+            state: WorkloadState::Running,
+            started_at: None,
+            provenance: vec![],
+        });
+        // Multi-owner listener mirrors the CLI `conflicts` shape: a real socket
+        // contended for, not a free-floating warning.
+        let proc = process(7777, None, 1);
+        let proc_key = proc.key.clone();
+        snap.processes.push(proc);
+        let mut conflicting = listener_for_process(proc_key, 8081);
+        conflicting.owners.push(EntityRef::Process(ProcessKey {
+            pid: 7778,
+            boot_id: "boot".into(),
+            start_time_ticks: 2,
+        }));
+        snap.listeners.push(conflicting);
+        let vm = build_view_model(&snap, 120, false, "");
+        // The conflicts row's full endpoint may be column-truncated at 120 cols
+        // when the inspector pane is showing. Assert against the view-model so
+        // we exercise the projection shape independently, then assert a
+        // truncation-safe prefix in the rendered buffer below.
+        assert_eq!(vm.conflicts.len(), 1);
+        assert_eq!(vm.conflicts[0].name, "127.0.0.1:8081");
+        for (view, expected) in [
+            (ViewKind::Conflicts, "127.0.0.1"),
+            (ViewKind::Orphans, "No orphan"),
+            (ViewKind::TrackedRuns, "npm run dev"),
+            (ViewKind::Projects, "/tmp/demo"),
+        ] {
+            let backend = TestBackend::new(120, 20);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    render_view_kind(
+                        &vm,
+                        f,
+                        f.area(),
+                        &Theme::default_dark(),
+                        RenderContext {
+                            view,
+                            active_pane: Pane::Rows,
+                            keybindings: None,
+                            selected_row: 0,
+                        },
+                    )
+                })
+                .unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                text.contains(expected),
+                "{view:?} missing {expected}: {text}"
+            );
+            // Each special view must render its own panel title, not the
+            // Everything table's header. The Everything header is "Listeners";
+            // the special views use their own panel titles.
+            let title = title_for_view(view);
+            assert!(
+                text.contains(title),
+                "{view:?} missing its panel title {title}: {text}"
+            );
+        }
+    }
+
+    /// Conflicts/Orphans projections must align with the CLI shape. The CLI's
+    /// `conflicts` view (lazyadmin-cli/src/main.rs) selects listeners that are
+    /// referenced by a CONFLICT warning OR have more than one owner; the TUI's
+    /// `conflict_rows` must agree on which listener IDs participate.
+    fn cli_conflict_listener_ids(snapshot: &Snapshot) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let conflict_ids: HashSet<_> = snapshot
+            .warnings
+            .iter()
+            .filter(|w| w.code == "CONFLICT")
+            .filter_map(|w| match &w.entity {
+                Some(EntityRef::Listener(id)) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        snapshot
+            .listeners
+            .iter()
+            .filter(|l| conflict_ids.contains(&l.id) || l.owners.len() > 1)
+            .map(|l| l.id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn conflict_and_orphan_projections_match_cli_listener_shape() {
+        let mut snap = build_empty_snapshot();
+        // Conflict by multi-owner: two owners, no warning.
+        let p1 = process(1001, None, 1);
+        let p1_key = p1.key.clone();
+        snap.processes.push(p1);
+        let mut multi_owner = listener_for_process(p1_key, 8001);
+        multi_owner.owners.push(EntityRef::Process(ProcessKey {
+            pid: 1002,
+            boot_id: "boot".into(),
+            start_time_ticks: 2,
+        }));
+        let multi_owner_id = multi_owner.id.to_string();
+        snap.listeners.push(multi_owner);
+        // Conflict by warning entity: single-owner listener flagged via warning.
+        let p3 = process(1003, None, 3);
+        let p3_key = p3.key.clone();
+        snap.processes.push(p3);
+        let warned = listener_for_process(p3_key, 8002);
+        let warned_id = warned.id.clone();
+        let warned_id_str = warned_id.to_string();
+        snap.listeners.push(warned);
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "CONFLICT".into(),
+            message: "duplicate bind".into(),
+            entity: Some(EntityRef::Listener(warned_id)),
+            provenance: vec![],
+        });
+        // Orphan: listener with no owners at all.
+        let now = chrono::Utc::now();
+        let orphan = Listener {
+            id: ListenerId::new("tcp:0.0.0.0:9999".to_string()),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("0.0.0.0".into()),
+            port: Some(9999),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "default".into(),
+            socket_inode: None,
+            exposure: Exposure::LanOrPublic,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: now,
+            last_seen: now,
+            dual_stack_state: DualStackState::Unknown,
+        };
+        snap.listeners.push(orphan);
+        // Sanity: the TUI projections must surface the same listener IDs the
+        // CLI would project, no more, no less.
+        let expected_conflict_ids = cli_conflict_listener_ids(&snap);
+        assert_eq!(expected_conflict_ids.len(), 2);
+        assert!(expected_conflict_ids.contains(&multi_owner_id));
+        assert!(expected_conflict_ids.contains(&warned_id_str));
+
+        let vm = build_view_model(&snap, 120, false, "");
+        // Conflicts: each row's `name` is `bind:port`, derived from the listener.
+        let conflict_endpoints: std::collections::HashSet<_> =
+            vm.conflicts.iter().map(|r| r.name.clone()).collect();
+        assert_eq!(conflict_endpoints.len(), 2);
+        assert!(conflict_endpoints.contains("127.0.0.1:8001"));
+        assert!(conflict_endpoints.contains("127.0.0.1:8002"));
+
+        // Orphans: only the unowned listener appears.
+        assert_eq!(vm.orphans.len(), 1);
+        assert_eq!(vm.orphans[0].name, "0.0.0.0:9999");
+    }
+
+    #[test]
+    fn doctor_view_renders_actionable_warning_rows() {
+        let mut snap = build_empty_snapshot();
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Error,
+            code: "DEGRADED_PROCFS".into(),
+            message: "permission denied".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.doctor.rows[0].check, "DEGRADED_PROCFS");
+        assert_eq!(vm.doctor.rows[0].details, "permission denied");
+        assert!(
+            vm.doctor.rows[0]
+                .suggested_action
+                .contains("check adapter permissions")
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Doctor,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("1 error"));
+        assert!(text.contains("Doctor"));
+        assert!(!text.contains("PUBLICPUBLIC"));
+    }
+
+    /// Doctor entity column must resolve EntityRef references against the
+    /// snapshot rather than `Debug`-formatting the raw enum variant. Concretely
+    /// a `Listener(...)` reference becomes `listener bind:port`, a
+    /// `Process(...)` becomes `pid <n> <command>`, etc. — actionable info, not
+    /// `Listener(ListenerId("abc"))`.
+    #[test]
+    fn doctor_entity_column_resolves_to_human_labels() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4242, None, 1);
+        let proc_key = proc.key.clone();
+        snap.processes.push(proc);
+        let listener = listener_for_process(proc_key.clone(), 8443);
+        let listener_id = listener.id.clone();
+        snap.listeners.push(listener);
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "PUBLIC".into(),
+            message: "exposed to LAN".into(),
+            entity: Some(EntityRef::Listener(listener_id)),
+            provenance: vec![],
+        });
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Info,
+            code: "ZOMBIE".into(),
+            message: "process is a zombie".into(),
+            entity: Some(EntityRef::Process(proc_key)),
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 120, false, "");
+        let listener_row = vm
+            .doctor
+            .rows
+            .iter()
+            .find(|row| row.check == "PUBLIC")
+            .expect("PUBLIC row");
+        assert!(
+            listener_row.entity.contains("127.0.0.1:8443"),
+            "listener entity not resolved: {}",
+            listener_row.entity
+        );
+        assert!(
+            listener_row.entity.starts_with("listener "),
+            "listener entity missing prefix: {}",
+            listener_row.entity
+        );
+        let process_row = vm
+            .doctor
+            .rows
+            .iter()
+            .find(|row| row.check == "ZOMBIE")
+            .expect("ZOMBIE row");
+        assert!(
+            process_row.entity.contains("4242"),
+            "process entity not resolved: {}",
+            process_row.entity
+        );
+        // No row should leak the raw Debug shape of the enum.
+        for row in &vm.doctor.rows {
+            assert!(!row.entity.contains("ListenerId("));
+            assert!(!row.entity.contains("ProcessKey {"));
+        }
+    }
+
+    /// Severity classification must come from a real `match` on
+    /// `WarningSeverity`, not a `format!("{:?}")` string compare. This test
+    /// exhausts every variant and asserts each lands in the matching counter,
+    /// so renaming a variant is a compile error rather than a silent drift to
+    /// `info_count`.
+    #[test]
+    fn doctor_severity_classification_is_exhaustive() {
+        let mut snap = build_empty_snapshot();
+        for severity in [
+            WarningSeverity::Error,
+            WarningSeverity::Warning,
+            WarningSeverity::Info,
+        ] {
+            snap.warnings.push(lazyadmin_core::model::Warning {
+                severity,
+                code: "X".into(),
+                message: "x".into(),
+                entity: None,
+                provenance: vec![],
+            });
+        }
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.doctor.error_count, 1);
+        assert_eq!(vm.doctor.warning_count, 1);
+        assert_eq!(vm.doctor.info_count, 1);
+        let kinds: Vec<DoctorSeverity> = vm.doctor.rows.iter().map(|r| r.severity_kind).collect();
+        assert!(kinds.contains(&DoctorSeverity::Error));
+        assert!(kinds.contains(&DoctorSeverity::Warning));
+        assert!(kinds.contains(&DoctorSeverity::Info));
+        // The legacy stringly-typed field stays in lock-step with the enum so
+        // the JSON contract doesn't drift.
+        for row in &vm.doctor.rows {
+            assert_eq!(row.severity, row.severity_kind.label());
+        }
+    }
+
+    #[test]
+    fn help_lines_skip_empty_bindings() {
+        let mut keybindings = ResolvedKeybindings {
+            bindings: BTreeMap::new(),
+        };
+        keybindings.bindings.insert("toggle_filter".into(), vec![]);
+        keybindings.bindings.insert("quit".into(), vec!["q".into()]);
+        let lines = help_lines(&keybindings);
+        assert_eq!(lines, vec!["quit: q"]);
     }
 
     #[test]
@@ -3107,6 +4324,133 @@ mod tests {
             first_seen: now,
             last_seen: now,
             dual_stack_state: DualStackState::NotApplicable,
+        }
+    }
+
+    fn app_with_listener(port: u16) -> App {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, port));
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        app
+    }
+
+    #[test]
+    fn kill_confirmation_blocks_global_keys_and_renders_target() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.as_ref().unwrap().target.contains("8080"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(!app.should_quit, "q must be suppressed while confirming");
+        assert_eq!(app.confirmation.as_ref().unwrap().typed, "q");
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_app(f, &app)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("Confirm action"));
+        assert!(text.contains("8080"));
+        assert!(text.contains("Type 'kill'"));
+    }
+
+    #[test]
+    fn kill_confirmation_esc_cancels_and_correct_text_dry_runs() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_none());
+        assert!(app.status.as_deref().unwrap().contains("cancelled"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        for c in "kill".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                120,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_none());
+        let status = app.status.as_deref().unwrap();
+        assert!(status.contains("Dry run: Kill"));
+        assert!(status.contains("8080"));
+    }
+
+    /// Ctrl+C is the universal cancel reflex; in confirmation mode it must
+    /// behave like Esc, not like a literal `c` keystroke that grows the typed
+    /// buffer.
+    #[test]
+    fn ctrl_c_cancels_confirmation_instead_of_appending_c() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_some());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            120,
+        );
+        assert!(
+            app.confirmation.is_none(),
+            "Ctrl+C must close the confirmation modal"
+        );
+        let status = app.status.as_deref().unwrap();
+        assert!(status.contains("cancelled"), "status: {status}");
+    }
+
+    #[test]
+    fn advertised_action_keys_show_selected_row_feedback() {
+        for (key, expected) in [
+            ('r', "Dry run: Restart"),
+            ('s', "Dry run: Stop"),
+            ('f', "Dry run: Free"),
+            ('R', "Dry run: Run"),
+            ('e', "edit not implemented"),
+        ] {
+            let mut app = app_with_listener(8080);
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                120,
+            );
+            let status = app.status.as_deref().unwrap_or_default();
+            assert!(status.contains(expected), "{key}: {status}");
+            assert!(status.contains("8080"), "{key}: {status}");
         }
     }
 
@@ -3196,6 +4540,133 @@ mod tests {
             120,
         );
         assert_eq!(app.pane, Pane::Groups);
+    }
+
+    /// Issue #2 acceptance criterion 3: TUI render tests cover the view-rail
+    /// layout in both states.
+    ///
+    /// Manager group entries (`Docker/Compose`, `Podman`, `systemd:user`,
+    /// `systemd:system`, `Direct processes`) are non-navigable filter
+    /// placeholders and must render with the "·" marker — distinct from the
+    /// "›" active marker and the "  " navigable-but-inactive marker. Down/up
+    /// arrows must skip them so they don't look like missed selections.
+    #[test]
+    fn view_rail_marks_manager_groups_as_non_navigable() {
+        // Sanity: the canonical group list must include both classes for the
+        // marker assertions below to be meaningful.
+        let group_list = groups(false);
+        let manager_groups = ["Docker/Compose", "Podman", "Direct processes"];
+        for g in &manager_groups {
+            assert!(
+                group_list.iter().any(|item| item == g),
+                "missing manager group {g} in groups()"
+            );
+            assert!(
+                group_view_kind(g).is_none(),
+                "{g} should be non-navigable (group_view_kind returns None)"
+            );
+        }
+        for g in [
+            "All/Everything",
+            "Ports",
+            "Public listeners",
+            "Conflicts",
+            "Orphans",
+            "Tracked runs",
+            "Projects",
+            "Logs",
+            "Doctor",
+            "Process tree",
+            "Metrics",
+        ] {
+            assert!(
+                group_view_kind(g).is_some(),
+                "{g} should be navigable (group_view_kind returns Some)"
+            );
+        }
+
+        let snap = build_empty_snapshot();
+        let vm = build_view_model(&snap, 120, false, "");
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Everything,
+                        active_pane: Pane::Groups,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let mut combined = String::new();
+        for y in 0..buffer.area.height {
+            combined.push_str(&row_text(y));
+            combined.push('\n');
+        }
+        // Active marker on the current view.
+        assert!(
+            combined.contains("› All/Everything"),
+            "active marker missing: {combined}"
+        );
+        // Manager groups carry the non-navigable marker, never the
+        // navigable-but-inactive marker.
+        for g in &manager_groups {
+            let marked = format!("· {g}");
+            assert!(
+                combined.contains(&marked),
+                "manager group {g} missing non-navigable marker: {combined}"
+            );
+            // Also ensure they never carry the active "›" marker since they're
+            // not selectable.
+            assert!(
+                !combined.contains(&format!("› {g}")),
+                "manager group {g} should never appear active: {combined}"
+            );
+        }
+    }
+
+    #[test]
+    fn down_arrow_skips_manager_groups_in_view_rail() {
+        // Anchor at the last navigable view before the manager group block
+        // (Projects). The next Down should land on Logs, not on a manager.
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            pane: Pane::Groups,
+            active_view: ViewKind::Projects,
+            ..Default::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(
+            app.active_view,
+            ViewKind::Logs,
+            "down from Projects must skip the manager group block and land on Logs"
+        );
+        // Up from Logs should symmetrically jump back to Projects.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Projects);
     }
 
     #[test]
