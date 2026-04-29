@@ -102,7 +102,7 @@ impl Default for App {
         Self {
             vm: ViewModel::default(),
             snapshot: build_empty_snapshot(),
-            pane: Pane::default(),
+            pane: Pane::Rows,
             active_view: ViewKind::Everything,
             query: String::new(),
             mode: InputMode::default(),
@@ -1523,9 +1523,12 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
         frame,
         area,
         theme,
-        ViewKind::Everything,
-        None,
-        0,
+        RenderContext {
+            view: ViewKind::Everything,
+            active_pane: Pane::Rows,
+            keybindings: None,
+            selected_row: 0,
+        },
     );
 }
 
@@ -1543,22 +1546,6 @@ fn panel_block(title: impl Into<String>, theme: &Theme, active: bool) -> Block<'
         .style(
             Style::default()
                 .fg(theme.base_fg.color())
-                .bg(theme.base_bg.color()),
-        )
-}
-
-fn quiet_block(title: impl Into<String>, theme: &Theme) -> Block<'static> {
-    Block::default()
-        .title(format!(" {} ", title.into()))
-        .borders(Borders::RIGHT)
-        .border_style(
-            Style::default()
-                .fg(theme.selection.color())
-                .bg(theme.base_bg.color()),
-        )
-        .style(
-            Style::default()
-                .fg(theme.footer.color())
                 .bg(theme.base_bg.color()),
         )
 }
@@ -1661,14 +1648,20 @@ fn render_header(
     );
 }
 
+#[derive(Clone, Copy)]
+struct RenderContext<'a> {
+    view: ViewKind,
+    active_pane: Pane,
+    keybindings: Option<&'a ResolvedKeybindings>,
+    selected_row: usize,
+}
+
 fn render_view_kind(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
-    view: ViewKind,
-    keybindings: Option<&ResolvedKeybindings>,
-    selected_row: usize,
+    ctx: RenderContext<'_>,
 ) {
     tracing::debug!("tui.render");
     frame.render_widget(
@@ -1691,7 +1684,7 @@ fn render_view_kind(
             Constraint::Length(1),
         ])
         .split(area);
-    render_header(view_model, frame, vertical[0], theme, view);
+    render_header(view_model, frame, vertical[0], theme, ctx.view);
     let body = vertical[1];
     let chunks = match view_model.layout {
         LayoutMode::ThreePane => Layout::default()
@@ -1713,7 +1706,7 @@ fn render_view_kind(
                 .groups
                 .iter()
                 .map(|g| {
-                    let active = group_is_active(g, view);
+                    let active = group_is_active(g, ctx.view);
                     let marker = if active { "› " } else { "  " };
                     ListItem::new(Line::from(vec![
                         Span::styled(
@@ -1741,7 +1734,7 @@ fn render_view_kind(
                 })
                 .collect::<Vec<_>>(),
         )
-        .block(quiet_block("Views", theme))
+        .block(panel_block("Views", theme, ctx.active_pane == Pane::Groups))
         .style(Style::default().bg(theme.base_bg.color()));
         frame.render_widget(groups, chunks[0]);
         render_main_pane(
@@ -1749,21 +1742,18 @@ fn render_view_kind(
             frame,
             chunks[1],
             theme,
-            view,
-            keybindings,
-            selected_row,
+            ctx,
+            ctx.active_pane == Pane::Rows,
         );
-        render_inspector(view_model, frame, chunks[2], theme);
-    } else {
-        render_main_pane(
+        render_inspector(
             view_model,
             frame,
-            chunks[0],
+            chunks[2],
             theme,
-            view,
-            keybindings,
-            selected_row,
+            ctx.active_pane == Pane::Inspector,
         );
+    } else {
+        render_main_pane(view_model, frame, chunks[0], theme, ctx, true);
     }
     let mut status = Vec::new();
     if view_model.hidden_system_count > 0 {
@@ -1796,18 +1786,25 @@ fn render_main_pane(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
-    view: ViewKind,
-    keybindings: Option<&ResolvedKeybindings>,
-    selected_row: usize,
+    ctx: RenderContext<'_>,
+    active: bool,
 ) {
-    match view {
-        ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme),
-        ViewKind::Metrics => render_metrics(view_model, frame, area, theme),
-        ViewKind::Logs => render_logs(view_model, frame, area, theme),
-        ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme),
-        _ => render_rows_table(view_model, frame, area, theme, view, selected_row),
+    match ctx.view {
+        ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme, active),
+        ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
+        ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
+        ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme, active),
+        _ => render_rows_table(
+            view_model,
+            frame,
+            area,
+            theme,
+            ctx.view,
+            ctx.selected_row,
+            active,
+        ),
     }
-    if let Some(keybindings) = keybindings {
+    if let Some(keybindings) = ctx.keybindings {
         let _ = help_lines(keybindings);
     }
 }
@@ -1819,6 +1816,7 @@ fn render_rows_table(
     theme: &Theme,
     view: ViewKind,
     selected_row: usize,
+    active: bool,
 ) {
     let rows = view_model
         .rows
@@ -1890,7 +1888,7 @@ fn render_rows_table(
                 .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(panel_block(title_for_view(view), theme, true))
+    .block(panel_block(title_for_view(view), theme, active))
     .style(
         Style::default()
             .fg(theme.base_fg.color())
@@ -1923,6 +1921,7 @@ fn render_inspector(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
+    active: bool,
 ) {
     let mut lines: Vec<Line<'_>> = view_model
         .inspector
@@ -1951,7 +1950,7 @@ fn render_inspector(
         .block(panel_block(
             view_model.inspector.title.clone(),
             theme,
-            false,
+            active,
         ))
         .style(
             Style::default()
@@ -1987,10 +1986,16 @@ fn inspector_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
     }
 }
 
-fn render_logs(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
+fn render_logs(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+) {
     let p = Paragraph::new(view_model.inspector.lines.join("\n"))
         .wrap(Wrap { trim: false })
-        .block(panel_block("Logs preview", theme, true))
+        .block(panel_block("Logs preview", theme, active))
         .style(
             Style::default()
                 .fg(theme.info.color())
@@ -2003,6 +2008,7 @@ fn render_doctor_view(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
+    active: bool,
 ) {
     let lines = view_model
         .rows
@@ -2017,7 +2023,7 @@ fn render_doctor_view(
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel_block("Doctor", theme, true))
+            .block(panel_block("Doctor", theme, active))
             .style(Style::default().bg(theme.base_bg.color())),
         area,
     );
@@ -2027,6 +2033,7 @@ fn render_process_tree(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
+    active: bool,
 ) {
     let rows = view_model.process_tree.rows.iter().map(|r| {
         let marker = if r.expanded { "▾" } else { "▸" };
@@ -2074,7 +2081,7 @@ fn render_process_tree(
                 .bg(theme.base_bg.color()),
         ),
     )
-    .block(panel_block("Process Tree", theme, true))
+    .block(panel_block("Process Tree", theme, active))
     .style(
         Style::default()
             .fg(theme.base_fg.color())
@@ -2104,6 +2111,7 @@ fn render_metrics(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
+    active: bool,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2125,7 +2133,7 @@ fn render_metrics(
     );
     frame.render_widget(
         Sparkline::default()
-            .block(panel_block("Adapter event rate", theme, true))
+            .block(panel_block("Adapter event rate", theme, active))
             .data(&view_model.metrics.event_rate)
             .style(
                 Style::default()
@@ -2478,6 +2486,77 @@ fn selected_row(app: &App) -> Option<&RowVm> {
         .and_then(|idx| app.vm.rows.get(*idx))
 }
 
+fn navigable_views() -> &'static [ViewKind] {
+    &[
+        ViewKind::Everything,
+        ViewKind::Ports,
+        ViewKind::Public,
+        ViewKind::Conflicts,
+        ViewKind::Orphans,
+        ViewKind::TrackedRuns,
+        ViewKind::Projects,
+        ViewKind::Logs,
+        ViewKind::Doctor,
+        ViewKind::ProcessTree,
+        ViewKind::Metrics,
+    ]
+}
+
+fn active_view_index(view: ViewKind) -> usize {
+    navigable_views()
+        .iter()
+        .position(|candidate| *candidate == view)
+        .unwrap_or_default()
+}
+
+fn cycle_active_view(app: &mut App, delta: isize, width: u16) {
+    let views = navigable_views();
+    let len = views.len() as isize;
+    let current = active_view_index(app.active_view) as isize;
+    let next = (current + delta).rem_euclid(len) as usize;
+    set_active_view(app, views[next], width);
+}
+
+fn set_active_view(app: &mut App, view: ViewKind, width: u16) {
+    if view == ViewKind::ProcessTree {
+        if app.selected_process.is_none() {
+            app.selected_process = app.vm.process_tree.rows.first().map(|row| row.key.clone());
+        }
+    } else {
+        app.selected_process = None;
+    }
+    app.active_view = view;
+    app.selected_row = 0;
+    rebuild_view_model(app, width);
+    app.status = Some(format!("view: {}", title_for_view(view)));
+}
+
+fn focus_pane(app: &mut App, pane: Pane) {
+    app.pane = pane;
+    app.status = Some(format!(
+        "focus: {}",
+        match pane {
+            Pane::Groups => "views",
+            Pane::Rows => "main",
+            Pane::Inspector => "inspector",
+        }
+    ));
+}
+
+fn cycle_pane(app: &mut App, delta: isize, width: u16) {
+    if app.vm.layout != LayoutMode::ThreePane {
+        cycle_active_view(app, delta, width);
+        return;
+    }
+    let panes = [Pane::Groups, Pane::Rows, Pane::Inspector];
+    let current = panes
+        .iter()
+        .position(|candidate| *candidate == app.pane)
+        .unwrap_or(1) as isize;
+    let next = (current + delta).rem_euclid(panes.len() as isize) as usize;
+    focus_pane(app, panes[next]);
+}
+
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     if matches!(app.mode, InputMode::Filter) {
         match key.code {
@@ -2527,11 +2606,19 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     }
     match key.code {
         KeyCode::Up => {
-            scroll_rows(app, -1);
+            if app.vm.layout == LayoutMode::ThreePane && app.pane == Pane::Groups {
+                cycle_active_view(app, -1, width);
+            } else if app.pane != Pane::Inspector {
+                scroll_rows(app, -1);
+            }
             return;
         }
         KeyCode::Down => {
-            scroll_rows(app, 1);
+            if app.vm.layout == LayoutMode::ThreePane && app.pane == Pane::Groups {
+                cycle_active_view(app, 1, width);
+            } else if app.pane != Pane::Inspector {
+                scroll_rows(app, 1);
+            }
             return;
         }
         KeyCode::PageUp => {
@@ -2569,30 +2656,24 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 app.mode = InputMode::Palette;
             }
             Command::Refresh => rebuild_view_model(app, width),
+            Command::NextPane => cycle_pane(app, 1, width),
+            Command::PrevPane => cycle_pane(app, -1, width),
             Command::Tree => {
                 if app.active_view == ViewKind::ProcessTree {
                     toggle_selected_process(app);
+                    rebuild_view_model(app, width);
                 } else {
-                    app.active_view = ViewKind::ProcessTree;
-                    if app.selected_process.is_none() {
-                        app.selected_process =
-                            app.vm.process_tree.rows.first().map(|row| row.key.clone());
-                    }
+                    set_active_view(app, ViewKind::ProcessTree, width);
                 }
-                rebuild_view_model(app, width);
             }
             Command::Metrics => {
-                app.active_view = ViewKind::Metrics;
-                rebuild_view_model(app, width);
+                set_active_view(app, ViewKind::Metrics, width);
             }
             Command::Logs => {
-                app.active_view = ViewKind::Logs;
-                rebuild_view_model(app, width);
+                set_active_view(app, ViewKind::Logs, width);
             }
             Command::Ports => {
-                app.active_view = ViewKind::Ports;
-                app.selected_process = None;
-                rebuild_view_model(app, width);
+                set_active_view(app, ViewKind::Ports, width);
             }
             Command::Help => app.mode = InputMode::Help,
             Command::CopyDiagnostic => match copy_diagnostic(&app.vm.inspector.diagnostic_markdown)
@@ -2682,9 +2763,12 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         f,
         area,
         &app.theme,
-        app.active_view,
-        Some(&app.keybindings),
-        app.selected_row,
+        RenderContext {
+            view: app.active_view,
+            active_pane: app.pane,
+            keybindings: Some(&app.keybindings),
+            selected_row: app.selected_row,
+        },
     );
     let footer = Rect {
         x: area.x,
@@ -3064,6 +3148,88 @@ mod tests {
             120,
         );
         assert_eq!(app.selected_row, 2);
+    }
+
+    #[test]
+    fn tab_and_shift_tab_change_focused_pane() {
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            ..Default::default()
+        };
+        assert_eq!(app.pane, Pane::Rows);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.pane, Pane::Inspector);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            120,
+        );
+        assert_eq!(app.pane, Pane::Rows);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            120,
+        );
+        assert_eq!(app.pane, Pane::Groups);
+    }
+
+    #[test]
+    fn focused_views_pane_arrow_keys_change_active_view() {
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            pane: Pane::Groups,
+            ..Default::default()
+        };
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Ports);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Everything);
+    }
+
+    #[test]
+    fn tab_cycles_views_when_view_pane_is_hidden() {
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 70, false, ""),
+            snapshot: snap,
+            ..Default::default()
+        };
+        assert_eq!(app.vm.layout, LayoutMode::SinglePane);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            70,
+        );
+        assert_eq!(app.active_view, ViewKind::Ports);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            70,
+        );
+        assert_eq!(app.active_view, ViewKind::Everything);
     }
 
     #[test]
