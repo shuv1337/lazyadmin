@@ -3291,16 +3291,32 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 },
                 None => app.status = Some("open failed: no selected listener".into()),
             },
-            Command::Kill => start_confirmation(app, cmd, "kill"),
+            Command::Kill => match selected_row(app) {
+                Some(_) => start_confirmation(app, cmd, "kill"),
+                None => app.status = Some("kill failed: no selected listener".into()),
+            },
             Command::Restart | Command::Stop | Command::Free | Command::Run => {
-                app.status = Some(CommandDispatcher::plan(&cmd, selected_row(app)));
+                match selected_row(app) {
+                    Some(row) => {
+                        app.status = Some(CommandDispatcher::plan(&cmd, Some(row)));
+                    }
+                    None => {
+                        app.status =
+                            Some(format!("{cmd:?} failed: no selected listener", cmd = cmd));
+                    }
+                }
             }
-            Command::Edit => {
-                app.status = Some(format!(
-                    "edit not implemented for {}",
-                    action_target(selected_row(app))
-                ));
-            }
+            Command::Edit => match selected_row(app) {
+                Some(row) => {
+                    app.status = Some(format!(
+                        "edit not implemented for {}",
+                        action_target(Some(row))
+                    ));
+                }
+                None => {
+                    app.status = Some("edit failed: no selected listener".into());
+                }
+            },
             _ => CommandDispatcher::execute(&cmd),
         }
     }
@@ -3598,14 +3614,44 @@ mod tests {
     }
     #[test]
     fn action_confirmation_requires_text() {
-        let mut app = App::default();
+        let mut app = app_with_listener(8080);
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
             120,
         );
         assert_eq!(app.confirmation.as_ref().unwrap().required, "kill");
-        assert_eq!(app.confirmation.as_ref().unwrap().target, "no selected row");
+        assert!(app.confirmation.as_ref().unwrap().target.contains("8080"));
+    }
+
+    /// Mutating action shortcuts must refuse rather than silently arm a
+    /// confirmation/dry-run against "no selected row".
+    #[test]
+    fn mutating_actions_refuse_when_no_row_is_selected() {
+        for (key, expected_substr) in [
+            ('k', "kill failed"),
+            ('r', "Restart failed"),
+            ('s', "Stop failed"),
+            ('f', "Free failed"),
+            ('R', "Run failed"),
+            ('e', "edit failed"),
+        ] {
+            let mut app = App::default();
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                120,
+            );
+            assert!(
+                app.confirmation.is_none(),
+                "{key} must not arm a confirmation against no row"
+            );
+            let status = app.status.as_deref().unwrap_or_default();
+            assert!(
+                status.contains(expected_substr),
+                "{key} status missing {expected_substr}: {status}"
+            );
+        }
     }
     #[test]
     fn view_model_widths() {
