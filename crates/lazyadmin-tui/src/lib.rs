@@ -1944,6 +1944,40 @@ fn group_is_active(group: &str, view: ViewKind) -> bool {
     )
 }
 
+/// CLI command(s) the user can run instead when the TUI refuses to render at
+/// the current width. Issue #6 acceptance criterion: the refusal screen must
+/// list at least one matching CLI command for the active view.
+fn cli_hints_for_view(view: ViewKind) -> &'static [&'static str] {
+    match view {
+        ViewKind::Everything => &["lazyadmin ps --json", "lazyadmin export --json"],
+        ViewKind::Ports => &["lazyadmin ps --json"],
+        ViewKind::Public => &["lazyadmin public --json"],
+        ViewKind::Conflicts => &["lazyadmin conflicts --json"],
+        ViewKind::Orphans => &["lazyadmin doctor --json"],
+        ViewKind::TrackedRuns => &["lazyadmin export --json"],
+        ViewKind::Projects => &["lazyadmin projects --json"],
+        ViewKind::Logs => &["lazyadmin logs"],
+        ViewKind::Doctor => &["lazyadmin doctor --json"],
+        ViewKind::ProcessTree => &["lazyadmin ps --json"],
+        ViewKind::Metrics => &["lazyadmin export --json"],
+        ViewKind::Managers => &["lazyadmin ps --json"],
+    }
+}
+
+fn narrow_refusal_message(view: ViewKind) -> String {
+    let hints = cli_hints_for_view(view);
+    let formatted = hints
+        .iter()
+        .map(|cmd| format!("`{cmd}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "lazyadmin TUI needs 60+ columns to show the {view_title} view.\n\
+         Try {formatted} or widen the terminal.",
+        view_title = title_for_view(view),
+    )
+}
+
 fn group_view_kind(group: &str) -> Option<ViewKind> {
     match group {
         "All/Everything" => Some(ViewKind::Everything),
@@ -2046,9 +2080,14 @@ fn render_view_kind(
         area,
     );
     if view_model.layout == LayoutMode::Refuse || area.width < 60 {
-        let p = Paragraph::new("lazyadmin TUI needs 60+ columns. Try `lazyadmin ps --json`, `lazyadmin public`, or widen the terminal.")
+        let p = Paragraph::new(narrow_refusal_message(ctx.view))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.base_fg.color()).bg(theme.base_bg.color()))
+            .wrap(Wrap { trim: false })
+            .style(
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )
             .block(panel_block("lazyadmin", theme, true));
         frame.render_widget(p, area);
         return;
@@ -3798,6 +3837,46 @@ mod tests {
         assert!(format!("{:?}", terminal.backend().buffer()).contains("hidden"));
     }
 
+    /// Every view kind must produce a refusal message that names at least one
+    /// matching CLI command. Issue #6 acceptance criterion 3.
+    #[test]
+    fn narrow_refusal_lists_view_specific_cli_hint() {
+        for view in [
+            ViewKind::Everything,
+            ViewKind::Ports,
+            ViewKind::Public,
+            ViewKind::Conflicts,
+            ViewKind::Orphans,
+            ViewKind::TrackedRuns,
+            ViewKind::Projects,
+            ViewKind::Logs,
+            ViewKind::Doctor,
+            ViewKind::ProcessTree,
+            ViewKind::Metrics,
+            ViewKind::Managers,
+        ] {
+            let message = narrow_refusal_message(view);
+            assert!(
+                message.contains("60+ columns"),
+                "{view:?} message lost size hint: {message}"
+            );
+            let hints = cli_hints_for_view(view);
+            assert!(!hints.is_empty(), "{view:?} has no CLI hint configured");
+            for hint in hints {
+                assert!(
+                    message.contains(hint),
+                    "{view:?} message missing hint {hint}: {message}"
+                );
+            }
+            // Title of the active view should appear so the user knows which
+            // view was refused.
+            assert!(
+                message.contains(title_for_view(view)),
+                "{view:?} message missing view title: {message}"
+            );
+        }
+    }
+
     #[test]
     fn narrow_render_refuses_even_if_view_model_was_built_wide() {
         let vm = build_view_model(&build_empty_snapshot(), 120, false, "");
@@ -3821,7 +3900,10 @@ mod tests {
             .unwrap();
         let text = format!("{:?}", terminal.backend().buffer());
         assert!(text.contains("60+ columns"));
-        assert!(!text.contains("Projects"));
+        // Refusal message references the active view's CLI command but must
+        // NOT have rendered the Projects panel/table itself.
+        assert!(text.contains("lazyadmin projects"));
+        assert!(!text.contains("No projects"));
     }
 
     #[test]
