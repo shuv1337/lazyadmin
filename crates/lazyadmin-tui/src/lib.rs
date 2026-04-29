@@ -4499,6 +4499,133 @@ mod tests {
         assert_eq!(app.pane, Pane::Groups);
     }
 
+    /// Issue #2 acceptance criterion 3: TUI render tests cover the view-rail
+    /// layout in both states.
+    ///
+    /// Manager group entries (`Docker/Compose`, `Podman`, `systemd:user`,
+    /// `systemd:system`, `Direct processes`) are non-navigable filter
+    /// placeholders and must render with the "·" marker — distinct from the
+    /// "›" active marker and the "  " navigable-but-inactive marker. Down/up
+    /// arrows must skip them so they don't look like missed selections.
+    #[test]
+    fn view_rail_marks_manager_groups_as_non_navigable() {
+        // Sanity: the canonical group list must include both classes for the
+        // marker assertions below to be meaningful.
+        let group_list = groups(false);
+        let manager_groups = ["Docker/Compose", "Podman", "Direct processes"];
+        for g in &manager_groups {
+            assert!(
+                group_list.iter().any(|item| item == g),
+                "missing manager group {g} in groups()"
+            );
+            assert!(
+                group_view_kind(g).is_none(),
+                "{g} should be non-navigable (group_view_kind returns None)"
+            );
+        }
+        for g in [
+            "All/Everything",
+            "Ports",
+            "Public listeners",
+            "Conflicts",
+            "Orphans",
+            "Tracked runs",
+            "Projects",
+            "Logs",
+            "Doctor",
+            "Process tree",
+            "Metrics",
+        ] {
+            assert!(
+                group_view_kind(g).is_some(),
+                "{g} should be navigable (group_view_kind returns Some)"
+            );
+        }
+
+        let snap = build_empty_snapshot();
+        let vm = build_view_model(&snap, 120, false, "");
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Everything,
+                        active_pane: Pane::Groups,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let mut combined = String::new();
+        for y in 0..buffer.area.height {
+            combined.push_str(&row_text(y));
+            combined.push('\n');
+        }
+        // Active marker on the current view.
+        assert!(
+            combined.contains("› All/Everything"),
+            "active marker missing: {combined}"
+        );
+        // Manager groups carry the non-navigable marker, never the
+        // navigable-but-inactive marker.
+        for g in &manager_groups {
+            let marked = format!("· {g}");
+            assert!(
+                combined.contains(&marked),
+                "manager group {g} missing non-navigable marker: {combined}"
+            );
+            // Also ensure they never carry the active "›" marker since they're
+            // not selectable.
+            assert!(
+                !combined.contains(&format!("› {g}")),
+                "manager group {g} should never appear active: {combined}"
+            );
+        }
+    }
+
+    #[test]
+    fn down_arrow_skips_manager_groups_in_view_rail() {
+        // Anchor at the last navigable view before the manager group block
+        // (Projects). The next Down should land on Logs, not on a manager.
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            pane: Pane::Groups,
+            active_view: ViewKind::Projects,
+            ..Default::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(
+            app.active_view,
+            ViewKind::Logs,
+            "down from Projects must skip the manager group block and land on Logs"
+        );
+        // Up from Logs should symmetrically jump back to Projects.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Projects);
+    }
+
     #[test]
     fn focused_views_pane_arrow_keys_change_active_view() {
         let snap = build_empty_snapshot();
