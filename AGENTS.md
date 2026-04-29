@@ -40,6 +40,7 @@ This repository now contains the v0.3 Rust workspace for `lazyadmin` after PLAN-
 - Event overflow counts are reusable via the core `EventDropCounter`; long-lived runtimes should pass that counter into snapshot/doctor builders. Stateless CLI `doctor`/`export` runs cannot observe historical fan-in drops and report that limitation explicitly.
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to a later release, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 - Portless interop is read-only except for `free`: route state is read from `routes.json`, aliases use `pid = 0`, orphan cleanup is only a `doctor` hint to run `portless prune`, and `lazyadmin free <port>` sends `SIGTERM` to the portless CLI `ProcessKey` rather than the descendant dev-server process.
+- The read-only Web UI is split across `crates/lazyadmin-runtime` (shared snapshot/event assembly) and `crates/lazyadmin-web` (loopback-only Axum server plus embedded static app). `lazyadmin web` refuses non-loopback binds in v1 and exposes only read-only API routes; use `--port 0 --no-open` for smoke tests.
 
 ## Development standards
 
@@ -70,6 +71,8 @@ cargo run -p lazyadmin-cli -- config check --json
 cargo run -p lazyadmin-cli -- doctor --json
 cargo run -p lazyadmin-cli -- events --once --json
 cargo run -p lazyadmin-cli -- tui --headless --json
+cargo test -p lazyadmin-runtime -p lazyadmin-web
+cargo run -p lazyadmin-cli -- web --port 0 --no-open
 cargo test -p lazyadmin-tui render_views
 cargo test -p lazyadmin-tui live_refresh
 cargo test -p lazyadmin-tui process_tree

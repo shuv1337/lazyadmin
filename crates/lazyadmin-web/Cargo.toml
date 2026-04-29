@@ -1,0 +1,24 @@
+[package]
+name = "lazyadmin-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.7"
+futures.workspace = true
+lazyadmin-core = { path = "../lazyadmin-core" }
+lazyadmin-runtime = { path = "../lazyadmin-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
