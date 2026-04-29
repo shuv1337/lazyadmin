@@ -7,3 +7,6 @@
 
 # Built skill tarballs are release artifacts, not source.
 /lazyadmin-agent-skill-v*.tar.gz
+
+# Local dogfood run output.
+/dogfood-tui-output/
