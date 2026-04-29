@@ -1199,7 +1199,7 @@ fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
             entity: warning
                 .entity
                 .as_ref()
-                .map(format_entity_ref)
+                .map(|entity| format_entity_ref(entity, snapshot))
                 .unwrap_or_else(|| "snapshot".into()),
             details: warning.message.clone(),
             suggested_action: suggested_action_for_warning(&warning.code),
@@ -1208,8 +1208,60 @@ fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
     vm
 }
 
-fn format_entity_ref(entity: &EntityRef) -> String {
-    compact_text(&format!("{entity:?}"), 32)
+/// Render an `EntityRef` as a short, human-readable label by resolving it
+/// against the snapshot. Falls back to a stable identifier when the referent
+/// can't be located (which can happen across a partial snapshot refresh).
+fn format_entity_ref(entity: &EntityRef, snapshot: &Snapshot) -> String {
+    let label = match entity {
+        EntityRef::Listener(id) => snapshot
+            .listeners
+            .iter()
+            .find(|listener| &listener.id == id)
+            .map(|listener| {
+                let bind = listener.bind_addr.clone().unwrap_or_else(|| {
+                    listener
+                        .path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "-".into())
+                });
+                match listener.port {
+                    Some(port) => format!("listener {bind}:{port}"),
+                    None => format!("listener {bind}"),
+                }
+            })
+            .unwrap_or_else(|| format!("listener {}", short_id(&id.to_string()))),
+        EntityRef::Process(key) => snapshot
+            .processes
+            .iter()
+            .find(|process| &process.key == key)
+            .map(|process| {
+                let label = process_owner_label(process);
+                format!("pid {} {label}", key.pid)
+            })
+            .unwrap_or_else(|| format!("pid {}", key.pid)),
+        EntityRef::Workload(id) => snapshot
+            .workloads
+            .iter()
+            .find(|workload| &workload.id == id)
+            .map(|workload| format!("workload {}", workload.display_name))
+            .unwrap_or_else(|| format!("workload {}", short_id(&id.to_string()))),
+        EntityRef::Manager(id) => snapshot
+            .managers
+            .iter()
+            .find(|manager| &manager.id == id)
+            .map(|manager| format!("manager {}", manager.name))
+            .unwrap_or_else(|| format!("manager {}", short_id(&id.to_string()))),
+        EntityRef::Project(id) => snapshot
+            .projects
+            .iter()
+            .find(|project| &project.id == id)
+            .map(|project| format!("project {}", project.name))
+            .unwrap_or_else(|| format!("project {}", short_id(&id.to_string()))),
+        EntityRef::Run(id) => format!("run {}", short_id(&id.to_string())),
+        EntityRef::Action(id) => format!("action {}", short_id(&id.to_string())),
+    };
+    compact_text(&label, 32)
 }
 
 fn suggested_action_for_warning(code: &str) -> String {
@@ -3987,6 +4039,69 @@ mod tests {
         assert!(text.contains("1 error"));
         assert!(text.contains("Doctor"));
         assert!(!text.contains("PUBLICPUBLIC"));
+    }
+
+    /// Doctor entity column must resolve EntityRef references against the
+    /// snapshot rather than `Debug`-formatting the raw enum variant. Concretely
+    /// a `Listener(...)` reference becomes `listener bind:port`, a
+    /// `Process(...)` becomes `pid <n> <command>`, etc. — actionable info, not
+    /// `Listener(ListenerId("abc"))`.
+    #[test]
+    fn doctor_entity_column_resolves_to_human_labels() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4242, None, 1);
+        let proc_key = proc.key.clone();
+        snap.processes.push(proc);
+        let listener = listener_for_process(proc_key.clone(), 8443);
+        let listener_id = listener.id.clone();
+        snap.listeners.push(listener);
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "PUBLIC".into(),
+            message: "exposed to LAN".into(),
+            entity: Some(EntityRef::Listener(listener_id)),
+            provenance: vec![],
+        });
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Info,
+            code: "ZOMBIE".into(),
+            message: "process is a zombie".into(),
+            entity: Some(EntityRef::Process(proc_key)),
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 120, false, "");
+        let listener_row = vm
+            .doctor
+            .rows
+            .iter()
+            .find(|row| row.check == "PUBLIC")
+            .expect("PUBLIC row");
+        assert!(
+            listener_row.entity.contains("127.0.0.1:8443"),
+            "listener entity not resolved: {}",
+            listener_row.entity
+        );
+        assert!(
+            listener_row.entity.starts_with("listener "),
+            "listener entity missing prefix: {}",
+            listener_row.entity
+        );
+        let process_row = vm
+            .doctor
+            .rows
+            .iter()
+            .find(|row| row.check == "ZOMBIE")
+            .expect("ZOMBIE row");
+        assert!(
+            process_row.entity.contains("4242"),
+            "process entity not resolved: {}",
+            process_row.entity
+        );
+        // No row should leak the raw Debug shape of the enum.
+        for row in &vm.doctor.rows {
+            assert!(!row.entity.contains("ListenerId("));
+            assert!(!row.entity.contains("ProcessKey {"));
+        }
     }
 
     /// Severity classification must come from a real `match` on
