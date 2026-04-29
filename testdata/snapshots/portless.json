@@ -1,0 +1,73 @@
+{
+  "schema_version": "lazyadmin.snapshot.v1",
+  "generated_at": "2026-04-28T12:00:00Z",
+  "host": { "boot_id": null, "hostname": null, "kernel": null },
+  "managers": [
+    {
+      "id": "portless:/home/shuv/.portless",
+      "kind": "portless",
+      "name": "portless .portless",
+      "scope": "user",
+      "socket": null,
+      "available": false,
+      "permission": "ok",
+      "version": null,
+      "provenance": []
+    }
+  ],
+  "processes": [],
+  "listeners": [],
+  "workloads": [
+    {
+      "id": "portless:/home/shuv/.portless:demo:3737",
+      "display_name": "demo",
+      "runtime": "portless",
+      "state": "running",
+      "pids": [],
+      "listeners": [],
+      "project": null,
+      "manager": "portless:/home/shuv/.portless",
+      "source": null,
+      "actions": [],
+      "health": null,
+      "metrics": "route_port=3737",
+      "restart_policy": null,
+      "lazyadmin_run_id": null,
+      "provenance": []
+    },
+    {
+      "id": "portless:/home/shuv/.portless:alias:4444",
+      "display_name": "alias",
+      "runtime": "portless",
+      "state": "running",
+      "pids": [],
+      "listeners": [],
+      "project": null,
+      "manager": "portless:/home/shuv/.portless",
+      "source": null,
+      "actions": [],
+      "health": null,
+      "metrics": "route_port=4444",
+      "restart_policy": null,
+      "lazyadmin_run_id": null,
+      "provenance": []
+    }
+  ],
+  "projects": [],
+  "tracked_runs": [],
+  "edges": [
+    {
+      "kind": "manager_owns_workload",
+      "from": { "kind": "manager", "id": "portless:/home/shuv/.portless" },
+      "to": { "kind": "workload", "id": "portless:/home/shuv/.portless:demo:3737" },
+      "provenance": []
+    },
+    {
+      "kind": "manager_owns_workload",
+      "from": { "kind": "manager", "id": "portless:/home/shuv/.portless" },
+      "to": { "kind": "workload", "id": "portless:/home/shuv/.portless:alias:4444" },
+      "provenance": []
+    }
+  ],
+  "warnings": []
+}

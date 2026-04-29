@@ -202,13 +202,13 @@ Render through projection helpers; no new layout code. The TUI consumes the same
 
 ### Phase 1 — adapter scaffold + read-only discovery
 
-- [ ] Create `crates/lazyadmin-adapter-portless` modeled on `lazyadmin-adapter-tracked` (no async runtime needed beyond `tokio::fs`).
-- [ ] Add the new crate to the workspace and add `lazyadmin-adapter-portless = { path = "../lazyadmin-adapter-portless" }` to `crates/lazyadmin-cli/Cargo.toml`.
-- [ ] Add `RuntimeKind::Portless` to `lazyadmin-core::model`.
-- [ ] Update every exhaustive `RuntimeKind` match, including TUI `runtime_label`, so the new variant is handled explicitly.
-- [ ] Wire the adapter into `build_snapshot_with_event_drops` in `lazyadmin-cli::main` next to procfs / systemd / container / tracked / project.
-- [ ] Unit tests over fixture `routes.json` (cases: empty, one live, one alias, one orphan, one with extra unknown field, one totally malformed, explicit `PORTLESS_STATE_DIR`, default `~/.portless`, legacy `/tmp/portless`). Assert per-case `workloads`, `managers`, and `warnings`.
-- [ ] Snapshot golden test: include one portless workload + one alias in a fixture under `testdata/snapshots/` and confirm `lazyadmin.snapshot.v1` round-trips.
+- [x] Create `crates/lazyadmin-adapter-portless` modeled on `lazyadmin-adapter-tracked` (no async runtime needed beyond `tokio::fs`).
+- [x] Add the new crate to the workspace and add `lazyadmin-adapter-portless = { path = "../lazyadmin-adapter-portless" }` to `crates/lazyadmin-cli/Cargo.toml`.
+- [x] Add `RuntimeKind::Portless` to `lazyadmin-core::model`.
+- [x] Update every exhaustive `RuntimeKind` match, including TUI `runtime_label`, so the new variant is handled explicitly.
+- [x] Wire the adapter into `build_snapshot_with_event_drops` in `lazyadmin-cli::main` next to procfs / systemd / container / tracked / project.
+- [x] Unit tests over fixture `routes.json` (cases: empty, one live, one alias, one orphan, one with extra unknown field, one totally malformed, explicit `PORTLESS_STATE_DIR`, default `~/.portless`, legacy `/tmp/portless`). Assert per-case `workloads`, `managers`, and `warnings`.
+- [x] Snapshot golden test: include one portless workload + one alias in a fixture under `testdata/snapshots/` and confirm `lazyadmin.snapshot.v1` round-trips.
 
 Validation:
 
@@ -221,10 +221,10 @@ cargo run -p lazyadmin-cli -- export --json | jq '[.warnings[] | select(.code | 
 
 ### Phase 2 — correlation + manager-aware projection
 
-- [ ] In `lazyadmin-core::correlate`, build a parent→children index from `Graph.processes` (cheap O(n) pass over `Process.ppid`), reused across passes.
-- [ ] After the existing `classify_processes` pass and before/alongside conflict detection, add `correlate_portless`: for each portless workload, parse the route pid out of the workload's provenance, resolve it to a procfs `ProcessKey`, set `workload.source = Some(EntityRef::Process(cli_key))`, BFS descendants of that pid (depth cap 8) using the parent→children index, intersect with each listener's `owners`, and emit `Edge::WorkloadOwnsListener` (workload → listener) plus a `Provenance` line `"procfs-descendant-of portless cli pid <P>"`. Workloads gain the resolved descendant listener-owner `ProcessKey`s in `pids` at this stage; the CLI process key stays in `source`.
-- [ ] Add `lazyadmin-core::output::ListenerRow` (the module is currently a stub) with at least the existing row fields plus optional `manager_label: Option<String>` and `manager_detail: Option<String>`. Compute these from snapshot edges: a listener whose `WorkloadOwnsListener` workload has `runtime: Portless` gets `Some("portless")`, with route hostname and CLI pid detail where available. Human CLI `run_view` and TUI listener rendering consume this helper. Do not add `manager_label` to core `Listener` or snapshot JSON.
-- [ ] Tests: a procfs-fixture-plus-portless-fixture combined snapshot; assert the correlation resolves `workload.source` to the portless CLI `ProcessKey`, finds the descendant listener, emits the edge, back-fills descendant `pids`, and computes the row label.
+- [x] In `lazyadmin-core::correlate`, build a parent→children index from `Graph.processes` (cheap O(n) pass over `Process.ppid`), reused across passes.
+- [x] After the existing `classify_processes` pass and before/alongside conflict detection, add `correlate_portless`: for each portless workload, parse the route pid out of the workload's provenance, resolve it to a procfs `ProcessKey`, set `workload.source = Some(EntityRef::Process(cli_key))`, BFS descendants of that pid (depth cap 8) using the parent→children index, intersect with each listener's `owners`, and emit `Edge::WorkloadOwnsListener` (workload → listener) plus a `Provenance` line `"procfs-descendant-of portless cli pid <P>"`. Workloads gain the resolved descendant listener-owner `ProcessKey`s in `pids` at this stage; the CLI process key stays in `source`.
+- [x] Add `lazyadmin-core::output::ListenerRow` (the module is currently a stub) with at least the existing row fields plus optional `manager_label: Option<String>` and `manager_detail: Option<String>`. Compute these from snapshot edges: a listener whose `WorkloadOwnsListener` workload has `runtime: Portless` gets `Some("portless")`, with route hostname and CLI pid detail where available. Human CLI `run_view` and TUI listener rendering consume this helper. Do not add `manager_label` to core `Listener` or snapshot JSON.
+- [x] Tests: a procfs-fixture-plus-portless-fixture combined snapshot; assert the correlation resolves `workload.source` to the portless CLI `ProcessKey`, finds the descendant listener, emits the edge, back-fills descendant `pids`, and computes the row label.
 
 Validation:
 
@@ -236,13 +236,13 @@ PORTLESS_STATE_DIR=/tmp/lazyadmin-portless-fixture cargo run -p lazyadmin-cli --
 
 ### Phase 3 — `free` dispatch (PortlessStop)
 
-- [ ] Add `ActionKind::PortlessStop` to `lazyadmin-core::actions`.
-- [ ] Refactor `run_free` into a small planner/executor split so unit tests can cover mixed portless/direct cases without shelling.
-- [ ] In `run_free`, walk listener edges and use the snapshot edges to discover whether the listener's workload (if any) has `runtime: Portless`. If yes, look up the portless workload's `source` `ProcessKey` and plan one `PortlessStop` per portless workload (deduped on workload id) with `target: EntityRef::Process(<route.pid ProcessKey>)`. Reuse the existing `Requirement::ProcessKeyMatch` and `Requirement::TypedPhrase { phrase: "free" }` so the existing confirmation flow is unchanged.
-- [ ] Implement `execute_portless_stop` that re-validates the `ProcessKey` against the live snapshot (refuse on PID-reuse mismatch), `nix::kill(SIGTERM)`s the route pid, then waits up to `action.timeout_ms` (default 5s) and re-snapshots. Return an `ActionResult` shaped exactly like `execute_direct_action` does.
-- [ ] Unit-test the planner over synthetic snapshots (portless-only, direct-only, mixed, two listeners same hostname, missing `workload.source`, alias workload).
-- [ ] Integration test gated behind `--features integration-portless`: spawn a synthetic `portless`-shaped subprocess (a small Rust binary that mimics portless's signal-handler-and-routes-file dance) bound to a free port in a temp `PORTLESS_STATE_DIR`, run `lazyadmin free <port>`, assert listener disappears and route is gone.
-- [ ] Document in CHANGELOG that `lazyadmin free <port>` will SIGTERM the portless CLI rather than the dev-server when a port is owned via portless.
+- [x] Add `ActionKind::PortlessStop` to `lazyadmin-core::actions`.
+- [x] Refactor `run_free` into a small planner/executor split so unit tests can cover mixed portless/direct cases without shelling.
+- [x] In `run_free`, walk listener edges and use the snapshot edges to discover whether the listener's workload (if any) has `runtime: Portless`. If yes, look up the portless workload's `source` `ProcessKey` and plan one `PortlessStop` per portless workload (deduped on workload id) with `target: EntityRef::Process(<route.pid ProcessKey>)`. Reuse the existing `Requirement::ProcessKeyMatch` and `Requirement::TypedPhrase { phrase: "free" }` so the existing confirmation flow is unchanged.
+- [x] Implement `execute_portless_stop` that re-validates the `ProcessKey` against the live snapshot (refuse on PID-reuse mismatch), `nix::kill(SIGTERM)`s the route pid, then waits up to `action.timeout_ms` (default 5s) and re-snapshots. Return an `ActionResult` shaped exactly like `execute_direct_action` does.
+- [x] Unit-test the planner over synthetic snapshots (portless-only, direct-only, mixed, two listeners same hostname, missing `workload.source`, alias workload).
+- [x] Integration test gated behind `--features integration-portless`: spawn a synthetic `portless`-shaped subprocess (a small Rust binary that mimics portless's signal-handler-and-routes-file dance) bound to a free port in a temp `PORTLESS_STATE_DIR`, run `lazyadmin free <port>`, assert listener disappears and route is gone.
+- [x] Document in CHANGELOG that `lazyadmin free <port>` will SIGTERM the portless CLI rather than the dev-server when a port is owned via portless.
 
 Validation:
 
@@ -253,16 +253,16 @@ cargo test -p lazyadmin-cli --features integration-portless free_portless_app
 
 ### Phase 4 — doctor + skill + docs
 
-- [ ] Implement the five doctor checks in `run_doctor`.
-- [ ] Keep orphan remediation as plain doctor hint text: `run portless prune to clean up <N> orphaned route(s)`. Do not add `ActionKind::PortlessPrune`, typed doctor remediation output, or a `doctor --portless-prune-force` flag in this plan.
-- [ ] `docs/portless-adapter.md` — public-facing description: state dir resolution, what we read, what we never write, fallback semantics, doctor surface, free dispatch behavior, alias handling.
-- [ ] `docs/spec.md` — add a one-line entry to the §10 (Discovery adapters) table.
-- [ ] `skills/lazyadmin-agent/SKILL.md` — portless interop note as outlined above.
-- [ ] CHANGELOG: `Adds read-only portless adapter, manager-aware free dispatch (SIGTERM portless CLI to free a portless-owned port), and portless health checks. New enum variants RuntimeKind::Portless and ActionKind::PortlessStop. Strict JSON-schema consumers should regenerate.`
+- [x] Implement the five doctor checks in `run_doctor`.
+- [x] Keep orphan remediation as plain doctor hint text: `run portless prune to clean up <N> orphaned route(s)`. Do not add `ActionKind::PortlessPrune`, typed doctor remediation output, or a `doctor --portless-prune-force` flag in this plan.
+- [x] `docs/portless-adapter.md` — public-facing description: state dir resolution, what we read, what we never write, fallback semantics, doctor surface, free dispatch behavior, alias handling.
+- [x] `docs/spec.md` — add a one-line entry to the §10 (Discovery adapters) table.
+- [x] `skills/lazyadmin-agent/SKILL.md` — portless interop note as outlined above.
+- [x] CHANGELOG: `Adds read-only portless adapter, manager-aware free dispatch (SIGTERM portless CLI to free a portless-owned port), and portless health checks. New enum variants RuntimeKind::Portless and ActionKind::PortlessStop. Strict JSON-schema consumers should regenerate.`
 
 ### Phase 5 — release prep
 
-- [ ] Run the full validation block from `AGENTS.md`, including `cargo metadata --format-version=1`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, CLI JSON smokes, and one-filter-at-a-time TUI tests.
+- [x] Run the full validation block from `AGENTS.md`, including `cargo metadata --format-version=1`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, CLI JSON smokes, and one-filter-at-a-time TUI tests.
 - [ ] Manual dogfood with a real portless install:
   - `portless myapp -- node fake-dev-server.mjs` (start a route)
   - `lazyadmin ps` (expect `portless` label on `:<port>`)
@@ -270,6 +270,8 @@ cargo test -p lazyadmin-cli --features integration-portless free_portless_app
   - `lazyadmin free <port>` (expect the route to disappear and the dev-server tree to die)
   - kill -9 the portless CLI to create an orphan; confirm `lazyadmin doctor` flags it and recommends `portless prune`.
 - [ ] Tag as a minor version bump (additive surface only).
+
+Validation note: `portless` is not installed in this environment, so real-portless manual dogfood remains open. The synthetic `integration-portless` test was implemented and passed.
 
 ## Risks
 

@@ -853,7 +853,11 @@ hide socket permission risk
 
 Read-only: discovery, listing, inspection, logs (read), labels, published ports. No actions, no log follow. Doctor reports the Podman socket as healthy and notes "actions coming in v0.2." This trims roughly a month of action/log adapter work without losing the visibility benefits.
 
-### 10.5 Project adapter
+### 10.5 Portless adapter
+
+Read-only adapter for `~/.portless/routes.json` plus `/tmp/portless` legacy state when present, or the explicit `PORTLESS_STATE_DIR` override. Each state directory is a user-scope `RuntimeKind::Portless` manager. Routes become portless workloads; `pid: 0` routes are static aliases with no free action. Correlation resolves the route CLI pid through procfs, walks descendants to find the actual listener owner, and `lazyadmin free <port>` sends `SIGTERM` to the portless CLI rather than the dev-server child so portless can remove its route. See `docs/portless-adapter.md`.
+
+### 10.6 Project adapter
 
 #### Objective
 
@@ -935,7 +939,7 @@ which lazyadmin runs were launched from this project?
 what is orphaned from this project?
 ```
 
-### 10.6 Special-process classifier
+### 10.7 Special-process classifier
 
 Detect and label common tunnel/forwarder processes:
 
@@ -962,7 +966,7 @@ runtime: direct/kubectl-port-forward
 project: inferred from cwd
 ```
 
-### 10.7 lazyadmin-tracked runtime
+### 10.8 lazyadmin-tracked runtime
 
 #### Objective
 

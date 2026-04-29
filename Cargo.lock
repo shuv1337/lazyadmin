@@ -1524,6 +1524,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazyadmin-adapter-portless"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "lazyadmin-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lazyadmin-adapter-procfs"
 version = "0.2.0"
 dependencies = [
@@ -1597,6 +1612,7 @@ dependencies = [
  "color-eyre",
  "futures",
  "lazyadmin-adapter-container",
+ "lazyadmin-adapter-portless",
  "lazyadmin-adapter-procfs",
  "lazyadmin-adapter-project",
  "lazyadmin-adapter-systemd",
@@ -1606,6 +1622,7 @@ dependencies = [
  "nix 0.30.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

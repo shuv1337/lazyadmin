@@ -10,7 +10,8 @@
 
 ## Unreleased
 
-- No unreleased changes yet.
+- Adds a read-only portless adapter, manager-aware `free` dispatch that sends `SIGTERM` to the portless CLI for portless-owned ports, and `adapter:portless` doctor checks.
+- New additive enum variants: `RuntimeKind::Portless` (`"portless"`) and `ActionKind::PortlessStop` (`"portless_stop"`). Strict JSON-schema consumers should regenerate or tolerate these variants.
 
 ## 0.1.0
 

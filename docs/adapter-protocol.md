@@ -8,3 +8,4 @@ Adapters return normalized managers, processes, listeners, workloads, projects, 
 - Socket provenance may be `procfs` or opt-in `sock_diag`. The default path remains `/proc/net`.
 - `DiscoveryAdapter::watch()` may return a stream of `lazyadmin.discovery_event.v1` events. Events are hints; snapshots remain the source of truth.
 - Watch streams should emit `Heartbeat` periodically when no change occurs and `Degraded` when falling back or losing a live subscription.
+- Portless discovery is polling-only and read-only. It emits additive `runtime: "portless"` workloads from route state, then core correlation links descendant procfs listeners with `workload_owns_listener` edges.

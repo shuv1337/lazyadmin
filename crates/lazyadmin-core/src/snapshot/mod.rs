@@ -120,4 +120,17 @@ mod tests {
         assert_eq!(snap.metadata.unwrap().events_dropped, Some(3));
         assert!(snap.warnings.iter().any(|w| w.code == "EVENTS_DROPPED"));
     }
+
+    #[test]
+    fn portless_snapshot_fixture_roundtrips() {
+        let text = include_str!("../../../../testdata/snapshots/portless.json");
+        let snap: Snapshot = serde_json::from_str(text).unwrap();
+        assert!(snap.workloads.iter().any(|workload| {
+            workload.runtime == RuntimeKind::Portless && workload.display_name == "demo"
+        }));
+        assert!(snap.workloads.iter().any(|workload| {
+            workload.runtime == RuntimeKind::Portless && workload.display_name == "alias"
+        }));
+        serde_json::to_string(&snap).unwrap();
+    }
 }

@@ -12,6 +12,7 @@ pub enum ActionKind {
     Restart,
     Kill,
     FreePort,
+    PortlessStop,
     PauseRestart,
     ResumeRestart,
     Logs,
