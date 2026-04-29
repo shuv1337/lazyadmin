@@ -196,6 +196,7 @@ pub struct Confirmation {
     pub command: Command,
     pub typed: String,
     pub required: String,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -617,9 +618,17 @@ impl Drop for SnapshotController {
 
 pub struct CommandDispatcher;
 impl CommandDispatcher {
-    pub fn plan(command: &Command, _row: Option<&RowVm>) -> String {
-        format!("Dry run: {command:?} would use lazyadmin-core action planning/execution services")
+    pub fn plan(command: &Command, row: Option<&RowVm>) -> String {
+        Self::plan_for_target(command, &action_target(row))
     }
+
+    pub fn plan_for_target(command: &Command, target: &str) -> String {
+        format!(
+            "Dry run: {command:?} would target {} via lazyadmin-core action planning/execution services",
+            target
+        )
+    }
+
     pub fn execute(command: &Command) {
         info!(?command, "tui command dispatch requested");
     }
@@ -655,6 +664,11 @@ pub struct ViewModel {
     pub layout: LayoutMode,
     pub groups: Vec<String>,
     pub rows: Vec<RowVm>,
+    pub conflicts: Vec<SummaryRowVm>,
+    pub orphans: Vec<SummaryRowVm>,
+    pub projects: Vec<SummaryRowVm>,
+    pub tracked_runs: Vec<SummaryRowVm>,
+    pub doctor: DoctorVm,
     pub process_tree: ProcessTreeVm,
     pub metrics: MetricsVm,
     pub inspector: InspectorVm,
@@ -681,6 +695,31 @@ pub struct RowVm {
     pub project: String,
     pub badges: Vec<String>,
     pub search_text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRowVm {
+    pub name: String,
+    pub kind: String,
+    pub state: String,
+    pub details: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorVm {
+    pub rows: Vec<DoctorRowVm>,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorRowVm {
+    pub severity: String,
+    pub check: String,
+    pub entity: String,
+    pub details: String,
+    pub suggested_action: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorVm {
@@ -913,11 +952,31 @@ pub fn build_view_model_with_state(
             m.fuzzy_match(&text, filter).is_some()
         });
     }
+    let mut conflicts = build_conflict_rows(snapshot);
+    let mut orphans = build_orphan_rows(snapshot);
+    let mut projects = build_project_rows(snapshot);
+    let mut tracked_runs = build_tracked_run_rows(snapshot);
+    let mut doctor = build_doctor_vm(snapshot);
+    if !filter.is_empty() {
+        let m = SkimMatcherV2::default();
+        conflicts.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        orphans.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        projects.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        tracked_runs.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        doctor
+            .rows
+            .retain(|r| m.fuzzy_match(&doctor_search_text(r), filter).is_some());
+    }
     ViewModel {
         width,
         layout,
         groups: groups(show_system),
         rows,
+        conflicts,
+        orphans,
+        projects,
+        tracked_runs,
+        doctor,
         process_tree,
         metrics: build_metrics_with_adapters(snapshot, None, adapter_metrics.unwrap_or_default()),
         inspector,
@@ -932,6 +991,148 @@ pub fn build_view_model_with_state(
             .as_ref()
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
+    }
+}
+
+fn summary_search_text(row: &SummaryRowVm) -> String {
+    format!("{} {} {} {}", row.name, row.kind, row.state, row.details)
+}
+
+fn doctor_search_text(row: &DoctorRowVm) -> String {
+    format!(
+        "{} {} {} {} {}",
+        row.severity, row.check, row.entity, row.details, row.suggested_action
+    )
+}
+
+fn build_conflict_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.to_ascii_lowercase().contains("conflict"))
+        .map(|warning| SummaryRowVm {
+            name: warning.code.clone(),
+            kind: format!("{:?}", warning.severity),
+            state: warning
+                .entity
+                .as_ref()
+                .map(format_entity_ref)
+                .unwrap_or_else(|| "snapshot".into()),
+            details: warning.message.clone(),
+        })
+        .collect()
+}
+
+fn build_orphan_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    let mut rows = snapshot
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.to_ascii_lowercase().contains("orphan"))
+        .map(|warning| SummaryRowVm {
+            name: warning.code.clone(),
+            kind: format!("{:?}", warning.severity),
+            state: warning
+                .entity
+                .as_ref()
+                .map(format_entity_ref)
+                .unwrap_or_else(|| "snapshot".into()),
+            details: warning.message.clone(),
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        snapshot
+            .listeners
+            .iter()
+            .filter(|listener| listener.owners.is_empty())
+            .map(|listener| SummaryRowVm {
+                name: listener
+                    .port
+                    .map(|port| format!("port {port}"))
+                    .unwrap_or_else(|| short_id(&listener.id.to_string())),
+                kind: "listener".into(),
+                state: listener.bind_addr.clone().unwrap_or_else(|| "-".into()),
+                details: "no owning workload/process discovered".into(),
+            }),
+    );
+    rows
+}
+
+fn build_project_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .projects
+        .iter()
+        .map(|project| SummaryRowVm {
+            name: project.name.clone(),
+            kind: project
+                .package_manager
+                .clone()
+                .unwrap_or_else(|| "project".into()),
+            state: format!("{} marker(s)", project.markers.len()),
+            details: project.root.display().to_string(),
+        })
+        .collect()
+}
+
+fn build_tracked_run_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .tracked_runs
+        .iter()
+        .map(|run| SummaryRowVm {
+            name: run
+                .tag
+                .clone()
+                .unwrap_or_else(|| short_id(&run.id.to_string())),
+            kind: "tracked run".into(),
+            state: format!("{:?}", run.state),
+            details: if run.command.is_empty() {
+                "-".into()
+            } else {
+                run.command.join(" ")
+            },
+        })
+        .collect()
+}
+
+fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
+    let mut vm = DoctorVm::default();
+    for warning in &snapshot.warnings {
+        let severity = format!("{:?}", warning.severity);
+        match severity.as_str() {
+            "Error" => vm.error_count += 1,
+            "Warning" => vm.warning_count += 1,
+            _ => vm.info_count += 1,
+        }
+        vm.rows.push(DoctorRowVm {
+            severity,
+            check: warning.code.clone(),
+            entity: warning
+                .entity
+                .as_ref()
+                .map(format_entity_ref)
+                .unwrap_or_else(|| "snapshot".into()),
+            details: warning.message.clone(),
+            suggested_action: suggested_action_for_warning(&warning.code),
+        });
+    }
+    vm
+}
+
+fn format_entity_ref(entity: &EntityRef) -> String {
+    compact_text(&format!("{entity:?}"), 32)
+}
+
+fn suggested_action_for_warning(code: &str) -> String {
+    let code = code.to_ascii_lowercase();
+    if code.contains("public") {
+        "bind to loopback or confirm exposure".into()
+    } else if code.contains("conflict") {
+        "inspect duplicate owners/listeners".into()
+    } else if code.contains("orphan") {
+        "prune stale route or restart manager".into()
+    } else if code.contains("degraded") {
+        "check adapter permissions and refresh".into()
+    } else {
+        "inspect details and source provenance".into()
     }
 }
 
@@ -1600,6 +1801,23 @@ fn group_is_active(group: &str, view: ViewKind) -> bool {
     )
 }
 
+fn group_view_kind(group: &str) -> Option<ViewKind> {
+    match group {
+        "All/Everything" => Some(ViewKind::Everything),
+        "Ports" => Some(ViewKind::Ports),
+        "Public listeners" => Some(ViewKind::Public),
+        "Conflicts" => Some(ViewKind::Conflicts),
+        "Orphans" => Some(ViewKind::Orphans),
+        "Tracked runs" => Some(ViewKind::TrackedRuns),
+        "Projects" => Some(ViewKind::Projects),
+        "Logs" => Some(ViewKind::Logs),
+        "Doctor" => Some(ViewKind::Doctor),
+        "Process tree" => Some(ViewKind::ProcessTree),
+        "Metrics" => Some(ViewKind::Metrics),
+        _ => None,
+    }
+}
+
 fn render_header(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -1684,7 +1902,7 @@ fn render_view_kind(
         Block::default().style(Style::default().bg(theme.base_bg.color())),
         area,
     );
-    if view_model.layout == LayoutMode::Refuse {
+    if view_model.layout == LayoutMode::Refuse || area.width < 60 {
         let p = Paragraph::new("lazyadmin TUI needs 60+ columns. Try `lazyadmin ps --json`, `lazyadmin public`, or widen the terminal.")
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.base_fg.color()).bg(theme.base_bg.color()))
@@ -1723,7 +1941,29 @@ fn render_view_kind(
                 .iter()
                 .map(|g| {
                     let active = group_is_active(g, ctx.view);
-                    let marker = if active { "› " } else { "  " };
+                    let navigable = group_view_kind(g).is_some();
+                    let marker = if active {
+                        "› "
+                    } else if navigable {
+                        "  "
+                    } else {
+                        "· "
+                    };
+                    let label_style = if active {
+                        Style::default()
+                            .fg(theme.base_fg.color())
+                            .bg(theme.base_bg.color())
+                            .add_modifier(Modifier::BOLD)
+                    } else if navigable {
+                        Style::default()
+                            .fg(theme.footer.color())
+                            .bg(theme.base_bg.color())
+                    } else {
+                        Style::default()
+                            .fg(theme.info.color())
+                            .bg(theme.base_bg.color())
+                            .add_modifier(Modifier::DIM)
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             marker,
@@ -1731,21 +1971,7 @@ fn render_view_kind(
                                 .fg(theme.accent.color())
                                 .bg(theme.base_bg.color()),
                         ),
-                        Span::styled(
-                            g.clone(),
-                            Style::default()
-                                .fg(if active {
-                                    theme.base_fg.color()
-                                } else {
-                                    theme.footer.color()
-                                })
-                                .bg(theme.base_bg.color())
-                                .add_modifier(if active {
-                                    Modifier::BOLD
-                                } else {
-                                    Modifier::empty()
-                                }),
-                        ),
+                        Span::styled(g.clone(), label_style),
                     ]))
                 })
                 .collect::<Vec<_>>(),
@@ -1787,8 +2013,17 @@ fn render_view_kind(
     if status.is_empty() {
         status.push("lazyadmin ready — ? help, : palette".into());
     }
+    let status_text = format!(
+        "{:<width$}",
+        status.join(" │ "),
+        width = vertical[2].width as usize
+    );
     frame.render_widget(
-        Paragraph::new(status.join(" │ ")).style(
+        Block::default().style(Style::default().bg(theme.base_bg.color())),
+        vertical[2],
+    );
+    frame.render_widget(
+        Paragraph::new(status_text).style(
             Style::default()
                 .fg(theme.footer.color())
                 .bg(theme.base_bg.color()),
@@ -1810,6 +2045,42 @@ fn render_main_pane(
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
         ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
         ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme, active),
+        ViewKind::Conflicts => render_summary_table(
+            &view_model.conflicts,
+            "Conflicts",
+            "No listener conflicts detected.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::Orphans => render_summary_table(
+            &view_model.orphans,
+            "Orphans",
+            "No orphan listeners or routes detected.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::Projects => render_summary_table(
+            &view_model.projects,
+            "Projects",
+            "No projects discovered. Configure project roots or run discovery.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
+        ViewKind::TrackedRuns => render_summary_table(
+            &view_model.tracked_runs,
+            "Tracked Runs",
+            "No lazyadmin tracked runs are active.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
         _ => render_rows_table(
             view_model,
             frame,
@@ -1823,6 +2094,97 @@ fn render_main_pane(
     if let Some(keybindings) = ctx.keybindings {
         let _ = help_lines(keybindings);
     }
+}
+
+fn render_empty_state(
+    title: &str,
+    message: &str,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+) {
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .block(panel_block(title, theme, active))
+            .style(
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            ),
+        area,
+    );
+}
+
+fn render_summary_table(
+    rows: &[SummaryRowVm],
+    title: &str,
+    empty_message: &str,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+) {
+    if rows.is_empty() {
+        render_empty_state(title, empty_message, frame, area, theme, active);
+        return;
+    }
+    let table_rows = rows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(Span::styled(
+                compact_text(&row.name, 24),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.kind, 14),
+                Style::default()
+                    .fg(theme.info.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.state, 18),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.details, 64),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )),
+        ])
+        .style(Style::default().bg(theme.base_bg.color()))
+    });
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(24),
+            Constraint::Length(14),
+            Constraint::Length(18),
+            Constraint::Min(20),
+        ],
+    )
+    .header(
+        Row::new(["Name", "Kind", "State", "Details"]).style(
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(panel_block(title, theme, active))
+    .style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color()),
+    );
+    frame.render_widget(table, area);
 }
 
 fn render_rows_table(
@@ -2026,23 +2388,85 @@ fn render_doctor_view(
     theme: &Theme,
     active: bool,
 ) {
-    let lines = view_model
-        .rows
-        .iter()
-        .flat_map(|r| r.badges.iter())
-        .map(|b| {
-            Line::from(Span::styled(
-                b.clone(),
-                Style::default().fg(theme.warning.color()),
-            ))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel_block("Doctor", theme, active))
-            .style(Style::default().bg(theme.base_bg.color())),
-        area,
+    let title = format!(
+        "Doctor — {} error(s), {} warning(s), {} info",
+        view_model.doctor.error_count,
+        view_model.doctor.warning_count,
+        view_model.doctor.info_count
     );
+    if view_model.doctor.rows.is_empty() {
+        render_empty_state(
+            &title,
+            "No health warnings detected.",
+            frame,
+            area,
+            theme,
+            active,
+        );
+        return;
+    }
+    let rows = view_model.doctor.rows.iter().map(|row| {
+        let severity_color = match row.severity.as_str() {
+            "Error" => theme.error.color(),
+            "Warning" => theme.warning.color(),
+            _ => theme.info.color(),
+        };
+        Row::new(vec![
+            Cell::from(Span::styled(
+                row.severity.clone(),
+                Style::default()
+                    .fg(severity_color)
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.check, 18),
+                Style::default()
+                    .fg(theme.accent.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.entity, 22),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.details, 36),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            )),
+            Cell::from(Span::styled(
+                compact_text(&row.suggested_action, 36),
+                Style::default()
+                    .fg(theme.info.color())
+                    .bg(theme.base_bg.color()),
+            )),
+        ])
+        .style(Style::default().bg(theme.base_bg.color()))
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Length(18),
+            Constraint::Length(22),
+            Constraint::Min(24),
+            Constraint::Length(30),
+        ],
+    )
+    .header(
+        Row::new(["Severity", "Check", "Entity", "Details", "Suggested action"]).style(
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(panel_block(title, theme, active))
+    .style(Style::default().bg(theme.base_bg.color()));
+    frame.render_widget(table, area);
 }
 fn render_process_tree(
     view_model: &ViewModel,
@@ -2221,6 +2645,7 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
     keybindings
         .bindings
         .iter()
+        .filter(|(_, b)| !b.is_empty())
         .map(|(a, b)| format!("{a}: {}", b.join(", ")))
         .collect()
 }
@@ -2247,12 +2672,24 @@ pub enum CopyDiagnosticOutcome {
 }
 
 pub fn copy_diagnostic(markdown: &str) -> anyhow::Result<CopyDiagnosticOutcome> {
-    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(markdown)) {
-        Ok(()) => Ok(CopyDiagnosticOutcome::Clipboard),
-        Err(_) => copy_diagnostic_via_command(markdown)
-            .map(|()| CopyDiagnosticOutcome::Clipboard)
-            .or_else(|_| copy_diagnostic_fallback(markdown, None).map(CopyDiagnosticOutcome::File)),
-    }
+    copy_diagnostic_via_command(markdown)
+        .map(|()| CopyDiagnosticOutcome::Clipboard)
+        .or_else(|_| {
+            copy_diagnostic_via_arboard(markdown).map(|()| CopyDiagnosticOutcome::Clipboard)
+        })
+        .or_else(|_| copy_diagnostic_fallback(markdown, None).map(CopyDiagnosticOutcome::File))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_diagnostic_via_arboard(markdown: &str) -> anyhow::Result<()> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(markdown))
+        .map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+fn copy_diagnostic_via_arboard(_markdown: &str) -> anyhow::Result<()> {
+    anyhow::bail!("arboard clipboard disabled on linux TUI to avoid terminal stderr leaks")
 }
 
 fn copy_diagnostic_via_command(markdown: &str) -> anyhow::Result<()> {
@@ -2264,6 +2701,8 @@ fn copy_diagnostic_via_command(markdown: &str) -> anyhow::Result<()> {
                 Vec::new()
             })
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn();
         if let Ok(ref mut child) = child {
             use std::io::Write;
@@ -2448,7 +2887,15 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
         .filter(|(_, row)| match app.active_view {
             ViewKind::Public => row.badges.iter().any(|badge| badge == "PUBLIC"),
             ViewKind::Ports => row.port.is_some(),
-            ViewKind::ProcessTree | ViewKind::Metrics | ViewKind::Logs | ViewKind::Doctor => false,
+            ViewKind::Conflicts
+            | ViewKind::Orphans
+            | ViewKind::TrackedRuns
+            | ViewKind::Projects
+            | ViewKind::Managers
+            | ViewKind::ProcessTree
+            | ViewKind::Metrics
+            | ViewKind::Logs
+            | ViewKind::Doctor => false,
             _ => true,
         })
         .map(|(idx, _)| idx)
@@ -2500,6 +2947,82 @@ fn selected_row(app: &App) -> Option<&RowVm> {
     visible_row_indices(app)
         .get(app.selected_row)
         .and_then(|idx| app.vm.rows.get(*idx))
+}
+
+fn action_target(row: Option<&RowVm>) -> String {
+    row.map(|row| {
+        let endpoint = row
+            .port
+            .map(|port| format!("{}:{port}", row.bind))
+            .unwrap_or_else(|| row.bind.clone());
+        let project = if row.project.trim().is_empty() || row.project == "-" {
+            "no project".into()
+        } else {
+            row.project.clone()
+        };
+        format!(
+            "{endpoint} owned by {} ({project}, {})",
+            row.owner, row.runtime
+        )
+    })
+    .unwrap_or_else(|| "no selected row".into())
+}
+
+fn start_confirmation(app: &mut App, command: Command, required: &str) {
+    let target = action_target(selected_row(app));
+    app.confirmation = Some(Confirmation {
+        command,
+        typed: String::new(),
+        required: required.into(),
+        target: target.clone(),
+    });
+    app.status = Some(format!(
+        "confirm {required} for {target}; type {required} then Enter, Esc cancels"
+    ));
+}
+
+fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
+    let Some(mut confirmation) = app.confirmation.take() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            app.status = Some(format!(
+                "cancelled {:?} for {}",
+                confirmation.command, confirmation.target
+            ));
+        }
+        KeyCode::Enter => {
+            if confirmation.typed == confirmation.required {
+                let target = confirmation.target.clone();
+                let command = confirmation.command.clone();
+                CommandDispatcher::execute(&command);
+                app.status = Some(format!(
+                    "{}; awaiting action executor for {target}",
+                    CommandDispatcher::plan_for_target(&command, &target)
+                ));
+            } else {
+                app.status = Some(format!(
+                    "confirmation failed for {}; type {} exactly",
+                    confirmation.target, confirmation.required
+                ));
+                confirmation.typed.clear();
+                app.confirmation = Some(confirmation);
+            }
+        }
+        KeyCode::Backspace => {
+            confirmation.typed.pop();
+            app.confirmation = Some(confirmation);
+        }
+        KeyCode::Char(c) => {
+            confirmation.typed.push(c);
+            app.confirmation = Some(confirmation);
+        }
+        _ => {
+            app.confirmation = Some(confirmation);
+        }
+    }
+    true
 }
 
 fn navigable_views() -> &'static [ViewKind] {
@@ -2574,6 +3097,9 @@ fn cycle_pane(app: &mut App, delta: isize, width: u16) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
+    if handle_confirmation_key(app, key) {
+        return;
+    }
     if matches!(app.mode, InputMode::Filter) {
         match key.code {
             KeyCode::Esc => {
@@ -2698,9 +3224,15 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                     app.status = Some("diagnostic copied".into());
                 }
                 Ok(CopyDiagnosticOutcome::File(path)) => {
-                    app.status = Some(format!("clipboard unavailable; wrote {}", path.display()));
+                    app.status = Some(format!(
+                        "clipboard unavailable; diagnostic written to {}",
+                        path.display()
+                    ));
                 }
-                Err(err) => app.status = Some(format!("copy failed: {err}")),
+                Err(_) => app.status = Some(
+                    "clipboard unavailable; copy fallback failed, diagnostic remains in inspector"
+                        .into(),
+                ),
             },
             Command::Open => match selected_row(app) {
                 Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
@@ -2709,12 +3241,15 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 },
                 None => app.status = Some("open failed: no selected listener".into()),
             },
-            Command::Kill => {
-                app.confirmation = Some(Confirmation {
-                    command: cmd,
-                    typed: String::new(),
-                    required: "kill".into(),
-                })
+            Command::Kill => start_confirmation(app, cmd, "kill"),
+            Command::Restart | Command::Stop | Command::Free | Command::Run => {
+                app.status = Some(CommandDispatcher::plan(&cmd, selected_row(app)));
+            }
+            Command::Edit => {
+                app.status = Some(format!(
+                    "edit not implemented for {}",
+                    action_target(selected_row(app))
+                ));
             }
             _ => CommandDispatcher::execute(&cmd),
         }
@@ -2835,6 +3370,45 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         f.render_widget(Clear, area);
         f.render_widget(palette, area);
     }
+    if let Some(confirmation) = &app.confirmation {
+        let area = centered_rect(62, 38, f.area());
+        let body = vec![
+            Line::from(vec![
+                Span::styled("Action: ", Style::default().fg(app.theme.footer.color())),
+                Span::raw(format!("{:?}", confirmation.command)),
+            ]),
+            Line::from(vec![
+                Span::styled("Target: ", Style::default().fg(app.theme.footer.color())),
+                Span::raw(confirmation.target.clone()),
+            ]),
+            Line::from(""),
+            Line::from(format!(
+                "Type '{}' then Enter to continue.",
+                confirmation.required
+            )),
+            Line::from("Esc cancels. Other global keys are disabled while confirming."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Input: ", Style::default().fg(app.theme.footer.color())),
+                Span::styled(
+                    confirmation.typed.clone(),
+                    Style::default()
+                        .fg(app.theme.accent.color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ];
+        let prompt = Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Confirm action", &app.theme, true))
+            .style(
+                Style::default()
+                    .fg(app.theme.base_fg.color())
+                    .bg(app.theme.base_bg.color()),
+            );
+        f.render_widget(Clear, area);
+        f.render_widget(prompt, area);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -2945,8 +3519,8 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use lazyadmin_core::model::{
-        AddressFamily, Confidence, DualStackState, Listener, ListenerId, ListenerState, Protocol,
-        WarningSeverity,
+        AddressFamily, Confidence, DualStackState, Listener, ListenerId, ListenerState, Project,
+        ProjectId, Protocol, RunId, TrackedRun, WarningSeverity, WorkloadState,
     };
     use ratatui::backend::TestBackend;
     #[test]
@@ -2981,6 +3555,7 @@ mod tests {
             120,
         );
         assert_eq!(app.confirmation.as_ref().unwrap().required, "kill");
+        assert_eq!(app.confirmation.as_ref().unwrap().target, "no selected row");
     }
     #[test]
     fn view_model_widths() {
@@ -3032,6 +3607,148 @@ mod tests {
             .draw(|f| render(&vm, f, f.area(), &Theme::default_dark()))
             .unwrap();
         assert!(format!("{:?}", terminal.backend().buffer()).contains("hidden"));
+    }
+
+    #[test]
+    fn narrow_render_refuses_even_if_view_model_was_built_wide() {
+        let vm = build_view_model(&build_empty_snapshot(), 120, false, "");
+        let backend = TestBackend::new(50, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Projects,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("60+ columns"));
+        assert!(!text.contains("Projects"));
+    }
+
+    #[test]
+    fn special_views_render_projections_or_empty_states_not_listener_table() {
+        let mut snap = build_empty_snapshot();
+        snap.projects.push(Project {
+            id: ProjectId::new("p1"),
+            root: std::path::PathBuf::from("/tmp/demo"),
+            name: "demo".into(),
+            markers: vec![],
+            git_remote: None,
+            package_manager: Some("npm".into()),
+            dev_commands: vec![],
+            provenance: vec![],
+        });
+        snap.tracked_runs.push(TrackedRun {
+            id: RunId::new("run1"),
+            tag: Some("api".into()),
+            command: vec!["npm".into(), "run".into(), "dev".into()],
+            cwd: None,
+            state: WorkloadState::Running,
+            started_at: None,
+            provenance: vec![],
+        });
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "CONFLICT".into(),
+            message: "same port".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 120, false, "");
+        for (view, expected) in [
+            (ViewKind::Conflicts, "same port"),
+            (ViewKind::Orphans, "No orphan"),
+            (ViewKind::TrackedRuns, "npm run dev"),
+            (ViewKind::Projects, "/tmp/demo"),
+        ] {
+            let backend = TestBackend::new(120, 20);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    render_view_kind(
+                        &vm,
+                        f,
+                        f.area(),
+                        &Theme::default_dark(),
+                        RenderContext {
+                            view,
+                            active_pane: Pane::Rows,
+                            keybindings: None,
+                            selected_row: 0,
+                        },
+                    )
+                })
+                .unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                text.contains(expected),
+                "{view:?} missing {expected}: {text}"
+            );
+            assert!(!text.contains("Port") || !text.contains("Bind") || !text.contains("Owner"));
+        }
+    }
+
+    #[test]
+    fn doctor_view_renders_actionable_warning_rows() {
+        let mut snap = build_empty_snapshot();
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Error,
+            code: "DEGRADED_PROCFS".into(),
+            message: "permission denied".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.doctor.rows[0].check, "DEGRADED_PROCFS");
+        assert_eq!(vm.doctor.rows[0].details, "permission denied");
+        assert!(
+            vm.doctor.rows[0]
+                .suggested_action
+                .contains("check adapter permissions")
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Doctor,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("1 error"));
+        assert!(text.contains("Doctor"));
+        assert!(!text.contains("PUBLICPUBLIC"));
+    }
+
+    #[test]
+    fn help_lines_skip_empty_bindings() {
+        let mut keybindings = ResolvedKeybindings {
+            bindings: BTreeMap::new(),
+        };
+        keybindings.bindings.insert("toggle_filter".into(), vec![]);
+        keybindings.bindings.insert("quit".into(), vec!["q".into()]);
+        let lines = help_lines(&keybindings);
+        assert_eq!(lines, vec!["quit: q"]);
     }
 
     #[test]
@@ -3107,6 +3824,108 @@ mod tests {
             first_seen: now,
             last_seen: now,
             dual_stack_state: DualStackState::NotApplicable,
+        }
+    }
+
+    fn app_with_listener(port: u16) -> App {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, port));
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        app
+    }
+
+    #[test]
+    fn kill_confirmation_blocks_global_keys_and_renders_target() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.as_ref().unwrap().target.contains("8080"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(!app.should_quit, "q must be suppressed while confirming");
+        assert_eq!(app.confirmation.as_ref().unwrap().typed, "q");
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_app(f, &app)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("Confirm action"));
+        assert!(text.contains("8080"));
+        assert!(text.contains("Type 'kill'"));
+    }
+
+    #[test]
+    fn kill_confirmation_esc_cancels_and_correct_text_dry_runs() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_none());
+        assert!(app.status.as_deref().unwrap().contains("cancelled"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        for c in "kill".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                120,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_none());
+        let status = app.status.as_deref().unwrap();
+        assert!(status.contains("Dry run: Kill"));
+        assert!(status.contains("8080"));
+    }
+
+    #[test]
+    fn advertised_action_keys_show_selected_row_feedback() {
+        for (key, expected) in [
+            ('r', "Dry run: Restart"),
+            ('s', "Dry run: Stop"),
+            ('f', "Dry run: Free"),
+            ('R', "Dry run: Run"),
+            ('e', "edit not implemented"),
+        ] {
+            let mut app = app_with_listener(8080);
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                120,
+            );
+            let status = app.status.as_deref().unwrap_or_default();
+            assert!(status.contains(expected), "{key}: {status}");
+            assert!(status.contains("8080"), "{key}: {status}");
         }
     }
 
