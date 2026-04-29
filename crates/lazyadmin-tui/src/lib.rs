@@ -3168,10 +3168,18 @@ fn start_confirmation(app: &mut App, command: Command, required: &str) {
     ));
 }
 
+/// Confirmation modal owns ALL key input while it is open. This is intentional
+/// for safety: it prevents global shortcuts (k, l, q, …) from running silently
+/// while the user is mid-typing a destructive confirmation. Anything we don't
+/// explicitly recognize is simply swallowed.
 fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
     let Some(mut confirmation) = app.confirmation.take() else {
         return false;
     };
+    // Ctrl+C is the universal "get me out" reflex; treat it as Esc rather than
+    // letting it land as `Char('c')` and silently grow the typed buffer.
+    let is_ctrl_c =
+        matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             app.status = Some(format!(
@@ -3200,6 +3208,12 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Backspace => {
             confirmation.typed.pop();
             app.confirmation = Some(confirmation);
+        }
+        KeyCode::Char(_) if is_ctrl_c => {
+            app.status = Some(format!(
+                "cancelled {:?} for {}",
+                confirmation.command, confirmation.target
+            ));
         }
         KeyCode::Char(c) => {
             confirmation.typed.push(c);
@@ -4393,6 +4407,31 @@ mod tests {
         let status = app.status.as_deref().unwrap();
         assert!(status.contains("Dry run: Kill"));
         assert!(status.contains("8080"));
+    }
+
+    /// Ctrl+C is the universal cancel reflex; in confirmation mode it must
+    /// behave like Esc, not like a literal `c` keystroke that grows the typed
+    /// buffer.
+    #[test]
+    fn ctrl_c_cancels_confirmation_instead_of_appending_c() {
+        let mut app = app_with_listener(8080);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+        assert!(app.confirmation.is_some());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            120,
+        );
+        assert!(
+            app.confirmation.is_none(),
+            "Ctrl+C must close the confirmation modal"
+        );
+        let status = app.status.as_deref().unwrap();
+        assert!(status.contains("cancelled"), "status: {status}");
     }
 
     #[test]
