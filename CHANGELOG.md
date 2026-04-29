@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- PLAN-14: read-only Web UI observation layer. New `lazyadmin-runtime` crate extracts shared snapshot/event assembly, and the new `lazyadmin-web` crate ships a loopback-only Axum server with an embedded static UI shell.
+- New `lazyadmin web` CLI command: defaults to `127.0.0.1:7749` (or `--port 0` for ephemeral), refuses non-loopback binds, and exposes only read-only `/api/health`, `/api/snapshot`, `/api/doctor`, and `/api/events` routes.
+- Snapshot and doctor data remain projections of `lazyadmin.snapshot.v1`; the web UI does not introduce any mutating runtime actions.
+
 ## 0.3.0
 
 - Adds a read-only portless adapter, manager-aware `free` dispatch that sends `SIGTERM` to the portless CLI for portless-owned ports, and `adapter:portless` doctor checks.

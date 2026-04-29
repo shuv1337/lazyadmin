@@ -2,7 +2,7 @@
 
 ## Current state
 
-This repository now contains the v0.3 Rust workspace for `lazyadmin` after PLAN-01 through PLAN-13:
+This repository now contains the v0.4 Rust workspace for `lazyadmin` after PLAN-01 through PLAN-14:
 
 - `Cargo.toml` — workspace root (`resolver = "2"`) with shared dependencies.
 - `crates/lazyadmin-core` — core models, graph/discovery contracts, config loader, redaction, selectors, snapshot/diff JSON contract, and telemetry primitives.
@@ -12,7 +12,7 @@ This repository now contains the v0.3 Rust workspace for `lazyadmin` after PLAN-
 - `lazyadmin-spec-v0_2.md` — source specification for the Linux-first Rust + Ratatui local runtime control plane.
 - `docs/spec.md` — symlink to the source spec; do not fork divergent specs silently.
 - `docs/schema/` and `testdata/snapshots/` — initial public JSON contract docs and fixtures.
-- `PLAN-*.md` — implementation history/checklists derived from the spec and assumption review. PLAN-05 covers the TUI, agent skill, docs, CI, packaging, and v0.1 acceptance record; PLAN-12 covers the v0.2 TUI polish; PLAN-13 covers the v0.3 portless adapter and manager-aware `free` release.
+- `PLAN-*.md` — implementation history/checklists derived from the spec and assumption review. PLAN-05 covers the TUI, agent skill, docs, CI, packaging, and v0.1 acceptance record; PLAN-12 covers the v0.2 TUI polish; PLAN-13 covers the v0.3 portless adapter and manager-aware `free` release; PLAN-14 covers the v0.4 read-only Web UI observation layer (`lazyadmin-runtime` + `lazyadmin-web`).
 - `skills/lazyadmin-agent/` — shipped coding-agent skill with always-do rules, cheatsheet, schema notes, examples, and install script.
 - `scripts/build-skill-tarball.sh` — builds the release skill artifact `lazyadmin-agent-skill-v<version>.tar.gz`.
 

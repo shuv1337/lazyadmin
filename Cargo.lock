@@ -1592,7 +1592,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazyadmin-adapter-container"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-adapter-portless"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-adapter-procfs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-adapter-project"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-adapter-systemd"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-adapter-tracked"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "lazyadmin-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
