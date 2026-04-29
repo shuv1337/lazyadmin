@@ -713,9 +713,49 @@ pub struct DoctorVm {
     pub info_count: usize,
 }
 
+/// Severity classification for a Doctor row, kept in lock-step with
+/// `lazyadmin_core::model::WarningSeverity` via an exhaustive `From` impl.
+/// Renderers must match on this enum, not on the string `severity` field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorSeverity {
+    Error,
+    Warning,
+    #[default]
+    Info,
+}
+
+impl From<&lazyadmin_core::model::WarningSeverity> for DoctorSeverity {
+    fn from(value: &lazyadmin_core::model::WarningSeverity) -> Self {
+        match value {
+            lazyadmin_core::model::WarningSeverity::Error => DoctorSeverity::Error,
+            lazyadmin_core::model::WarningSeverity::Warning => DoctorSeverity::Warning,
+            lazyadmin_core::model::WarningSeverity::Info => DoctorSeverity::Info,
+        }
+    }
+}
+
+impl DoctorSeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            DoctorSeverity::Error => "Error",
+            DoctorSeverity::Warning => "Warning",
+            DoctorSeverity::Info => "Info",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorRowVm {
+    /// Stringly-typed severity label, retained for the public JSON contract
+    /// (e.g. `lazyadmin tui --headless --json`). Always equal to
+    /// `severity_kind.label()`.
     pub severity: String,
+    /// Strongly-typed severity classification used by the renderer and any
+    /// code that branches on severity. Renamed in serde so the legacy field
+    /// stays the human-friendly one.
+    #[serde(default, rename = "severity_kind")]
+    pub severity_kind: DoctorSeverity,
     pub check: String,
     pub entity: String,
     pub details: String,
@@ -1146,14 +1186,15 @@ fn build_tracked_run_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
 fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
     let mut vm = DoctorVm::default();
     for warning in &snapshot.warnings {
-        let severity = format!("{:?}", warning.severity);
-        match severity.as_str() {
-            "Error" => vm.error_count += 1,
-            "Warning" => vm.warning_count += 1,
-            _ => vm.info_count += 1,
+        let severity_kind = DoctorSeverity::from(&warning.severity);
+        match severity_kind {
+            DoctorSeverity::Error => vm.error_count += 1,
+            DoctorSeverity::Warning => vm.warning_count += 1,
+            DoctorSeverity::Info => vm.info_count += 1,
         }
         vm.rows.push(DoctorRowVm {
-            severity,
+            severity: severity_kind.label().to_string(),
+            severity_kind,
             check: warning.code.clone(),
             entity: warning
                 .entity
@@ -2456,14 +2497,14 @@ fn render_doctor_view(
         return;
     }
     let rows = view_model.doctor.rows.iter().map(|row| {
-        let severity_color = match row.severity.as_str() {
-            "Error" => theme.error.color(),
-            "Warning" => theme.warning.color(),
-            _ => theme.info.color(),
+        let severity_color = match row.severity_kind {
+            DoctorSeverity::Error => theme.error.color(),
+            DoctorSeverity::Warning => theme.warning.color(),
+            DoctorSeverity::Info => theme.info.color(),
         };
         Row::new(vec![
             Cell::from(Span::styled(
-                row.severity.clone(),
+                row.severity_kind.label().to_string(),
                 Style::default()
                     .fg(severity_color)
                     .bg(theme.base_bg.color())
@@ -3946,6 +3987,42 @@ mod tests {
         assert!(text.contains("1 error"));
         assert!(text.contains("Doctor"));
         assert!(!text.contains("PUBLICPUBLIC"));
+    }
+
+    /// Severity classification must come from a real `match` on
+    /// `WarningSeverity`, not a `format!("{:?}")` string compare. This test
+    /// exhausts every variant and asserts each lands in the matching counter,
+    /// so renaming a variant is a compile error rather than a silent drift to
+    /// `info_count`.
+    #[test]
+    fn doctor_severity_classification_is_exhaustive() {
+        let mut snap = build_empty_snapshot();
+        for severity in [
+            WarningSeverity::Error,
+            WarningSeverity::Warning,
+            WarningSeverity::Info,
+        ] {
+            snap.warnings.push(lazyadmin_core::model::Warning {
+                severity,
+                code: "X".into(),
+                message: "x".into(),
+                entity: None,
+                provenance: vec![],
+            });
+        }
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.doctor.error_count, 1);
+        assert_eq!(vm.doctor.warning_count, 1);
+        assert_eq!(vm.doctor.info_count, 1);
+        let kinds: Vec<DoctorSeverity> = vm.doctor.rows.iter().map(|r| r.severity_kind).collect();
+        assert!(kinds.contains(&DoctorSeverity::Error));
+        assert!(kinds.contains(&DoctorSeverity::Warning));
+        assert!(kinds.contains(&DoctorSeverity::Info));
+        // The legacy stringly-typed field stays in lock-step with the enum so
+        // the JSON contract doesn't drift.
+        for row in &vm.doctor.rows {
+            assert_eq!(row.severity, row.severity_kind.label());
+        }
     }
 
     #[test]
