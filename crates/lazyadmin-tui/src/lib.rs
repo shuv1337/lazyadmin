@@ -74,6 +74,7 @@ pub struct App {
     pub keybindings: ResolvedKeybindings,
     pub status: Option<String>,
     pub allow_open_non_loopback: bool,
+    selected_row: usize,
     selected_process: Option<ProcessKey>,
     collapsed_processes: HashSet<ProcessKey>,
     event_ring: AdapterEventRing,
@@ -117,6 +118,7 @@ impl Default for App {
             },
             status: None,
             allow_open_non_loopback: false,
+            selected_row: 0,
             selected_process: None,
             collapsed_processes: HashSet::new(),
             event_ring: AdapterEventRing::default(),
@@ -1516,7 +1518,15 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
 }
 
 pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
-    render_view_kind(view_model, frame, area, theme, ViewKind::Everything, None);
+    render_view_kind(
+        view_model,
+        frame,
+        area,
+        theme,
+        ViewKind::Everything,
+        None,
+        0,
+    );
 }
 
 fn panel_block(title: impl Into<String>, theme: &Theme, active: bool) -> Block<'static> {
@@ -1658,6 +1668,7 @@ fn render_view_kind(
     theme: &Theme,
     view: ViewKind,
     keybindings: Option<&ResolvedKeybindings>,
+    selected_row: usize,
 ) {
     tracing::debug!("tui.render");
     frame.render_widget(
@@ -1733,10 +1744,26 @@ fn render_view_kind(
         .block(quiet_block("Views", theme))
         .style(Style::default().bg(theme.base_bg.color()));
         frame.render_widget(groups, chunks[0]);
-        render_main_pane(view_model, frame, chunks[1], theme, view, keybindings);
+        render_main_pane(
+            view_model,
+            frame,
+            chunks[1],
+            theme,
+            view,
+            keybindings,
+            selected_row,
+        );
         render_inspector(view_model, frame, chunks[2], theme);
     } else {
-        render_main_pane(view_model, frame, chunks[0], theme, view, keybindings);
+        render_main_pane(
+            view_model,
+            frame,
+            chunks[0],
+            theme,
+            view,
+            keybindings,
+            selected_row,
+        );
     }
     let mut status = Vec::new();
     if view_model.hidden_system_count > 0 {
@@ -1771,13 +1798,14 @@ fn render_main_pane(
     theme: &Theme,
     view: ViewKind,
     keybindings: Option<&ResolvedKeybindings>,
+    selected_row: usize,
 ) {
     match view {
         ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme),
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme),
         ViewKind::Logs => render_logs(view_model, frame, area, theme),
         ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme),
-        _ => render_rows_table(view_model, frame, area, theme, view),
+        _ => render_rows_table(view_model, frame, area, theme, view, selected_row),
     }
     if let Some(keybindings) = keybindings {
         let _ = help_lines(keybindings);
@@ -1790,6 +1818,7 @@ fn render_rows_table(
     area: Rect,
     theme: &Theme,
     view: ViewKind,
+    selected_row: usize,
 ) {
     let rows = view_model
         .rows
@@ -1873,7 +1902,20 @@ fn render_rows_table(
             .bg(theme.selection.color())
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(table, area);
+    let mut state = TableState::default();
+    let row_count = view_model
+        .rows
+        .iter()
+        .filter(|r| match view {
+            ViewKind::Public => r.badges.iter().any(|b| b == "PUBLIC"),
+            ViewKind::Ports => r.port.is_some(),
+            _ => true,
+        })
+        .count();
+    if row_count > 0 {
+        state.select(Some(selected_row.min(row_count.saturating_sub(1))));
+    }
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_inspector(
@@ -2298,6 +2340,7 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         config_reload: runtime.config_reload,
         ..Default::default()
     };
+    sync_row_selection(&mut app);
     let mut refresh_state =
         LiveRefreshState::new(runtime.config.event_debounce, runtime.config.max_redraw_hz);
     let started = Instant::now();
@@ -2370,6 +2413,69 @@ fn rebuild_view_model(app: &mut App, width: u16) {
         &app.collapsed_processes,
         Some(app.event_ring.metrics(Instant::now())),
     );
+    sync_row_selection(app);
+}
+
+fn visible_row_indices(app: &App) -> Vec<usize> {
+    app.vm
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| match app.active_view {
+            ViewKind::Public => row.badges.iter().any(|badge| badge == "PUBLIC"),
+            ViewKind::Ports => row.port.is_some(),
+            ViewKind::ProcessTree | ViewKind::Metrics | ViewKind::Logs | ViewKind::Doctor => false,
+            _ => true,
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+fn sync_row_selection(app: &mut App) {
+    let visible = visible_row_indices(app);
+    if visible.is_empty() {
+        app.selected_row = 0;
+        if app.selected_process.is_none() {
+            app.vm.inspector = InspectorVm {
+                title: "No selection".into(),
+                lines: vec!["No workloads/listeners discovered yet".into()],
+                provenance: vec![],
+                provenance_expanded: false,
+                diagnostic_markdown: "# lazyadmin diagnostic\nNo selection\n".into(),
+            };
+        }
+        return;
+    }
+    if app.selected_row >= visible.len() {
+        app.selected_row = visible.len().saturating_sub(1);
+    }
+    if app.selected_process.is_none() {
+        if let Some(row) = visible
+            .get(app.selected_row)
+            .and_then(|idx| app.vm.rows.get(*idx))
+        {
+            app.vm.inspector = inspector_for_row(row);
+        }
+    }
+}
+
+fn scroll_rows(app: &mut App, delta: isize) {
+    let visible_len = visible_row_indices(app).len();
+    if visible_len == 0 {
+        app.selected_row = 0;
+        sync_row_selection(app);
+        return;
+    }
+    let max = visible_len.saturating_sub(1) as isize;
+    app.selected_row = (app.selected_row as isize + delta).clamp(0, max) as usize;
+    app.selected_process = None;
+    sync_row_selection(app);
+}
+
+fn selected_row(app: &App) -> Option<&RowVm> {
+    visible_row_indices(app)
+        .get(app.selected_row)
+        .and_then(|idx| app.vm.rows.get(*idx))
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
@@ -2419,6 +2525,37 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
         app.mode = InputMode::Normal;
         return;
     }
+    match key.code {
+        KeyCode::Up => {
+            scroll_rows(app, -1);
+            return;
+        }
+        KeyCode::Down => {
+            scroll_rows(app, 1);
+            return;
+        }
+        KeyCode::PageUp => {
+            scroll_rows(app, -10);
+            return;
+        }
+        KeyCode::PageDown => {
+            scroll_rows(app, 10);
+            return;
+        }
+        KeyCode::Home => {
+            app.selected_row = 0;
+            app.selected_process = None;
+            sync_row_selection(app);
+            return;
+        }
+        KeyCode::End => {
+            app.selected_row = visible_row_indices(app).len().saturating_sub(1);
+            app.selected_process = None;
+            sync_row_selection(app);
+            return;
+        }
+        _ => {}
+    }
     if let Some(cmd) = key_to_command_with_bindings(key, &app.keybindings) {
         match cmd {
             Command::Quit => app.should_quit = true,
@@ -2444,8 +2581,14 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 }
                 rebuild_view_model(app, width);
             }
-            Command::Metrics => app.active_view = ViewKind::Metrics,
-            Command::Logs => app.active_view = ViewKind::Logs,
+            Command::Metrics => {
+                app.active_view = ViewKind::Metrics;
+                rebuild_view_model(app, width);
+            }
+            Command::Logs => {
+                app.active_view = ViewKind::Logs;
+                rebuild_view_model(app, width);
+            }
             Command::Ports => {
                 app.active_view = ViewKind::Ports;
                 app.selected_process = None;
@@ -2462,7 +2605,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 }
                 Err(err) => app.status = Some(format!("copy failed: {err}")),
             },
-            Command::Open => match app.vm.rows.first() {
+            Command::Open => match selected_row(app) {
                 Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
                     Ok(url) => app.status = Some(format!("opened {url}")),
                     Err(err) => app.status = Some(format!("open failed: {err}")),
@@ -2541,6 +2684,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         &app.theme,
         app.active_view,
         Some(&app.keybindings),
+        app.selected_row,
     );
     let footer = Rect {
         x: area.x,
@@ -2878,6 +3022,48 @@ mod tests {
         assert!(!vm.rows[0].owner.contains("ProcessKey"));
         assert_eq!(vm.rows[0].runtime, "direct");
         assert_eq!(vm.rows[0].exposure, "loopback");
+    }
+
+    #[test]
+    fn row_scrolling_updates_selection_and_inspector() {
+        let mut snap = build_empty_snapshot();
+        for offset in 0..3 {
+            let proc = process(2000 + offset, None, offset as u64 + 1);
+            let key = proc.key.clone();
+            snap.processes.push(proc);
+            snap.listeners
+                .push(listener_for_process(key, 8000 + offset as u16));
+        }
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        assert!(app.vm.inspector.title.contains("8000"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.selected_row, 1);
+        assert!(app.vm.inspector.title.contains("8001"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.selected_row, 2);
+        assert!(app.vm.inspector.title.contains("8002"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.selected_row, 2);
     }
 
     #[test]
