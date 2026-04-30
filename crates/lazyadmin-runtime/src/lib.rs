@@ -11,6 +11,8 @@ use lazyadmin_core::{
     snapshot::SnapshotBuilder,
 };
 
+pub mod view_model;
+
 pub type Result<T> = anyhow::Result<T>;
 
 pub async fn load_config(config_path: Option<&Path>) -> Result<Config> {

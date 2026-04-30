@@ -41,6 +41,8 @@ This repository now contains the v0.4 Rust workspace for `lazyadmin` after PLAN-
 - `pause-restart` semantics are recorded in `docs/pause-restart-decision.md`: prefer systemd runtime `Restart=no` overrides, use Docker update API for verified container executors, defer Podman mutations to a later release, and keep lazyadmin-owned pause records in `$XDG_STATE_HOME/lazyadmin/pauses`.
 - Portless interop is read-only except for `free`: route state is read from `routes.json`, aliases use `pid = 0`, orphan cleanup is only a `doctor` hint to run `portless prune`, and `lazyadmin free <port>` sends `SIGTERM` to the portless CLI `ProcessKey` rather than the descendant dev-server process.
 - The read-only Web UI is split across `crates/lazyadmin-runtime` (shared snapshot/event assembly) and `crates/lazyadmin-web` (loopback-only Axum server plus embedded static app). `lazyadmin web` refuses non-loopback binds in v1 and exposes only read-only API routes; use `--port 0 --no-open` for smoke tests.
+- The UX-overhaul shared projection layer starts in `crates/lazyadmin-runtime/src/view_model/` (`digest`, `doctor_groups`, `header_pip`, `inspector`). Keep new TUI/Web grouping and summary logic there instead of duplicating snapshot projections in each UI.
+- Warning actionability metadata lives in `lazyadmin_core::doctor::{WARNING_CODE_REGISTRY, classify}`. Add every newly emitted `Warning.code` there with an explicit `WarningTier`, label, and remediation; do not add tier/remediation fields to snapshot JSON.
 
 ## Development standards
 

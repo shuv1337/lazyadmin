@@ -1742,6 +1742,7 @@ name = "lazyadmin-runtime"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "futures",
  "lazyadmin-adapter-container",
  "lazyadmin-adapter-portless",
@@ -1750,6 +1751,7 @@ dependencies = [
  "lazyadmin-adapter-systemd",
  "lazyadmin-adapter-tracked",
  "lazyadmin-core",
+ "serde",
  "tokio",
  "tracing",
 ]
@@ -1767,6 +1769,7 @@ dependencies = [
  "fuzzy-matcher",
  "insta",
  "lazyadmin-core",
+ "lazyadmin-runtime",
  "open",
  "ratatui",
  "serde",

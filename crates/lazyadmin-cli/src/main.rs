@@ -75,7 +75,7 @@ enum Command {
     Conflicts,
     Projects,
     Logs(LogsArgs),
-    Doctor,
+    Doctor(DoctorArgs),
     Events(EventsArgs),
     Export,
     Diff(DiffArgs),
@@ -143,6 +143,16 @@ struct LogsArgs {
     tail: Option<usize>,
     #[arg(long)]
     follow: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorArgs {
+    #[arg(long)]
+    groups: bool,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    actionable: bool,
 }
 
 #[derive(Args, Debug)]
@@ -288,7 +298,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             run_view("projects", cli.json, cli.brief, cli.config.as_deref()).await
         }
         Some(Command::Logs(args)) => run_logs(args, cli.json).await,
-        Some(Command::Doctor) => run_doctor(cli.json, cli.config.as_deref()).await,
+        Some(Command::Doctor(args)) => run_doctor(args, cli.json, cli.config.as_deref()).await,
         Some(Command::Events(args)) => run_events(args, cli.json, cli.config.as_deref()).await,
         Some(Command::PauseRestart { selector }) => {
             run_pause_restart(&selector, cli.json, false).await
@@ -806,9 +816,22 @@ fn print_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), AppErro
 }
 
 async fn run_doctor(
+    args: DoctorArgs,
     json: bool,
     config_path: Option<&std::path::Path>,
 ) -> std::result::Result<(), AppError> {
+    if args.groups {
+        let snapshot = lazyadmin_runtime::build_snapshot(config_path)
+            .await
+            .map_err(|e| AppError::Other(eyre!(e)))?;
+        let groups = lazyadmin_runtime::view_model::build_doctor_groups(&snapshot);
+        if json {
+            print_json(&groups)?;
+        } else {
+            render_doctor_groups(&groups, args.all, args.actionable);
+        }
+        return Ok(());
+    }
     let cfg = Config::load(config_path).map_err(|e| AppError::Other(eyre!(e)))?;
     let report = build_doctor_report(cfg, None).await;
     if json {
@@ -1311,6 +1334,38 @@ fn render_doctor(report: &DoctorReport) {
                         .unwrap_or_else(|| "never".into())
                 );
             }
+        }
+    }
+}
+
+fn render_doctor_groups(
+    view: &lazyadmin_runtime::view_model::DoctorGroupsView,
+    show_all: bool,
+    actionable_only: bool,
+) {
+    println!(
+        "doctor: {} actionable warning(s), {} noise group(s), {} noise warning(s)",
+        view.actionable_count, view.noise_group_count, view.noise_total_count
+    );
+    if view.groups.is_empty() {
+        println!("Everything's clean — no actionable warnings.");
+        return;
+    }
+    for group in &view.groups {
+        let is_noise = matches!(group.tier, lazyadmin_core::doctor::WarningTier::Noise);
+        if actionable_only && is_noise {
+            continue;
+        }
+        println!(
+            "  [{:?}] {:?} {} ×{} — {}",
+            group.tier, group.severity, group.label, group.count, group.remediation
+        );
+        if show_all || group.expanded {
+            for entity in &group.sample_entities {
+                println!("    sample: {entity:?}");
+            }
+        } else if is_noise {
+            println!("    collapsed noise; pass --all to show samples");
         }
     }
 }
@@ -2010,6 +2065,20 @@ mod tests {
                 .state,
             "disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_json_contract_stays_flat_without_group_fields() {
+        let report = build_doctor_report(Config::default(), None).await;
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("checks").is_some());
+        assert!(json.get("groups").is_none());
+        assert!(json.get("actionable_count").is_none());
+
+        let snapshot = lazyadmin_core::snapshot::build_empty_snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert!(json.get("warnings").is_some());
+        assert!(json.get("doctor_groups").is_none());
     }
 
     #[tokio::test]

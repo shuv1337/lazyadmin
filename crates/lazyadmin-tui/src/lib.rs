@@ -18,10 +18,12 @@ use crossterm::{
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::{
     config::keybindings::{KeybindAction, ResolvedKeybindings},
-    model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot},
+    doctor::WarningTier,
+    model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot, WarningSeverity},
     output::listener_rows,
     snapshot::build_empty_snapshot,
 };
+use lazyadmin_runtime::view_model::build_doctor_groups;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -73,12 +75,48 @@ pub struct App {
     pub theme: Theme,
     pub keybindings: ResolvedKeybindings,
     pub status: Option<String>,
+    pub toasts: VecDeque<Toast>,
     pub allow_open_non_loopback: bool,
     selected_row: usize,
     selected_process: Option<ProcessKey>,
     collapsed_processes: HashSet<ProcessKey>,
+    doctor_toggled_groups: HashSet<String>,
+    doctor_severity_filter: DoctorSeverityFilter,
     event_ring: AdapterEventRing,
     config_reload: Option<ConfigReload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatusChannel {
+    HeaderPip,
+    Toast { ttl: Duration },
+    ModalHint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+    pub message: String,
+    pub ttl: Duration,
+    pub created_at: Option<Instant>,
+}
+
+impl App {
+    pub fn push_status(&mut self, channel: StatusChannel, message: impl Into<String>) {
+        let message = message.into();
+        match channel {
+            StatusChannel::Toast { ttl } => {
+                self.status = Some(message.clone());
+                self.toasts.push_back(Toast {
+                    message,
+                    ttl,
+                    created_at: None,
+                });
+            }
+            StatusChannel::HeaderPip | StatusChannel::ModalHint => {
+                self.status = Some(message);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for App {
@@ -117,10 +155,13 @@ impl Default for App {
                     .collect(),
             },
             status: None,
+            toasts: VecDeque::new(),
             allow_open_non_loopback: false,
             selected_row: 0,
             selected_process: None,
             collapsed_processes: HashSet::new(),
+            doctor_toggled_groups: HashSet::new(),
+            doctor_severity_filter: DoctorSeverityFilter::All,
             event_ring: AdapterEventRing::default(),
             config_reload: None,
         }
@@ -237,6 +278,16 @@ pub struct Theme {
     pub error: ColorSpec,
     pub selection: ColorSpec,
     pub footer: ColorSpec,
+    pub risk_public: ColorSpec,
+    pub risk_lan: ColorSpec,
+    pub risk_loopback: ColorSpec,
+    pub marker_conflict: ColorSpec,
+    pub marker_tracked: ColorSpec,
+    pub marker_project: ColorSpec,
+    pub system_noise: ColorSpec,
+    pub pip_ok: ColorSpec,
+    pub pip_warn: ColorSpec,
+    pub pip_error: ColorSpec,
     pub fallback_palette: PaletteMode,
 }
 
@@ -253,6 +304,16 @@ struct ThemeFile {
     error: Option<ColorSpec>,
     selection: Option<ColorSpec>,
     footer: Option<ColorSpec>,
+    risk_public: Option<ColorSpec>,
+    risk_lan: Option<ColorSpec>,
+    risk_loopback: Option<ColorSpec>,
+    marker_conflict: Option<ColorSpec>,
+    marker_tracked: Option<ColorSpec>,
+    marker_project: Option<ColorSpec>,
+    system_noise: Option<ColorSpec>,
+    pip_ok: Option<ColorSpec>,
+    pip_warn: Option<ColorSpec>,
+    pip_error: Option<ColorSpec>,
     fallback_palette: Option<PaletteMode>,
 }
 
@@ -336,6 +397,16 @@ impl Theme {
             error: ColorSpec("#ef5350".into()),
             selection: ColorSpec("#1d3b53".into()),
             footer: ColorSpec("#637777".into()),
+            risk_public: ColorSpec("#ef5350".into()),
+            risk_lan: ColorSpec("#f78c6c".into()),
+            risk_loopback: ColorSpec("#addb67".into()),
+            marker_conflict: ColorSpec("#ef5350".into()),
+            marker_tracked: ColorSpec("#82aaff".into()),
+            marker_project: ColorSpec("#ecc48d".into()),
+            system_noise: ColorSpec("#637777".into()),
+            pip_ok: ColorSpec("#addb67".into()),
+            pip_warn: ColorSpec("#f78c6c".into()),
+            pip_error: ColorSpec("#ef5350".into()),
             fallback_palette: PaletteMode::Truecolor,
         };
         match name {
@@ -356,6 +427,16 @@ impl Theme {
                 t.error = ColorSpec("#de3d3b".into());
                 t.selection = ColorSpec("#d3e8f8".into());
                 t.footer = ColorSpec("#90a7b2".into());
+                t.risk_public = ColorSpec("#de3d3b".into());
+                t.risk_lan = ColorSpec("#bc5454".into());
+                t.risk_loopback = ColorSpec("#2aa298".into());
+                t.marker_conflict = ColorSpec("#de3d3b".into());
+                t.marker_tracked = ColorSpec("#288ed7".into());
+                t.marker_project = ColorSpec("#daaa01".into());
+                t.system_noise = ColorSpec("#90a7b2".into());
+                t.pip_ok = ColorSpec("#2aa298".into());
+                t.pip_warn = ColorSpec("#bc5454".into());
+                t.pip_error = ColorSpec("#de3d3b".into());
                 Some(t)
             }
             "high-contrast" => {
@@ -435,6 +516,36 @@ impl Theme {
         if let Some(value) = file.footer {
             theme.footer = value;
         }
+        if let Some(value) = file.risk_public {
+            theme.risk_public = value;
+        }
+        if let Some(value) = file.risk_lan {
+            theme.risk_lan = value;
+        }
+        if let Some(value) = file.risk_loopback {
+            theme.risk_loopback = value;
+        }
+        if let Some(value) = file.marker_conflict {
+            theme.marker_conflict = value;
+        }
+        if let Some(value) = file.marker_tracked {
+            theme.marker_tracked = value;
+        }
+        if let Some(value) = file.marker_project {
+            theme.marker_project = value;
+        }
+        if let Some(value) = file.system_noise {
+            theme.system_noise = value;
+        }
+        if let Some(value) = file.pip_ok {
+            theme.pip_ok = value;
+        }
+        if let Some(value) = file.pip_warn {
+            theme.pip_warn = value;
+        }
+        if let Some(value) = file.pip_error {
+            theme.pip_error = value;
+        }
         if let Some(value) = file.fallback_palette {
             theme.fallback_palette = value;
         }
@@ -453,6 +564,16 @@ impl Theme {
             &self.error,
             &self.selection,
             &self.footer,
+            &self.risk_public,
+            &self.risk_lan,
+            &self.risk_loopback,
+            &self.marker_conflict,
+            &self.marker_tracked,
+            &self.marker_project,
+            &self.system_noise,
+            &self.pip_ok,
+            &self.pip_warn,
+            &self.pip_error,
         ] {
             ColorSpec::parse(&c.0).map_err(anyhow::Error::msg)?;
         }
@@ -705,12 +826,45 @@ pub struct SummaryRowVm {
     pub details: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoctorSeverityFilter {
+    #[default]
+    All,
+    Critical,
+    Warning,
+    Info,
+}
+
+impl DoctorSeverityFilter {
+    fn matches(self, severity: &WarningSeverity) -> bool {
+        match self {
+            DoctorSeverityFilter::All => true,
+            DoctorSeverityFilter::Critical => matches!(severity, WarningSeverity::Error),
+            DoctorSeverityFilter::Warning => matches!(severity, WarningSeverity::Warning),
+            DoctorSeverityFilter::Info => matches!(severity, WarningSeverity::Info),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            DoctorSeverityFilter::All => "All",
+            DoctorSeverityFilter::Critical => "Critical",
+            DoctorSeverityFilter::Warning => "Warning",
+            DoctorSeverityFilter::Info => "Info",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorVm {
     pub rows: Vec<DoctorRowVm>,
     pub error_count: usize,
     pub warning_count: usize,
     pub info_count: usize,
+    pub actionable_count: usize,
+    pub noise_group_count: usize,
+    pub noise_total_count: usize,
+    pub severity_filter: DoctorSeverityFilter,
 }
 
 /// Severity classification for a Doctor row, kept in lock-step with
@@ -760,6 +914,16 @@ pub struct DoctorRowVm {
     pub entity: String,
     pub details: String,
     pub suggested_action: String,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub is_group: bool,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorVm {
@@ -896,9 +1060,12 @@ pub fn build_view_model(
         None,
         &HashSet::new(),
         None,
+        &HashSet::new(),
+        DoctorSeverityFilter::All,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_view_model_with_state(
     snapshot: &Snapshot,
     width: u16,
@@ -907,6 +1074,8 @@ pub fn build_view_model_with_state(
     selected_process: Option<ProcessKey>,
     collapsed_processes: &HashSet<ProcessKey>,
     adapter_metrics: Option<Vec<AdapterMetricVm>>,
+    doctor_toggled_groups: &HashSet<String>,
+    doctor_severity_filter: DoctorSeverityFilter,
 ) -> ViewModel {
     let layout = match width {
         100..=u16::MAX => LayoutMode::ThreePane,
@@ -996,7 +1165,8 @@ pub fn build_view_model_with_state(
     let mut orphans = build_orphan_rows(snapshot);
     let mut projects = build_project_rows(snapshot);
     let mut tracked_runs = build_tracked_run_rows(snapshot);
-    let mut doctor = build_doctor_vm(snapshot);
+    let mut doctor =
+        build_doctor_vm_with_state(snapshot, doctor_toggled_groups, doctor_severity_filter);
     if !filter.is_empty() {
         let m = SkimMatcherV2::default();
         conflicts.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
@@ -1183,29 +1353,98 @@ fn build_tracked_run_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
         .collect()
 }
 
-fn build_doctor_vm(snapshot: &Snapshot) -> DoctorVm {
-    let mut vm = DoctorVm::default();
-    for warning in &snapshot.warnings {
-        let severity_kind = DoctorSeverity::from(&warning.severity);
+fn build_doctor_vm_with_state(
+    snapshot: &Snapshot,
+    toggled_groups: &HashSet<String>,
+    severity_filter: DoctorSeverityFilter,
+) -> DoctorVm {
+    let grouped = build_doctor_groups(snapshot);
+    let mut vm = DoctorVm {
+        actionable_count: grouped.actionable_count,
+        noise_group_count: grouped.noise_group_count,
+        noise_total_count: grouped.noise_total_count,
+        severity_filter,
+        ..DoctorVm::default()
+    };
+    for group in grouped.groups {
+        let severity_kind = DoctorSeverity::from(&group.severity);
         match severity_kind {
-            DoctorSeverity::Error => vm.error_count += 1,
-            DoctorSeverity::Warning => vm.warning_count += 1,
-            DoctorSeverity::Info => vm.info_count += 1,
+            DoctorSeverity::Error => vm.error_count += group.count,
+            DoctorSeverity::Warning => vm.warning_count += group.count,
+            DoctorSeverity::Info => vm.info_count += group.count,
         }
+        if !severity_filter.matches(&group.severity) {
+            continue;
+        }
+        let key = doctor_group_key(&group.code, &group.severity);
+        let expanded = group.expanded ^ toggled_groups.contains(&key);
+        let sample = group
+            .sample_entities
+            .first()
+            .map(|entity| format_entity_ref(entity, snapshot))
+            .unwrap_or_else(|| "snapshot".into());
+        let tier = warning_tier_label(group.tier).to_string();
+        let suggested_action = if !expanded && matches!(group.tier, WarningTier::Noise) {
+            format!(
+                "{}; collapsed noise, press Enter to expand",
+                group.remediation
+            )
+        } else {
+            group.remediation.clone()
+        };
         vm.rows.push(DoctorRowVm {
             severity: severity_kind.label().to_string(),
             severity_kind,
-            check: warning.code.clone(),
-            entity: warning
-                .entity
-                .as_ref()
-                .map(|entity| format_entity_ref(entity, snapshot))
-                .unwrap_or_else(|| "snapshot".into()),
-            details: warning.message.clone(),
-            suggested_action: suggested_action_for_warning(&warning.code),
+            check: group.label.clone(),
+            entity: sample,
+            details: group.code.clone(),
+            suggested_action,
+            count: group.count,
+            tier: tier.clone(),
+            expanded,
+            code: group.code.clone(),
+            is_group: true,
         });
+        if expanded {
+            for warning in snapshot
+                .warnings
+                .iter()
+                .filter(|warning| warning.code == group.code && warning.severity == group.severity)
+            {
+                let entity = warning
+                    .entity
+                    .as_ref()
+                    .map(|entity| format_entity_ref(entity, snapshot))
+                    .unwrap_or_else(|| "snapshot".into());
+                vm.rows.push(DoctorRowVm {
+                    severity: severity_kind.label().to_string(),
+                    severity_kind,
+                    check: format!("↳ {entity}"),
+                    entity,
+                    details: warning.message.clone(),
+                    suggested_action: group.remediation.clone(),
+                    count: 0,
+                    tier: tier.clone(),
+                    expanded: false,
+                    code: group.code.clone(),
+                    is_group: false,
+                });
+            }
+        }
     }
     vm
+}
+
+fn doctor_group_key(code: &str, severity: &WarningSeverity) -> String {
+    format!("{code}:{severity:?}")
+}
+
+fn warning_tier_label(tier: WarningTier) -> &'static str {
+    match tier {
+        WarningTier::Critical => "critical",
+        WarningTier::Actionable => "actionable",
+        WarningTier::Noise => "noise",
+    }
 }
 
 /// Render an `EntityRef` as a short, human-readable label by resolving it
@@ -1261,21 +1500,6 @@ fn format_entity_ref(entity: &EntityRef, snapshot: &Snapshot) -> String {
         EntityRef::Action(id) => format!("action {}", short_id(&id.to_string())),
     };
     compact_text(&label, 32)
-}
-
-fn suggested_action_for_warning(code: &str) -> String {
-    let code = code.to_ascii_lowercase();
-    if code.contains("public") {
-        "bind to loopback or confirm exposure".into()
-    } else if code.contains("conflict") {
-        "inspect duplicate owners/listeners".into()
-    } else if code.contains("orphan") {
-        "prune stale route or restart manager".into()
-    } else if code.contains("degraded") {
-        "check adapter permissions and refresh".into()
-    } else {
-        "inspect details and source provenance".into()
-    }
 }
 
 pub fn build_process_tree(snapshot: &Snapshot, selected: Option<ProcessKey>) -> ProcessTreeVm {
@@ -1552,6 +1776,20 @@ fn compact_text(value: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(1);
     format!("{}…", value.chars().take(keep).collect::<String>())
+}
+
+fn compact_words(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let prefix: String = value.chars().take(keep).collect();
+    let trimmed = prefix
+        .rfind(char::is_whitespace)
+        .map(|idx| prefix[..idx].trim_end().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(prefix);
+    format!("{trimmed}…")
 }
 fn inspector_for_row(row: &RowVm) -> InspectorVm {
     InspectorVm {
@@ -2225,7 +2463,9 @@ fn render_main_pane(
         ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme, active),
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
         ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
-        ViewKind::Doctor => render_doctor_view(view_model, frame, area, theme, active),
+        ViewKind::Doctor => {
+            render_doctor_view(view_model, frame, area, theme, active, ctx.selected_row)
+        }
         ViewKind::Conflicts => render_summary_table(
             &view_model.conflicts,
             "Conflicts",
@@ -2568,17 +2808,18 @@ fn render_doctor_view(
     area: Rect,
     theme: &Theme,
     active: bool,
+    selected_row: usize,
 ) {
     let title = format!(
-        "Doctor — {} error(s), {} warning(s), {} info",
-        view_model.doctor.error_count,
-        view_model.doctor.warning_count,
-        view_model.doctor.info_count
+        "Doctor — {} actionable, {} noise group(s)   [{}] Critical Warning Info All",
+        view_model.doctor.actionable_count,
+        view_model.doctor.noise_group_count,
+        view_model.doctor.severity_filter.label()
     );
     if view_model.doctor.rows.is_empty() {
         render_empty_state(
             &title,
-            "No health warnings detected.",
+            "Everything's clean — no actionable warnings.",
             frame,
             area,
             theme,
@@ -2588,20 +2829,21 @@ fn render_doctor_view(
     }
     let rows = view_model.doctor.rows.iter().map(|row| {
         let severity_color = match row.severity_kind {
-            DoctorSeverity::Error => theme.error.color(),
-            DoctorSeverity::Warning => theme.warning.color(),
-            DoctorSeverity::Info => theme.info.color(),
+            DoctorSeverity::Error => theme.pip_error.color(),
+            DoctorSeverity::Warning => theme.pip_warn.color(),
+            DoctorSeverity::Info => theme.footer.color(),
         };
+        let glyph = if row.tier == "noise" { "·" } else { "⚠" };
         Row::new(vec![
             Cell::from(Span::styled(
-                row.severity_kind.label().to_string(),
+                format!("{glyph} {}", row.severity_kind.label()),
                 Style::default()
                     .fg(severity_color)
                     .bg(theme.base_bg.color())
                     .add_modifier(Modifier::BOLD),
             )),
             Cell::from(Span::styled(
-                compact_text(&row.check, 18),
+                compact_words(&row.check, 28),
                 Style::default()
                     .fg(theme.accent.color())
                     .bg(theme.base_bg.color()),
@@ -2613,13 +2855,20 @@ fn render_doctor_view(
                     .bg(theme.base_bg.color()),
             )),
             Cell::from(Span::styled(
-                compact_text(&row.details, 36),
+                compact_words(&row.details, 30),
                 Style::default()
                     .fg(theme.base_fg.color())
                     .bg(theme.base_bg.color()),
             )),
             Cell::from(Span::styled(
-                compact_text(&row.suggested_action, 36),
+                compact_words(
+                    &if row.is_group {
+                        format!("{}  ×{}", row.suggested_action, row.count)
+                    } else {
+                        row.suggested_action.clone()
+                    },
+                    44,
+                ),
                 Style::default()
                     .fg(theme.info.color())
                     .bg(theme.base_bg.color()),
@@ -2630,15 +2879,15 @@ fn render_doctor_view(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(9),
-            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(28),
             Constraint::Length(22),
-            Constraint::Min(24),
-            Constraint::Length(30),
+            Constraint::Min(18),
+            Constraint::Length(44),
         ],
     )
     .header(
-        Row::new(["Severity", "Check", "Entity", "Details", "Suggested action"]).style(
+        Row::new(["Severity", "Group", "Sample", "Code", "What to do"]).style(
             Style::default()
                 .fg(theme.accent.color())
                 .bg(theme.base_bg.color())
@@ -2646,8 +2895,20 @@ fn render_doctor_view(
         ),
     )
     .block(panel_block(title, theme, active))
-    .style(Style::default().bg(theme.base_bg.color()));
-    frame.render_widget(table, area);
+    .style(Style::default().bg(theme.base_bg.color()))
+    .row_highlight_style(
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.selection.color())
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = TableState::default();
+    if !view_model.doctor.rows.is_empty() {
+        state.select(Some(
+            selected_row.min(view_model.doctor.rows.len().saturating_sub(1)),
+        ));
+    }
+    frame.render_stateful_widget(table, area, &mut state);
 }
 fn render_process_tree(
     view_model: &ViewModel,
@@ -3061,6 +3322,8 @@ fn rebuild_view_model(app: &mut App, width: u16) {
         app.selected_process.clone(),
         &app.collapsed_processes,
         Some(app.event_ring.metrics(Instant::now())),
+        &app.doctor_toggled_groups,
+        app.doctor_severity_filter,
     );
     sync_row_selection(app);
 }
@@ -3089,6 +3352,24 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
 }
 
 fn sync_row_selection(app: &mut App) {
+    if app.active_view == ViewKind::Doctor {
+        if app.vm.doctor.rows.is_empty() {
+            app.selected_row = 0;
+            app.vm.inspector = InspectorVm {
+                title: "No warning group".into(),
+                lines: vec!["Everything's clean — no actionable warnings.".into()],
+                provenance: vec![],
+                provenance_expanded: false,
+                diagnostic_markdown: "# lazyadmin doctor\nNo warning group\n".into(),
+            };
+            return;
+        }
+        app.selected_row = app
+            .selected_row
+            .min(app.vm.doctor.rows.len().saturating_sub(1));
+        app.vm.inspector = inspector_for_doctor_row(&app.vm.doctor.rows[app.selected_row]);
+        return;
+    }
     let visible = visible_row_indices(app);
     if visible.is_empty() {
         app.selected_row = 0;
@@ -3117,7 +3398,11 @@ fn sync_row_selection(app: &mut App) {
 }
 
 fn scroll_rows(app: &mut App, delta: isize) {
-    let visible_len = visible_row_indices(app).len();
+    let visible_len = if app.active_view == ViewKind::Doctor {
+        app.vm.doctor.rows.len()
+    } else {
+        visible_row_indices(app).len()
+    };
     if visible_len == 0 {
         app.selected_row = 0;
         sync_row_selection(app);
@@ -3127,6 +3412,31 @@ fn scroll_rows(app: &mut App, delta: isize) {
     app.selected_row = (app.selected_row as isize + delta).clamp(0, max) as usize;
     app.selected_process = None;
     sync_row_selection(app);
+}
+
+fn inspector_for_doctor_row(row: &DoctorRowVm) -> InspectorVm {
+    let title = if row.is_group {
+        format!("Warning group {}", row.code)
+    } else {
+        format!("Warning detail {}", row.code)
+    };
+    InspectorVm {
+        title: title.clone(),
+        lines: vec![
+            format!("Tier: {}", row.tier),
+            format!("Severity: {}", row.severity),
+            format!("Code: {}", row.code),
+            format!("Count: {}", row.count.max(1)),
+            format!("Sample: {}", row.entity),
+            format!("Action: {}", row.suggested_action),
+        ],
+        provenance: vec!["doctor_groups view-model".into()],
+        provenance_expanded: false,
+        diagnostic_markdown: format!(
+            "# {title}\n\n- code: {}\n- action: {}\n",
+            row.code, row.suggested_action
+        ),
+    }
 }
 
 fn selected_row(app: &App) -> Option<&RowVm> {
@@ -3385,6 +3695,31 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
         }
         _ => {}
     }
+    if app.active_view == ViewKind::Doctor {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                app.doctor_severity_filter = DoctorSeverityFilter::All;
+                rebuild_view_model(app, width);
+                return;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                app.doctor_severity_filter = DoctorSeverityFilter::Critical;
+                rebuild_view_model(app, width);
+                return;
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                app.doctor_severity_filter = DoctorSeverityFilter::Warning;
+                rebuild_view_model(app, width);
+                return;
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') => {
+                app.doctor_severity_filter = DoctorSeverityFilter::Info;
+                rebuild_view_model(app, width);
+                return;
+            }
+            _ => {}
+        }
+    }
     if let Some(cmd) = key_to_command_with_bindings(key, &app.keybindings) {
         match cmd {
             Command::Quit => app.should_quit = true,
@@ -3398,6 +3733,9 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 app.mode = InputMode::Palette;
             }
             Command::Refresh => rebuild_view_model(app, width),
+            Command::Inspect if app.active_view == ViewKind::Doctor => {
+                toggle_selected_doctor_group(app, width);
+            }
             Command::NextPane => cycle_pane(app, 1, width),
             Command::PrevPane => cycle_pane(app, -1, width),
             Command::Tree => {
@@ -3470,6 +3808,26 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             _ => CommandDispatcher::execute(&cmd),
         }
     }
+}
+
+fn toggle_selected_doctor_group(app: &mut App, width: u16) {
+    let Some(row) = app.vm.doctor.rows.get(app.selected_row) else {
+        return;
+    };
+    if !row.is_group {
+        app.status = Some("select a warning group row to expand or collapse".into());
+        return;
+    }
+    let severity = match row.severity_kind {
+        DoctorSeverity::Error => WarningSeverity::Error,
+        DoctorSeverity::Warning => WarningSeverity::Warning,
+        DoctorSeverity::Info => WarningSeverity::Info,
+    };
+    let key = doctor_group_key(&row.code, &severity);
+    if !app.doctor_toggled_groups.insert(key.clone()) {
+        app.doctor_toggled_groups.remove(&key);
+    }
+    rebuild_view_model(app, width);
 }
 
 fn toggle_selected_process(app: &mut App) {
@@ -4111,11 +4469,12 @@ mod tests {
         });
         let vm = build_view_model(&snap, 120, false, "");
         assert_eq!(vm.doctor.rows[0].check, "DEGRADED_PROCFS");
-        assert_eq!(vm.doctor.rows[0].details, "permission denied");
+        assert_eq!(vm.doctor.rows[0].details, "DEGRADED_PROCFS");
+        assert_eq!(vm.doctor.rows[0].count, 1);
         assert!(
             vm.doctor.rows[0]
                 .suggested_action
-                .contains("check adapter permissions")
+                .contains("inspect details")
         );
         let backend = TestBackend::new(120, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4136,7 +4495,7 @@ mod tests {
             })
             .unwrap();
         let text = format!("{:?}", terminal.backend().buffer());
-        assert!(text.contains("1 error"));
+        assert!(text.contains("1 actionable"));
         assert!(text.contains("Doctor"));
         assert!(!text.contains("PUBLICPUBLIC"));
     }
@@ -4146,6 +4505,152 @@ mod tests {
     /// a `Listener(...)` reference becomes `listener bind:port`, a
     /// `Process(...)` becomes `pid <n> <command>`, etc. — actionable info, not
     /// `Listener(ListenerId("abc"))`.
+    #[test]
+    fn doctor_grouping_collapsed_by_default_for_noise() {
+        let mut snap = build_empty_snapshot();
+        for _ in 0..2 {
+            snap.warnings.push(lazyadmin_core::model::Warning {
+                severity: WarningSeverity::Warning,
+                code: "fd_permission_denied".into(),
+                message: "permission denied reading file descriptor".into(),
+                entity: None,
+                provenance: vec![],
+            });
+        }
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(vm.doctor.rows.len(), 1);
+        assert!(vm.doctor.rows[0].is_group);
+        assert!(!vm.doctor.rows[0].expanded);
+        assert!(
+            vm.doctor.rows[0]
+                .suggested_action
+                .contains("collapsed noise")
+        );
+    }
+
+    #[test]
+    fn doctor_grouping_expand_renders_individual_rows() {
+        let mut snap = build_empty_snapshot();
+        for _ in 0..2 {
+            snap.warnings.push(lazyadmin_core::model::Warning {
+                severity: WarningSeverity::Warning,
+                code: "fd_permission_denied".into(),
+                message: "permission denied reading file descriptor".into(),
+                entity: None,
+                provenance: vec![],
+            });
+        }
+        let mut toggled = HashSet::new();
+        toggled.insert(doctor_group_key(
+            "fd_permission_denied",
+            &WarningSeverity::Warning,
+        ));
+        let vm = build_view_model_with_state(
+            &snap,
+            120,
+            false,
+            "",
+            None,
+            &HashSet::new(),
+            None,
+            &toggled,
+            DoctorSeverityFilter::All,
+        );
+        assert_eq!(vm.doctor.rows.len(), 3);
+        assert!(vm.doctor.rows[0].expanded);
+        assert!(!vm.doctor.rows[1].is_group);
+        assert!(vm.doctor.rows[1].check.starts_with('↳'));
+    }
+
+    #[test]
+    fn doctor_no_column_truncates_midword_at_160_cols() {
+        let mut snap = build_empty_snapshot();
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "PUBLIC".into(),
+            message: "permission denied reading file descriptor".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        let vm = build_view_model(&snap, 160, false, "");
+        let text = render_doctor_text(&vm, 160, 20);
+        assert!(!text.contains("permission denied readin"));
+        assert!(!text.contains("inspect details and sour"));
+    }
+
+    #[test]
+    fn doctor_affirmative_empty_state_present() {
+        let vm = build_view_model(&build_empty_snapshot(), 120, false, "");
+        let text = render_doctor_text(&vm, 120, 20);
+        assert!(text.contains("Everything's clean"));
+    }
+
+    #[test]
+    fn doctor_severity_filter_chip_changes_count() {
+        let mut snap = build_empty_snapshot();
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "PUBLIC".into(),
+            message: "public listener".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Info,
+            code: "possible_dual_stack".into(),
+            message: "possible dual stack".into(),
+            entity: None,
+            provenance: vec![],
+        });
+        let warning_vm = build_view_model_with_state(
+            &snap,
+            120,
+            false,
+            "",
+            None,
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            DoctorSeverityFilter::Warning,
+        );
+        let info_vm = build_view_model_with_state(
+            &snap,
+            120,
+            false,
+            "",
+            None,
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            DoctorSeverityFilter::Info,
+        );
+        assert_eq!(warning_vm.doctor.rows[0].details, "PUBLIC");
+        assert_eq!(info_vm.doctor.rows[0].details, "possible_dual_stack");
+        assert_ne!(warning_vm.doctor.rows.len(), info_vm.doctor.rows.len());
+    }
+
+    fn render_doctor_text(vm: &ViewModel, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Doctor,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                    },
+                )
+            })
+            .unwrap();
+        format!("{:?}", terminal.backend().buffer())
+    }
+
     #[test]
     fn doctor_entity_column_resolves_to_human_labels() {
         let mut snap = build_empty_snapshot();
@@ -4174,7 +4679,7 @@ mod tests {
             .doctor
             .rows
             .iter()
-            .find(|row| row.check == "PUBLIC")
+            .find(|row| row.details == "PUBLIC")
             .expect("PUBLIC row");
         assert!(
             listener_row.entity.contains("127.0.0.1:8443"),
@@ -4190,7 +4695,7 @@ mod tests {
             .doctor
             .rows
             .iter()
-            .find(|row| row.check == "ZOMBIE")
+            .find(|row| row.details == "ZOMBIE")
             .expect("ZOMBIE row");
         assert!(
             process_row.entity.contains("4242"),
@@ -4749,6 +5254,8 @@ mod tests {
             Some(selected.clone()),
             &collapsed,
             None,
+            &HashSet::new(),
+            DoctorSeverityFilter::All,
         );
         assert_eq!(vm.process_tree.selected, Some(selected));
         assert_eq!(vm.process_tree.rows.len(), 1);
@@ -4806,6 +5313,20 @@ mod tests {
             let mut theme = Theme::builtin(name).unwrap();
             theme.validate().unwrap();
             assert_eq!(theme.name, name);
+            for slot in [
+                &theme.risk_public,
+                &theme.risk_lan,
+                &theme.risk_loopback,
+                &theme.marker_conflict,
+                &theme.marker_tracked,
+                &theme.marker_project,
+                &theme.system_noise,
+                &theme.pip_ok,
+                &theme.pip_warn,
+                &theme.pip_error,
+            ] {
+                ColorSpec::parse(&slot.0).unwrap();
+            }
         }
         assert!(ColorSpec::parse("not-a-color").is_err());
         let (theme, hint) = Theme::builtin("solarized-dark")
@@ -4818,6 +5339,20 @@ mod tests {
     #[test]
     fn themes_validation_alias() {
         theme_builtins_validate_and_downgrade();
+    }
+
+    #[test]
+    fn status_channel_routes_to_toast_queue() {
+        let mut app = App::default();
+        app.push_status(
+            StatusChannel::Toast {
+                ttl: Duration::from_secs(2),
+            },
+            "diagnostic copied",
+        );
+        assert_eq!(app.status.as_deref(), Some("diagnostic copied"));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].ttl, Duration::from_secs(2));
     }
 
     #[test]

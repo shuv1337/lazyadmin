@@ -21,6 +21,7 @@ color-eyre.workspace = true
 crossterm = "0.29"
 fuzzy-matcher = "0.3"
 lazyadmin-core = { path = "../lazyadmin-core" }
+lazyadmin-runtime = { path = "../lazyadmin-runtime" }
 open = "5"
 ratatui = "0.29"
 serde.workspace = true

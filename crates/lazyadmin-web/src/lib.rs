@@ -280,10 +280,17 @@ async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
-    // Placeholder read-only doctor endpoint until the CLI doctor builder is moved into runtime.
     match state.snapshot().await {
-        Ok(s) => Json(serde_json::json!({"schema_version":"lazyadmin.doctor.v1","status":"ok","summary":{"warnings":s.warnings.len(),"events_dropped":s.metadata.as_ref().and_then(|m| m.events_dropped).unwrap_or(0)}})).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "SNAPSHOT_FAILED", e.to_string(), None),
+        Ok(snapshot) => Json(lazyadmin_runtime::view_model::build_doctor_groups(
+            &snapshot,
+        ))
+        .into_response(),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SNAPSHOT_FAILED",
+            e.to_string(),
+            None,
+        ),
     }
 }
 
