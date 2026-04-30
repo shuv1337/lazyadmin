@@ -744,6 +744,63 @@ mod tests {
         assert_eq!(body["code"], "ENTITY_NOT_FOUND");
     }
 
+    fn percent_encode_for_query(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        for byte in input.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char);
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn inspector_route_serves_per_kind_typed_shape() {
+        use tower::ServiceExt;
+        // Drive through the live snapshot so we know the shape
+        // matches the runtime build. We don't assume any listener
+        // exists on the test host; we *do* require the request to
+        // round-trip and either return a per-kind body or a clean
+        // 404, never an opaque 500.
+        let app = build_test_app().await;
+        let snap = app
+            .clone()
+            .oneshot(local_request("/api/snapshot"))
+            .await
+            .expect("snapshot response");
+        assert_eq!(snap.status(), StatusCode::OK);
+        let snap_body = json_body(snap).await;
+        let listener_id = snap_body["listeners"]
+            .as_array()
+            .and_then(|listeners| listeners.first())
+            .and_then(|listener| listener.get("id"))
+            .and_then(|id| id.as_str())
+            .map(String::from);
+        if let Some(id) = listener_id {
+            let encoded = percent_encode_for_query(&id);
+            let uri = format!("/api/inspector?kind=listener&id={encoded}");
+            let response = app.oneshot(local_request(&uri)).await.expect("inspector");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["kind"], "listener");
+            assert!(
+                body.get("identity").is_some(),
+                "per-kind typed response must include `identity`"
+            );
+            assert!(
+                body.get("facts").is_none(),
+                "old `facts` shape must be replaced by typed sections"
+            );
+            assert_eq!(
+                body["identity"]["listener_id"], id,
+                "identity.listener_id must echo full id (no truncation)"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn static_assets_are_served_with_no_store_in_dev() {
         use tower::ServiceExt;

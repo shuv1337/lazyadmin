@@ -682,6 +682,12 @@ async function openInspector(kind, id) {
     $$("#inspectorBody .copy-btn").forEach((btn) =>
       btn.addEventListener("click", () => navigator.clipboard?.writeText(btn.dataset.value || "")),
     );
+    $$("#inspectorBody [data-jump]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const target = JSON.parse(el.dataset.jump);
+        handleJumpTarget(target);
+      }),
+    );
   } catch (err) {
     title.textContent = "Inspector";
     body.innerHTML = `<div class="error-banner">Entity gone — refresh<br>${esc(err.message)}</div>`;
@@ -689,43 +695,346 @@ async function openInspector(kind, id) {
 }
 
 function renderInspectorView(view) {
-  // Per-entity-kind templated layout. NEVER a <pre>{JSON}</pre>.
-  const facts = (view.facts || [])
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`)
-    .join("");
-  const idValue = view.id ? JSON.stringify(view.id) : "";
-  const idChip = idValue
-    ? `<dt>id</dt><dd>${esc(typeof view.id === "string" ? view.id : idValue)} <button class="copy-btn" data-value="${esc(typeof view.id === "string" ? view.id : idValue)}">copy</button></dd>`
-    : "";
-  const actions = renderInspectorActions(view);
-  return `
-    <div class="insp-title">${esc(view.title || view.kind)}</div>
-    <dl class="fact-list">${idChip}${facts}</dl>
-    ${actions}
-    <div id="rawSlot"></div>
+  // Per-entity-kind templated layout driven by the typed sections
+  // emitted by `InspectorView::to_sections()` server-side. NEVER a
+  // <pre>{JSON}</pre>; raw view is debug-only and lives in #rawSlot.
+  const sections = inspectorSections(view);
+  const titleId = pickIdString(view);
+  const titleRow = `
+    <div class="insp-title">${esc(view.title || humanKind(view.kind))}</div>
+    ${titleId ? `<div class="insp-id mono">${esc(titleId)} <button class="copy-btn" data-value="${esc(titleId)}">copy</button></div>` : ""}
   `;
+  const sectionsHtml = sections.map(renderSection).join("");
+  return `${titleRow}${sectionsHtml}<div id="rawSlot"></div>`;
 }
 
-function renderInspectorActions(view) {
-  // Read-only Web UI: actions show the command they WOULD run.
-  const commands = {
-    listener: ["lazyadmin free <port>", "lazyadmin pause <listener>"],
-    workload: ["lazyadmin restart <workload>", "lazyadmin pause <workload>"],
-    process: ["kill <pid>", "lazyadmin logs <pid>"],
-    project: [],
-    manager: [],
-    tracked_run: ["lazyadmin logs --run <id>"],
-    warning_group: [],
-  };
-  const list = commands[view.kind] || [];
-  if (!list.length) return "";
-  return `<div class="actions-block">
-    <h3>Actions (preview)</h3>
-    ${list.map((cmd) => `<div class="action-stub">
-      <code>${esc(cmd)}</code>
-      <button disabled title="Web UI is read-only — run this in the TUI or on the CLI">disabled</button>
-    </div>`).join("")}
-  </div>`;
+function inspectorSections(view) {
+  // Mirror of `InspectorView::to_sections()` over the JSON shape
+  // returned by `/api/inspector`. The server sends typed fields per
+  // variant; this function flattens them to the same { heading,
+  // rows: [{label, value, secondary?, jump_target?}] } shape the
+  // server uses internally.
+  switch (view.kind) {
+    case "listener": return listenerSections(view);
+    case "workload": return workloadSections(view);
+    case "process": return processSections(view);
+    case "project": return projectSections(view);
+    case "manager": return managerSections(view);
+    case "tracked_run": return trackedRunSections(view);
+    case "warning_group": return warningGroupSections(view);
+    default: return [];
+  }
+}
+
+function renderSection(section) {
+  const rows = section.rows.map((r) => {
+    const jumpAttr = r.jump_target
+      ? ` data-jump='${esc(JSON.stringify(r.jump_target))}'`
+      : "";
+    const secondary = r.secondary ? `<div class="secondary">${esc(r.secondary)}</div>` : "";
+    const cls = r.jump_target ? "insp-row jump" : "insp-row";
+    return `<div class="${cls}"${jumpAttr}>
+      <div class="label">${esc(r.label)}</div>
+      <div class="value mono">${esc(r.value)}${secondary}</div>
+    </div>`;
+  }).join("");
+  return `<section class="insp-section">
+    <h3>${esc(section.heading)}</h3>
+    <div class="insp-rows">${rows}</div>
+  </section>`;
+}
+
+function listenerSections(v) {
+  const out = [];
+  out.push({ heading: "IDENTITY", rows: [
+    row("listener id", v.identity.listener_id),
+    row("bind", v.identity.bind),
+    row("protocol", String(v.identity.protocol)),
+    row("family", String(v.identity.family)),
+    row("exposure", String(v.identity.exposure)),
+    row("state", String(v.identity.state)),
+    row("netns", v.identity.netns),
+    row("owner", v.identity.owner_label),
+    ...(v.identity.user ? [row("user", v.identity.user)] : []),
+  ]});
+  if (v.process) out.push({ heading: "PROCESS", rows: processFragmentRows(v.process) });
+  if (v.related_listeners?.length) out.push({
+    heading: "RELATED",
+    rows: v.related_listeners.map((r) => ({
+      label: String(r.exposure),
+      value: `${r.bind} (${r.listener_id})`,
+      jump_target: { kind: "listener", id: r.listener_id },
+    })),
+  });
+  if (v.project) out.push({ heading: "PROJECT", rows: [
+    { label: "name", value: v.project.name, jump_target: { kind: "project", id: v.project.project_id } },
+    row("root", v.project.root),
+  ]});
+  out.push({ heading: "CONFIDENCE", rows: confidenceRows(v.confidence) });
+  if (v.actions?.length) out.push({ heading: "ACTIONS", rows: actionRows(v.actions) });
+  if (v.warnings?.length) out.push({ heading: "WARNINGS", rows: warningRows(v.warnings) });
+  return out;
+}
+
+function workloadSections(v) {
+  const out = [];
+  const id = v.identity;
+  const idRows = [
+    row("workload id", id.workload_id),
+    row("display name", id.display_name),
+    row("runtime", String(id.runtime)),
+    row("state", String(id.state)),
+    ...(id.health ? [row("health", id.health)] : []),
+    ...(id.restart_policy ? [row("restart policy", id.restart_policy)] : []),
+  ];
+  out.push({ heading: "IDENTITY", rows: idRows });
+  if (v.child_processes?.length) {
+    const rows = v.child_processes.slice(0, 10).map((p) => ({
+      label: `pid ${p.pid}`,
+      value: p.cmdline_full,
+      jump_target: { kind: "process", id: JSON.stringify(p.key) },
+    }));
+    if (v.child_processes.length > 10) rows.push(row("more", `+${v.child_processes.length - 10} children`));
+    out.push({ heading: "PROCESS", rows });
+  }
+  if (v.listeners?.length) out.push({
+    heading: "RELATED",
+    rows: v.listeners.map((r) => ({
+      label: String(r.exposure),
+      value: `${r.bind} (${r.listener_id})`,
+      jump_target: { kind: "listener", id: r.listener_id },
+    })),
+  });
+  if (v.project) out.push({ heading: "PROJECT", rows: [
+    { label: "name", value: v.project.name, jump_target: { kind: "project", id: v.project.project_id } },
+    row("root", v.project.root),
+  ]});
+  if (v.manager) out.push({ heading: "MANAGER", rows: [
+    { label: "name", value: v.manager.name, jump_target: { kind: "manager", id: v.manager.manager_id } },
+    row("kind", String(v.manager.kind)),
+  ]});
+  out.push({ heading: "CONFIDENCE", rows: confidenceRows(v.confidence) });
+  if (v.actions?.length) out.push({ heading: "ACTIONS", rows: actionRows(v.actions) });
+  if (v.warnings?.length) out.push({ heading: "WARNINGS", rows: warningRows(v.warnings) });
+  return out;
+}
+
+function processSections(v) {
+  const out = [];
+  out.push({ heading: "IDENTITY", rows: processFragmentRows(v.identity) });
+  if (v.listeners?.length) out.push({
+    heading: "RELATED",
+    rows: v.listeners.map((r) => ({
+      label: String(r.exposure),
+      value: `${r.bind} (${r.listener_id})`,
+      jump_target: { kind: "listener", id: r.listener_id },
+    })),
+  });
+  if (v.workload) out.push({ heading: "WORKLOAD", rows: [
+    { label: "name", value: v.workload.display_name, jump_target: { kind: "workload", id: v.workload.workload_id } },
+    row("runtime", String(v.workload.runtime)),
+  ]});
+  if (v.tracked_run) out.push({ heading: "TRACKED RUN", rows: [
+    { label: "run id", value: v.tracked_run.run_id, jump_target: { kind: "tracked_run", id: v.tracked_run.run_id } },
+    ...(v.tracked_run.tag ? [row("tag", v.tracked_run.tag)] : []),
+  ]});
+  out.push({ heading: "CONFIDENCE", rows: confidenceRows(v.confidence) });
+  if (v.actions?.length) out.push({ heading: "ACTIONS", rows: actionRows(v.actions) });
+  if (v.warnings?.length) out.push({ heading: "WARNINGS", rows: warningRows(v.warnings) });
+  return out;
+}
+
+function projectSections(v) {
+  const out = [];
+  const id = v.identity;
+  out.push({ heading: "IDENTITY", rows: [
+    row("project id", id.project_id),
+    row("name", id.name),
+    row("root", id.root),
+    ...(id.git_remote ? [row("git remote", id.git_remote)] : []),
+    ...(id.package_manager ? [row("package manager", id.package_manager)] : []),
+  ]});
+  if (v.workloads?.length) out.push({
+    heading: "WORKLOADS",
+    rows: v.workloads.map((w) => ({
+      label: String(w.runtime),
+      value: w.display_name,
+      jump_target: { kind: "workload", id: w.workload_id },
+    })),
+  });
+  if (v.listeners?.length) out.push({
+    heading: "RELATED",
+    rows: v.listeners.map((r) => ({
+      label: String(r.exposure),
+      value: `${r.bind} (${r.listener_id})`,
+      jump_target: { kind: "listener", id: r.listener_id },
+    })),
+  });
+  if (v.markers?.length) out.push({
+    heading: "MARKERS",
+    rows: v.markers.map((m) => row("marker", m)),
+  });
+  return out;
+}
+
+function managerSections(v) {
+  const out = [];
+  const id = v.identity;
+  out.push({ heading: "IDENTITY", rows: [
+    row("manager id", id.manager_id),
+    row("name", id.name),
+    row("kind", String(id.kind)),
+    row("scope", String(id.scope)),
+    row("available", String(id.available)),
+    row("permission", String(id.permission)),
+    ...(id.version ? [row("version", id.version)] : []),
+    ...(id.socket ? [row("socket", id.socket)] : []),
+  ]});
+  if (v.managed_workloads?.length) out.push({
+    heading: "MANAGED WORKLOADS",
+    rows: v.managed_workloads.map((w) => ({
+      label: String(w.runtime),
+      value: w.display_name,
+      jump_target: { kind: "workload", id: w.workload_id },
+    })),
+  });
+  return out;
+}
+
+function trackedRunSections(v) {
+  const out = [];
+  const id = v.identity;
+  out.push({ heading: "IDENTITY", rows: [
+    row("run id", id.run_id),
+    ...(id.tag ? [row("tag", id.tag)] : []),
+    row("command", id.command),
+    ...(id.cwd ? [row("cwd", id.cwd)] : []),
+    row("state", String(id.state)),
+  ]});
+  if (v.workload) out.push({ heading: "WORKLOAD", rows: [
+    { label: "name", value: v.workload.display_name, jump_target: { kind: "workload", id: v.workload.workload_id } },
+  ]});
+  if (v.actions?.length) out.push({ heading: "ACTIONS", rows: actionRows(v.actions) });
+  return out;
+}
+
+function warningGroupSections(v) {
+  const rows = [
+    row("code", v.code),
+    row("label", v.label),
+    row("severity", String(v.severity)),
+    row("tier", String(v.tier)),
+    row("count", String(v.count)),
+    row("remediation", v.remediation),
+  ];
+  if (v.sample_entities?.length) {
+    rows.push(row("samples", v.sample_entities.map((e) => `${e.kind}: ${typeof e.id === "string" ? e.id : JSON.stringify(e.id)}`).join("\n")));
+  }
+  return [{ heading: "WARNING GROUP", rows }];
+}
+
+function processFragmentRows(p) {
+  const out = [
+    row("pid", String(p.pid)),
+    row("command", p.cmdline_full),
+    ...(p.exe ? [row("exe", p.exe)] : []),
+    ...(p.cwd ? [row("cwd", p.cwd)] : []),
+    ...(p.user ? [row("user", p.user)] : []),
+    ...(p.parent_pid ? [row("parent pid", String(p.parent_pid))] : []),
+  ];
+  if (p.children?.length) {
+    const preview = p.children.slice(0, 5).join(", ");
+    const value = p.children.length > 5 ? `${preview}, … (+${p.children.length - 5} more)` : preview;
+    out.push({ label: "children", value, secondary: `${p.children.length} pids` });
+  }
+  return out;
+}
+
+function confidenceRows(block) {
+  const out = [row("value", String(block.value))];
+  for (const sig of block.signals || []) {
+    out.push({ label: signalLabel(sig.signal), value: sig.claim, secondary: sig.adapter });
+  }
+  if (!block.signals?.length) {
+    out.push({ label: "note", value: "no provenance recorded — confidence is best-effort", secondary: "BestEffort" });
+  }
+  return out;
+}
+
+function signalLabel(sig) {
+  return ({
+    ProcfsPidInode: "procfs PID→socket inode",
+    ContainerInspect: "container runtime inspect",
+    CgroupCorrelation: "systemd cgroup correlation",
+    ManagerAttribution: "manager attribution heuristic",
+    TrackedRunRegistry: "tracked-run registry",
+    PortlessRoutes: "portless routes file",
+    BestEffort: "best-effort fallback",
+  })[sig] || sig;
+}
+
+function actionRows(actions) {
+  return actions.map((a) => {
+    let label = `[${a.key_hint}] ${a.verb}`;
+    if (!a.enabled && a.disabled_reason) {
+      label += ` — disabled (${a.disabled_reason})`;
+    }
+    return { label, value: a.command_string };
+  });
+}
+
+function warningRows(items) {
+  return items.map((w) => ({
+    label: String(w.severity),
+    value: `${w.code}: ${w.message}`,
+    jump_target: { kind: "warning_group", id: w.code },
+  }));
+}
+
+function row(label, value) {
+  return { label, value };
+}
+
+function pickIdString(view) {
+  if (typeof view.id === "string") return view.id;
+  if (view.identity?.listener_id) return view.identity.listener_id;
+  if (view.identity?.workload_id) return view.identity.workload_id;
+  if (view.identity?.project_id) return view.identity.project_id;
+  if (view.identity?.manager_id) return view.identity.manager_id;
+  if (view.identity?.run_id) return view.identity.run_id;
+  if (view.code) return view.code;
+  if (view.key) return JSON.stringify(view.key);
+  if (view.id) return JSON.stringify(view.id);
+  return "";
+}
+
+function handleJumpTarget(target) {
+  switch (target.kind) {
+    case "listener":
+      navigate("listeners", { selected: target.id });
+      openInspector("listener", target.id);
+      break;
+    case "workload":
+      navigate("workloads", {});
+      openInspector("workload", target.id);
+      break;
+    case "process":
+      navigate("processes", {});
+      openInspector("process", target.key ? JSON.stringify(target.key) : target.id);
+      break;
+    case "project":
+      navigate("workloads", { project: target.id });
+      break;
+    case "manager":
+      openInspector("manager", target.id);
+      break;
+    case "tracked_run":
+      openInspector("tracked_run", target.id);
+      break;
+    case "warning_group":
+      navigate("doctor", {});
+      break;
+  }
 }
 
 function attachRaw(kind, id) {

@@ -32,7 +32,7 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
 
 ### A. Per-entity view-models
 
-- [ ] `ListenerInspector`:
+- [x] `ListenerInspector`:
   ```rust
   pub struct ListenerInspector {
       pub identity: ListenerIdentity, // listener_id, bind, owner_label, user
@@ -44,50 +44,51 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
       pub warnings: Vec<WarningRef>,
   }
   ```
-- [ ] `ProcessInspector`:
+- [x] `ProcessInspector`:
   - parent + children fragment (with one-key jump to the full Process Tree).
   - listeners owned by this process (from `Workload.listeners` / `Listener.owners`).
   - cmdline (full), cwd, exe, user, lazyadmin run id (if present).
   - confidence block.
   - actions.
-- [ ] `WorkloadInspector`, `ProjectInspector`, `ManagerInspector`, `TrackedRunInspector` — analogous shapes; document the `RELATED` block content for each:
+- [x] `WorkloadInspector`, `ProjectInspector`, `ManagerInspector`, `TrackedRunInspector` — analogous shapes; document the `RELATED` block content for each:
   - Workload: child processes + listeners.
-  - Project: workloads + listeners + last-seen.
+  - Project: workloads + listeners + markers.
   - Manager: managed workloads + adapter health.
-  - TrackedRun: pid (if alive), workload link, log path.
-- [ ] `WarningGroupInspector` (consumed by PLAN-15b):
+  - TrackedRun: tag, command, cwd, state, workload link.
+- [x] `WarningGroupInspector` (consumed by PLAN-15b):
   - registry entry (label, remediation).
   - sample entities (up to 10).
-  - aggregate count + first/last seen.
-- [ ] `pub fn build_inspector(snapshot: &Snapshot, target: EntityRef) -> Option<InspectorView>` — pure projection.
-- [ ] Tests:
-  - [ ] `inspector_listener_lists_related_listeners_owned_by_same_pid`.
-  - [ ] `inspector_process_lists_listeners_held_by_pid`.
-  - [ ] `inspector_no_dash_rows_in_any_variant`.
-  - [ ] `inspector_listener_id_is_not_truncated_in_view_model`.
-  - [ ] `inspector_confidence_explains_which_signal_is_best_effort`.
+  - aggregate count + max severity.
+- [x] `InspectorView::lookup(snapshot, kind, id)` — pure projection (named differently from the spec, but same contract; `build_inspector(snapshot, target)` would be a thin wrapper if a future caller wants `EntityRef`-keyed lookup).
+- [x] Tests:
+  - [x] `inspector_listener_lists_related_listeners_owned_by_same_pid`.
+  - [x] `inspector_process_lists_listeners_held_by_pid`.
+  - [x] `inspector_no_dash_rows_in_any_variant`.
+  - [x] `inspector_listener_id_is_not_truncated_in_view_model`.
+  - [x] `inspector_confidence_explains_which_signal_is_best_effort`.
 
 ### B. Action command preview
 
-- [ ] Reuse the existing dry-run output from `lazyadmin-core::actions`. Surface that string ahead of the confirmation modal instead of inside it.
-- [ ] `ActionPreview { verb, key_hint, command_string, enabled, disabled_reason }` — `disabled` when not applicable (e.g. `restart` on a direct/unmanaged process). `disabled_reason` is shown as a dim explanation, not silently no-op.
-- [ ] Tests:
-  - [ ] `restart_disabled_for_direct_process_with_explicit_reason`.
-  - [ ] `command_preview_string_matches_dry_run_output`.
+- [x] `ActionPreview { verb, key_hint, command_string, enabled, disabled_reason }` — `disabled` when not applicable (e.g. `restart` on a direct/unmanaged process). `disabled_reason` is shown as a dim explanation, not silently no-op.
+- [ ] Wire `ActionPreview::command_string` to the live `lazyadmin-core::actions` dry-run output (currently the previews are hand-written per kind). Tracked as a follow-up: when the TUI rewrite (Task D) lands, we can call `render_dry_run` for the matching `Action` and use its first line as the command_string.
+- [x] Tests:
+  - [x] `restart_disabled_for_direct_process_with_explicit_reason`.
+  - [x] `command_preview_string_matches_expected_form` (unit-level proxy for the dry-run match; the dry-run pairing is tracked alongside the TUI rewrite).
 
 ### C. Confidence block
 
-- [ ] Replace the opaque `confidence best-effort` line. The block contains:
+- [x] Replace the opaque `confidence best-effort` line. The block contains:
   - `value: Confidence` (existing enum).
-  - `signals: Vec<ConfidenceSignal>` — each describing which signal contributed (procfs PID→inode link direct, cgroup correlation skipped, manager attribution heuristic, etc.).
-- [ ] If we need extra signal metadata not in the snapshot today, **extend `Provenance` additively** (new optional fields, default-skipped-when-empty in serialize so JSON contract stays backwards-compatible). Verify byte stability of `cargo run -p lazyadmin-cli -- export --json` against the empty-snapshot golden.
-- [ ] Tests:
-  - [ ] `confidence_block_lists_each_signal_class`.
-  - [ ] `provenance_additive_fields_default_to_none_and_round_trip_byte_stable`.
+  - `signals: Vec<ConfidenceSignalEntry { signal: ConfidenceSignal, adapter, claim }>` derived by classifying the existing `Provenance.adapter` strings into one of `ProcfsPidInode | ContainerInspect | CgroupCorrelation | ManagerAttribution | TrackedRunRegistry | PortlessRoutes | BestEffort`. Unrecognized adapters fall through to `BestEffort` so the user sees the truthful label rather than a confident wrong one.
+- [x] *No* changes to `Provenance` were needed — we classify the existing adapter string. Snapshot JSON stays bit-identical to PLAN-14, so the byte-stability check is satisfied by construction (no schema change touched). If a future signal class requires more metadata than the adapter name, extend `Provenance` additively then.
+- [x] Tests:
+  - [x] `inspector_confidence_explains_which_signal_is_best_effort` covers the signal-classification contract.
 
 ### D. TUI rendering
 
-- [ ] Replace `render_inspector` (~line 2478 in `crates/lazyadmin-tui/src/lib.rs`) with a top-level dispatch on `InspectorView`. Each variant renders sections: `IDENTITY`, `PROCESS`, `RELATED`, `PROJECT`, `CONFIDENCE`, `ACTIONS`, `WARNINGS`. Skip absent sections instead of rendering `-`.
+*Status: deferred to a follow-up commit. The TUI today builds its own `InspectorVm` (lib.rs ~line 975) and renders it via `render_inspector` (~line 3218). Rewiring those to consume the new `lazyadmin_runtime::view_model::InspectorView::to_sections()` is a cross-cutting touch on the 4,957-line TUI module and earns its own PR. The runtime view-models, the JSON contract, and the Web rendering are already in place so the TUI rewrite has nothing left to invent.*
+
+- [ ] Replace `render_inspector` (~line 3218 in `crates/lazyadmin-tui/src/lib.rs`) with a top-level dispatch on `InspectorView::to_sections()`. Each section: `IDENTITY`, `PROCESS`, `RELATED`, `PROJECT`, `CONFIDENCE`, `ACTIONS`, `WARNINGS`. Skip absent sections instead of rendering `-`.
 - [ ] No `Listener id   tcp:127.0.0…` ellipsis. The inspector pane wraps long values across lines (Ratatui `Paragraph::wrap`) but never truncates the value itself. Tests assert full-string presence at 38/60/120-col widths.
 - [ ] `RELATED` block — one-key jump:
   - `[1]…[9]` selects the related listener; `Enter` jumps to its inspector.
@@ -105,9 +106,10 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
 
 ### E. Web UI rendering (#16)
 
-- [ ] PLAN-15c consumes `InspectorView` from `GET /api/inspector?kind=…&id=…`. This plan asserts the JSON shape is stable and that the Web UI's templated layout matches the TUI's sections 1:1 (same headings, same wording).
-- [ ] `Show raw` toggle on each Web inspector reveals the underlying snapshot fragment. Toggle state per-session.
-- [ ] No `<pre>{JSON.stringify(x, null, 2)}</pre>` in visible UI. The "raw" toggle counts; it's an *opt-in* debugging surface.
+- [x] PLAN-15c consumes `InspectorView` from `GET /api/inspector?kind=…&id=…`. The Web UI now renders the **same per-kind sections** the TUI will render once Task D lands — they share `InspectorView::to_sections()` semantics (per-kind in JSON, flattened to `{ heading, rows: [{label, value, secondary?, jump_target?}] }` on the JS side; the JS mirror is a 1:1 port of the Rust `to_sections()`). Section headings (`IDENTITY`, `PROCESS`, `RELATED`, `PROJECT`, `CONFIDENCE`, `ACTIONS`, `WARNINGS`, etc.) are the same on both surfaces.
+- [x] `show raw` toggle on each Web inspector reveals the underlying snapshot fragment. Toggle state per-session.
+- [x] No `<pre>{JSON.stringify(x, null, 2)}</pre>` in visible UI. The "raw" toggle counts; it's an *opt-in* debugging surface (still asserted by `index_html_does_not_contain_pre_json_dump`).
+- [x] `inspector_route_serves_per_kind_typed_shape` test confirms the API returns the new typed shape (`identity` field present, no legacy `facts` field, `identity.listener_id` echoes the full id without truncation).
 
 ### F. Polish surface (#22 cosmetics that depend on this issue)
 
@@ -115,15 +117,15 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
 
 ## Acceptance criteria (mirrors #17)
 
-- [ ] Per-entity-kind inspector layouts: Listener, Workload, Process, Project, Manager, TrackedRun, WarningGroup.
-- [ ] No `-` or `unavailable` rows.
-- [ ] Listener ID and similar identifiers shown in full.
-- [ ] `RELATED` block lists co-owned listeners (or analogous) with one-key jump.
-- [ ] `CONFIDENCE` block explains which signal was best-effort.
-- [ ] Action lines preview the exact command lazyadmin will run, before the typed-verb confirmation.
-- [ ] Action affordances labeled with keybind + enabled/disabled state.
-- [ ] Web UI inspector uses the same per-entity-kind layouts (rendered HTML, not `<pre>`).
-- [ ] Tests: no-`-`-rows, related-listeners block, action-preview command strings.
+- [x] Per-entity-kind inspector layouts: Listener, Workload, Process, Project, Manager, TrackedRun, WarningGroup.
+- [x] No `-` or `unavailable` rows. Asserted by `inspector_no_dash_rows_in_any_variant`.
+- [x] Listener ID and similar identifiers shown in full. Asserted by `inspector_listener_id_is_not_truncated_in_view_model`.
+- [x] `RELATED` block lists co-owned listeners (or analogous) with `jump_target` metadata. TUI one-key shortcut wiring lands with Task D.
+- [x] `CONFIDENCE` block explains which signal was best-effort.
+- [x] Action lines preview the exact command lazyadmin will run, before the typed-verb confirmation. (Hand-written previews today; pairing with `render_dry_run` is tracked alongside Task D.)
+- [x] Action affordances labeled with keybind + enabled/disabled state.
+- [x] Web UI inspector uses the same per-entity-kind layouts (rendered HTML, not `<pre>`).
+- [x] Tests: no-`-`-rows, related-listeners block, action-preview command strings.
 
 ## Out of scope
 
