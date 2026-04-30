@@ -144,7 +144,7 @@ Both issues are written up in dedicated plans. They can land in either order but
 - [x] Update `cli_hints_for_view` and `narrow_refusal_message` for the new view list.
 - [x] First-run hint banner: when the user first lands on `ViewKind::Listeners`, show a one-line dim hint: `Filters now live as chips — try [P]ublic, [C]onflicts, [/] to search.` Auto-dismisses after first chip toggle or on `?` help.
 - [x] Update the help overlay (`?`) and `lazyadmin tui --help` to document the new mapping.
-- [ ] Tests:
+- [x] Tests:
   - [x] Rail enumeration test: `rail_has_at_most_eight_entries`.
   - [x] No `[hidden]`-clipped string anywhere in rail rendering at 70/90/120/160 cols.
   - [x] `ViewKind::Public` programmatic entry still works (`build_view_model_with_state` path covered).
