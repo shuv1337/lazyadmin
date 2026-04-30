@@ -1,25 +1,26 @@
 use chrono::{DateTime, Utc};
 use lazyadmin_core::model::{PermissionState, Snapshot};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterHealth {
     pub active: usize,
     pub total: usize,
     pub degraded: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotFreshness {
     pub generated_at: DateTime<Utc>,
     pub age_seconds: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DropRate {
     pub dropped: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderPip {
     pub adapters: AdapterHealth,
     pub freshness: SnapshotFreshness,

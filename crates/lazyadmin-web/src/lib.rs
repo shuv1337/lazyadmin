@@ -11,7 +11,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive};
 use axum::{
     Router,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header::HOST},
     response::{Html, IntoResponse, Json, Response, Sse},
     routing::get,
@@ -158,12 +158,16 @@ fn app(state: AppState) -> Router {
         .route("/doctor", get(doctor))
         .route("/digest", get(digest))
         .route("/rail", get(rail))
+        .route("/header_pip", get(header_pip))
+        .route("/inspector", get(inspector))
         .route("/events", get(events))
         .route("/views/overview", get(overview))
         .route("/entities/:kind/:id", get(entity))
         .layer(middleware::from_fn(local_origin_guard));
     Router::new()
         .route("/", get(index))
+        .route("/static/app.css", get(app_css))
+        .route("/static/app.js", get(app_js))
         .nest("/api", api)
         .with_state(state)
         .layer(CompressionLayer::new())
@@ -263,6 +267,30 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
 
+async fn app_css() -> impl IntoResponse {
+    static_asset(include_str!("../static/app.css"), "text/css; charset=utf-8")
+}
+
+async fn app_js() -> impl IntoResponse {
+    static_asset(
+        include_str!("../static/app.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+fn static_asset(body: &'static str, content_type: &'static str) -> Response {
+    use axum::http::header;
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let cached = state.last_snapshot.read().await;
     Json(HealthResponse {
@@ -298,6 +326,54 @@ async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn rail() -> impl IntoResponse {
     Json(lazyadmin_runtime::view_model::RAIL_ENTRIES)
+}
+
+async fn header_pip(State(state): State<AppState>) -> impl IntoResponse {
+    match state.snapshot().await {
+        Ok(snapshot) => Json(lazyadmin_runtime::view_model::HeaderPip::from_snapshot(
+            &snapshot,
+        ))
+        .into_response(),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SNAPSHOT_FAILED",
+            e.to_string(),
+            None,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct InspectorQuery {
+    kind: String,
+    id: String,
+}
+
+async fn inspector(
+    State(state): State<AppState>,
+    Query(params): Query<InspectorQuery>,
+) -> impl IntoResponse {
+    let snapshot = match state.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SNAPSHOT_FAILED",
+                e.to_string(),
+                None,
+            );
+        }
+    };
+    match lazyadmin_runtime::view_model::InspectorView::lookup(&snapshot, &params.kind, &params.id)
+    {
+        Some(view) => Json(view).into_response(),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "ENTITY_NOT_FOUND",
+            format!("{}/{} was not found", params.kind, params.id),
+            None,
+        ),
+    }
 }
 
 async fn digest(State(state): State<AppState>) -> impl IntoResponse {
@@ -596,6 +672,108 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = json_body(response).await;
         assert_eq!(body["code"], "NON_LOCAL_HOST");
+    }
+
+    #[test]
+    fn index_html_does_not_contain_pre_json_dump() {
+        let html = include_str!("../static/index.html");
+        assert!(
+            !html.contains("<pre"),
+            "PLAN-15c forbids <pre>{{JSON}}</pre> in the visible UI"
+        );
+        assert!(
+            !html.contains("JSON.stringify"),
+            "index.html must not embed JSON.stringify dumps"
+        );
+    }
+
+    #[test]
+    fn app_css_does_not_contain_metric_card_grid() {
+        let css = include_str!("../static/app.css");
+        assert!(
+            !css.contains("auto-fit"),
+            "PLAN-15c forbids `repeat(auto-fit, minmax(...))` metric-card grids"
+        );
+        assert!(
+            !css.contains("backdrop-filter"),
+            "PLAN-15c forbids glass / frosted blurs"
+        );
+        assert!(
+            !css.contains("linear-gradient") || !css.contains("-webkit-background-clip"),
+            "PLAN-15c forbids gradient text"
+        );
+    }
+
+    #[test]
+    fn rail_constant_has_at_most_six_entries() {
+        assert!(
+            lazyadmin_runtime::view_model::RAIL_ENTRIES.len() <= 6,
+            "PLAN-15c caps the top nav at 6 entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn header_pip_route_returns_expected_shape() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        let response = app
+            .oneshot(local_request("/api/header_pip"))
+            .await
+            .expect("header_pip response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        for key in ["adapters", "freshness"] {
+            assert!(body.get(key).is_some(), "missing header_pip field {key}");
+        }
+        assert!(body["adapters"].get("active").is_some());
+        assert!(body["freshness"].get("age_seconds").is_some());
+    }
+
+    #[tokio::test]
+    async fn inspector_route_returns_404_for_unknown_id() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        let response = app
+            .oneshot(local_request(
+                "/api/inspector?kind=listener&id=does-not-exist",
+            ))
+            .await
+            .expect("inspector response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "ENTITY_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn static_assets_are_served_with_no_store_in_dev() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        for (path, content_type) in [
+            ("/static/app.css", "text/css"),
+            ("/static/app.js", "text/javascript"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(local_request(path))
+                .await
+                .unwrap_or_else(|_| panic!("static {path} response"));
+            assert_eq!(response.status(), StatusCode::OK, "{path} status");
+            let headers = response.headers();
+            assert!(
+                headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with(content_type)),
+                "unexpected content-type for {path}"
+            );
+            assert_eq!(
+                headers
+                    .get(axum::http::header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store"),
+                "static asset must be no-store in dev"
+            );
+        }
     }
 
     #[tokio::test]

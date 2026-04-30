@@ -1,30 +1,53 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lazyadmin web</title>
-<style>
-:root{color-scheme:dark;--bg:#011627;--panel:#071d2f;--line:#1d3b53;--fg:#d6deeb;--muted:#637777;--accent:#82aaff;--gold:#ecc48d;--ok:#addb67;--warn:#f78c6c;--err:#ef5350;--project:#c792ea}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui}header{min-height:52px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:20px;padding:0 18px;background:#061a2a;position:sticky;top:0;z-index:2}h1{font-size:15px;margin:0;color:var(--gold)}.shell{display:grid;grid-template-columns:190px 1fr 360px;min-height:calc(100vh - 52px)}nav{border-right:1px solid var(--line);padding:14px;background:#041827}nav button{display:block;width:100%;text-align:left;background:transparent;color:var(--fg);border:0;border-radius:8px;padding:9px 10px;margin:2px 0;cursor:pointer}nav button.active,nav button:hover{background:var(--line)}main{padding:16px;overflow:auto}.digest{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}.section h2{font-size:13px;letter-spacing:.08em;color:var(--accent);margin:0 0 8px;text-transform:uppercase}.empty{color:var(--ok)}.row{border-top:1px solid var(--line);padding:8px 0}.row:first-of-type{border-top:0}.row small{display:block;color:var(--muted)}.view-all{margin-top:10px;border:1px solid var(--line);background:#061a2a;color:var(--accent);border-radius:999px;padding:5px 9px;cursor:pointer}.toolbar{display:flex;gap:10px;margin:0 0 12px}input{background:#061a2a;border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:8px;min-width:260px}table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}th,td{padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}th{position:sticky;top:68px;background:#082036;color:var(--ok);cursor:pointer}tr:hover,tr.selected{background:#0d2a42}aside{border-left:1px solid var(--line);padding:16px;background:#041827;overflow:auto}pre{white-space:pre-wrap;word-break:break-word;color:var(--fg)}.muted{color:var(--muted)}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 7px}.public{color:var(--warn)}.conflict{color:var(--err)}.project{color:var(--project)}@media(max-width:900px){.shell{grid-template-columns:1fr}nav,aside{border:0}.shell aside{display:none}}
-</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lazyadmin</title>
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header><h1>lazyadmin</h1><span id="status" class="muted">loading snapshot…</span><span id="age" class="pill">—</span></header>
-<div class="shell"><nav id="nav"></nav><main><section id="digest" class="digest" hidden></section><div id="tableWrap"><div class="toolbar"><input id="q" placeholder="Filter current table"><label><input id="system" type="checkbox"> include system</label></div><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div></main><aside><h2>Inspector</h2><div id="inspector" class="muted">Select a row.</div></aside></div>
-<script>
-let views=[];let snap=null,digest=null,view=new URLSearchParams(location.search).get('view')||'Overview',selected=null,sortKey='',sortDir=1;
-const nav=document.querySelector('#nav'),tbody=document.querySelector('#tbody'),thead=document.querySelector('#thead'),q=document.querySelector('#q'),digestEl=document.querySelector('#digest'),tableWrap=document.querySelector('#tableWrap');
-function setParam(k,v){const u=new URL(location);v?u.searchParams.set(k,v):u.searchParams.delete(k);history.replaceState(null,'',u)}
-function switchView(v){view=v;setParam('view',v=='Overview'?'':v);render()}
-function setRail(entries){views=entries.map(e=>e.label);if(!views.includes(view))view='Overview';nav.innerHTML='';views.forEach(v=>{const b=document.createElement('button');b.textContent=v;b.onclick=()=>switchView(v);nav.appendChild(b)})}
-q.value=new URLSearchParams(location.search).get('q')||'';q.oninput=()=>{setParam('q',q.value);renderTable()};
-async function load(){try{const [s,d,rail]=await Promise.all([fetch('/api/snapshot'),fetch('/api/digest'),fetch('/api/rail')]);if(!s.ok)throw new Error(await s.text());snap=await s.json();digest=d.ok?await d.json():null;if(rail.ok)setRail(await rail.json());document.querySelector('#status').textContent=`${snap.host?.hostname||'local host'} · ${snap.listeners.length} listeners · ${snap.processes.length} processes`;document.querySelector('#age').textContent='fresh';render()}catch(e){document.querySelector('#status').textContent='API error';tbody.innerHTML=`<tr><td>${e.message}</td></tr>`}}setInterval(load,5000);load();
-function publicL(l){return !['Loopback','UnixLocal','loopback','unix_local'].includes(String(l.exposure))}function warnCount(id){return snap.warnings.filter(w=>JSON.stringify(w.entity||'').includes(id)).length}function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-function render(){[...nav.children].forEach(b=>b.classList.toggle('active',b.textContent==view));if(!snap)return;if(view=='Overview')renderDigest();else renderTable()}
-function renderDigest(){tableWrap.hidden=true;digestEl.hidden=false;if(!digest){digestEl.innerHTML='<div class=section>Digest unavailable.</div>';return}const exposedTotal=digest.exposed.total_public+digest.exposed.total_lan;digestEl.innerHTML=`
-<section class=section><h2>Exposed ${exposedTotal} (${digest.exposed.rows.length} shown)</h2>${digest.exposed.rows.length?digest.exposed.rows.map(r=>`<div class="row public">● ${esc(r.bind)}<small>${esc(r.owner_label)} · ${esc(r.project||'no project')}${r.extra_ports?` · +${r.extra_ports} ports`:''}</small></div>`).join(''):`<p class=empty>${esc(digest.exposed.empty_copy)}</p>`}<button class=view-all data-view="Listeners">view all ${exposedTotal} →</button></section>
-<section class=section><h2>Conflicts ${digest.conflicts.total} (${digest.conflicts.rows.length} shown)</h2>${digest.conflicts.rows.length?digest.conflicts.rows.map(r=>`<div class="row conflict">┃ ${esc(r.bind)}<small>${r.owner_count} owners · ${esc(r.reason)}</small></div>`).join(''):`<p class=empty>${esc(digest.conflicts.empty_copy)}</p>`}<button class=view-all data-view="Listeners">view all ${digest.conflicts.total} →</button></section>
-<section class=section><h2>Projects ${digest.your_projects.total} (${digest.your_projects.rows.length} shown)</h2>${digest.your_projects.rows.length?digest.your_projects.rows.map(r=>`<div class="row project">▎ ${esc(r.name)}<small>${r.listener_count} listeners · ${esc(r.root)}</small></div>`).join(''):`<p class=muted>${esc(digest.your_projects.empty_copy)}</p>`}<button class=view-all data-view="Workloads">view all ${digest.your_projects.total} →</button></section>
-<section class=section><h2>Triage ${digest.triage.summary.actionable} actionable</h2>${digest.triage.summary.actionable?`<p class=conflict>Open Doctor to review grouped warnings.</p>`:`<p class=empty>${esc(digest.triage.empty_copy)}</p>`}<button class=view-all data-view="Doctor">view all ${digest.triage.summary.actionable} →</button></section>`;digestEl.querySelectorAll('.view-all').forEach(b=>b.onclick=()=>switchView(b.dataset.view))}
-function rows(){if(!snap)return[];let r=[];if(view=='Listeners'||view=='Public'||view=='Conflicts')r=snap.listeners.map(l=>({id:l.id,kind:'listener',Port:l.port||'',Protocol:l.protocol,Bind:l.bind_addr||l.path||'*',Exposure:l.exposure,Owners:(l.owners||[]).length,Confidence:l.confidence,Warnings:warnCount(l.id),raw:l}));if(view=='Public')r=r.filter(x=>publicL(x.raw));if(view=='Conflicts')r=r.filter(x=>x.Warnings||x.Owners>1);if(view=='Workloads')r=snap.workloads.map(w=>({id:w.id,kind:'workload',Name:w.display_name||w.name,Runtime:w.runtime,State:w.state,Health:w.health||'',Warnings:warnCount(w.id),raw:w}));if(view=='Processes')r=snap.processes.map(p=>({id:JSON.stringify(p.key),kind:'process',PID:p.pid,Command:(p.cmdline||p.command||[]).join(' ')||p.exe||'',User:p.user||'',CWD:p.cwd||'',Parent:p.ppid||'',raw:p}));if(view=='Projects')r=snap.projects.map(p=>({id:p.id,kind:'project',Name:p.name,Root:p.root,Markers:(p.markers||[]).map(m=>m.kind||m).join(', '),raw:p}));if(view=='Managers')r=snap.managers.map(m=>({id:m.id,kind:'manager',Name:m.name,Runtime:m.kind||m.runtime,Available:m.available,Permission:m.permission,raw:m}));if(view=='Tracked runs')r=snap.tracked_runs.map(x=>({id:x.id,kind:'run',ID:x.id,State:x.state,Tag:x.tag||'',raw:x}));if(view=='Doctor')r=snap.warnings.map((w,i)=>({id:String(i),kind:'warning',Severity:w.severity,Code:w.code,Message:w.message,Entity:JSON.stringify(w.entity||''),raw:w}));if(view=='Metrics')r=[{Metric:'listeners',Loopback:snap.listeners.filter(l=>!publicL(l)).length,Public:snap.listeners.filter(publicL).length,raw:snap.metadata||{}},{Metric:'events dropped',Dropped:snap.metadata?.events_dropped||0,raw:snap.metadata||{}}];const filter=q.value.toLowerCase();if(filter)r=r.filter(x=>JSON.stringify(x).toLowerCase().includes(filter));if(sortKey)r.sort((a,b)=>String(a[sortKey]??'').localeCompare(String(b[sortKey]??''),undefined,{numeric:true})*sortDir);return r}
-function renderTable(){digestEl.hidden=true;tableWrap.hidden=false;const r=rows(),keys=Object.keys(r[0]||{}).filter(k=>!['raw','id','kind'].includes(k));thead.innerHTML='<tr>'+keys.map(k=>`<th data-k="${k}">${k}</th>`).join('')+'</tr>';tbody.innerHTML=r.map(x=>`<tr data-id="${esc(x.id)}" class="${selected==x.id?'selected':''}">`+keys.map(k=>`<td class="${k=='Exposure'&&publicL(x.raw)?'public':''}">${esc(x[k])}</td>`).join('')+'</tr>').join('')||'<tr><td class=muted>Empty snapshot/view.</td></tr>';thead.querySelectorAll('th').forEach(th=>th.onclick=()=>{sortDir=sortKey==th.dataset.k?-sortDir:1;sortKey=th.dataset.k;renderTable()});tbody.querySelectorAll('tr').forEach((tr,i)=>tr.onclick=()=>{selected=r[i]?.id;setParam('selected',selected);document.querySelector('#inspector').innerHTML=`<pre>${esc(JSON.stringify(r[i]?.raw,null,2))}</pre>`;renderTable()})}
-</script>
-</body></html>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-name">lazyadmin</span>
+    <span class="brand-host" id="hostLabel">localhost</span>
+  </div>
+  <nav class="rail" id="rail" aria-label="primary"></nav>
+  <div class="status" id="statusBlock">
+    <span class="pip" id="pipDot" data-state="loading" aria-hidden="true"></span>
+    <span class="pip-label" id="pipLabel">connecting…</span>
+    <span class="pip-meta" id="pipMeta"></span>
+    <button type="button" class="palette-trigger" id="paletteTrigger" title="Search (press /)">
+      <kbd>/</kbd> search
+    </button>
+  </div>
+</header>
+
+<main id="main" class="main">
+  <section id="page" class="page" aria-live="polite"></section>
+</main>
+
+<aside id="inspector" class="inspector" hidden>
+  <div class="inspector-head">
+    <h2 id="inspectorTitle">Inspector</h2>
+    <div class="inspector-actions">
+      <label class="raw-toggle">
+        <input type="checkbox" id="rawToggle"> show raw
+      </label>
+      <button type="button" id="inspectorClose" class="ghost" aria-label="Close inspector">×</button>
+    </div>
+  </div>
+  <div id="inspectorBody" class="inspector-body"></div>
+</aside>
+
+<dialog id="palette" class="palette">
+  <form id="paletteForm" method="dialog">
+    <input id="paletteInput" type="text" autocomplete="off" placeholder="jump to view, listener, project, warning…">
+    <ul id="paletteResults" class="palette-results" role="listbox"></ul>
+    <p class="palette-hint">substring match · prefix with <code>~</code> for fuzzy</p>
+  </form>
+</dialog>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
