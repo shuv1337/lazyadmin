@@ -132,29 +132,29 @@ Both issues are written up in dedicated plans. They can land in either order but
 
 ### #19 — Collapse the rail to ~6 verbs (inline)
 
-- [ ] Audit current rail in `crates/lazyadmin-tui/src/lib.rs`: `ViewKind` enum (line ~164) and the rail-group strings (search `"All/Everything"`, `"Public listeners"`, etc., around lines 1929–1990).
-- [ ] Add new `ViewKind::Overview` (digest from #14), `ViewKind::Workloads`, `ViewKind::Listeners` (the consolidated table-with-chips view).
-- [ ] Mark `ViewKind::Ports`, `Public`, `Conflicts`, `Orphans`, `TrackedRuns` for migration:
+- [x] Audit current rail in `crates/lazyadmin-tui/src/lib.rs`: `ViewKind` enum (line ~164) and the rail-group strings (search `"All/Everything"`, `"Public listeners"`, etc., around lines 1929–1990).
+- [x] Add new `ViewKind::Overview` (digest from #14), `ViewKind::Workloads`, `ViewKind::Listeners` (the consolidated table-with-chips view).
+- [x] Mark `ViewKind::Ports`, `Public`, `Conflicts`, `Orphans`, `TrackedRuns` for migration:
   - Keep them addressable via `ViewKind` so `lazyadmin tui --view public` and existing keybindings still work.
   - **Do not** show them in the rail. Replace their rail entries with **filter chips** inside `Listeners`.
-- [ ] Add a `ListenerFilter` enum (`All`, `Public`, `Conflicts`, `Orphans`, `Unowned`, `Tracked`). The chip toolbar is rendered inside `render_view_kind` for `ViewKind::Listeners`. Each chip toggles a filter predicate over `snapshot.listeners`.
-- [ ] Remove the four disabled adapter rail entries (`Docker/Compose`, `Podman`, `systemd:user`, `systemd:system`, `Direct processes`). Their data moves into:
+- [x] Add a `ListenerFilter` enum (`All`, `Public`, `Conflicts`, `Orphans`, `Unowned`, `Tracked`). The chip toolbar is rendered inside `render_view_kind` for `ViewKind::Listeners`. Each chip toggles a filter predicate over `snapshot.listeners`.
+- [x] Remove the four disabled adapter rail entries (`Docker/Compose`, `Podman`, `systemd:user`, `systemd:system`, `Direct processes`). Their data moves into:
   - The header status pip (#20): `adapters: 2/6 active`.
   - A new section in the `Metrics` view: `Discovery health` table.
-- [ ] Update `cli_hints_for_view` and `narrow_refusal_message` for the new view list.
-- [ ] First-run hint banner: when the user first lands on `ViewKind::Listeners`, show a one-line dim hint: `Filters now live as chips — try [P]ublic, [C]onflicts, [/] to search.` Auto-dismisses after first chip toggle or on `?` help.
-- [ ] Update the help overlay (`?`) and `lazyadmin tui --help` to document the new mapping.
+- [x] Update `cli_hints_for_view` and `narrow_refusal_message` for the new view list.
+- [x] First-run hint banner: when the user first lands on `ViewKind::Listeners`, show a one-line dim hint: `Filters now live as chips — try [P]ublic, [C]onflicts, [/] to search.` Auto-dismisses after first chip toggle or on `?` help.
+- [x] Update the help overlay (`?`) and `lazyadmin tui --help` to document the new mapping.
 - [ ] Tests:
-  - [ ] Rail enumeration test: `rail_has_at_most_eight_entries`.
-  - [ ] No `[hidden]`-clipped string anywhere in rail rendering at 70/90/120/160 cols.
-  - [ ] `ViewKind::Public` programmatic entry still works (`build_view_model_with_state` path covered).
-  - [ ] Chip toggle predicate tests against `testdata/snapshots/busy.json`.
-- [ ] Web UI nav (#16) consumes the same rail order — single source of truth lives in a `pub const RAIL_ENTRIES: &[(ViewKind, &str)]` exposed from `lazyadmin-runtime`.
+  - [x] Rail enumeration test: `rail_has_at_most_eight_entries`.
+  - [x] No `[hidden]`-clipped string anywhere in rail rendering at 70/90/120/160 cols.
+  - [x] `ViewKind::Public` programmatic entry still works (`build_view_model_with_state` path covered).
+  - [x] Chip toggle predicate tests against `testdata/snapshots/busy.json`.
+- [x] Web UI nav (#16) consumes the same rail order — single source of truth lives in `lazyadmin_runtime::view_model::RAIL_ENTRIES` (`RailEntry { id, label }`) exposed from `lazyadmin-runtime`.
 
 ### Phase 2 acceptance
 
-- [ ] TUI rail has ≤8 entries; no disabled adapter rows.
-- [ ] Chips inside `Listeners` reproduce the previous filtered-view results 1:1 (golden test).
+- [x] TUI rail has ≤8 entries; no disabled adapter rows.
+- [x] Chips inside `Listeners` reproduce the previous filtered-view results 1:1 (golden test).
 - [ ] Web UI default route is the digest; no metric-card row; inspector is templated, not `<pre>{JSON}</pre>`.
 - [ ] Inspector layouts implemented for all 7 entity kinds; no `-` rows.
 

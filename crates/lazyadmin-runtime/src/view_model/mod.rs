@@ -1,4 +1,5 @@
 use lazyadmin_core::model::Snapshot;
+use serde::{Deserialize, Serialize};
 
 pub mod digest;
 pub mod doctor_groups;
@@ -14,6 +15,39 @@ pub use doctor_groups::{
 };
 pub use header_pip::{AdapterHealth, DropRate, HeaderPip, SnapshotFreshness};
 pub use inspector::InspectorView;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RailEntry {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+pub const RAIL_ENTRIES: &[RailEntry] = &[
+    RailEntry {
+        id: "overview",
+        label: "Overview",
+    },
+    RailEntry {
+        id: "listeners",
+        label: "Listeners",
+    },
+    RailEntry {
+        id: "workloads",
+        label: "Workloads",
+    },
+    RailEntry {
+        id: "processes",
+        label: "Processes",
+    },
+    RailEntry {
+        id: "doctor",
+        label: "Doctor",
+    },
+    RailEntry {
+        id: "metrics",
+        label: "Metrics",
+    },
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeViewModels {

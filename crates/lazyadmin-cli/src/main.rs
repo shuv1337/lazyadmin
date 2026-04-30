@@ -98,6 +98,9 @@ enum Command {
 }
 
 #[derive(Args, Debug)]
+#[command(
+    after_help = "Views: overview, listeners, workloads, processes, doctor, metrics. Legacy filtered views remain addressable with --view public, --view conflicts, --view orphans, --view everything. In the Listeners view use chips/keys: A all, P public, C conflicts, O orphans, U unowned, T tracked."
+)]
 struct TuiArgs {
     #[arg(long)]
     headless: bool,

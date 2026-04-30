@@ -43,6 +43,7 @@ This repository now contains the v0.4 Rust workspace for `lazyadmin` after PLAN-
 - The read-only Web UI is split across `crates/lazyadmin-runtime` (shared snapshot/event assembly) and `crates/lazyadmin-web` (loopback-only Axum server plus embedded static app). `lazyadmin web` refuses non-loopback binds in v1 and exposes only read-only API routes; use `--port 0 --no-open` for smoke tests.
 - The UX-overhaul shared projection layer starts in `crates/lazyadmin-runtime/src/view_model/` (`digest`, `doctor_groups`, `header_pip`, `inspector`). Keep new TUI/Web grouping and summary logic there instead of duplicating snapshot projections in each UI.
 - PLAN-15a digest landing is implemented: `ViewKind::Overview` is the default TUI view, `lazyadmin overview --json` emits the shared `Digest`, and the Web UI exposes `/api/digest` with the default route rendering the digest.
+- PLAN-15 #19 rail collapse is partially landed: the canonical rail order lives in `lazyadmin_runtime::view_model::RAIL_ENTRIES` (`Overview`, `Listeners`, `Workloads`, `Processes`, `Doctor`, `Metrics`), and the TUI consumes it. Legacy filtered views such as `Public`, `Conflicts`, and `Orphans` remain programmatically addressable but are hidden from the rail; continue wiring Web nav to the same constant in PLAN-15c.
 - Warning actionability metadata lives in `lazyadmin_core::doctor::{WARNING_CODE_REGISTRY, classify}`. Add every newly emitted `Warning.code` there with an explicit `WarningTier`, label, and remediation; do not add tier/remediation fields to snapshot JSON.
 
 ## Development standards

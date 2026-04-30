@@ -38,7 +38,7 @@ Cribbed from `~/repos/shuvbot-skills/frontend-design/SKILL.md` and the issue bod
 - [ ] `GET /api/doctor` — serializes `DoctorGroupsView` from PLAN-15b.
 - [ ] `GET /api/inspector?kind=…&id=…` — serializes the per-entity `InspectorView` from PLAN-15d. URL-encoded entity IDs.
 - [ ] `GET /api/header_pip` — serializes the `HeaderPip` from PLAN-15 Phase 0.1, used by both the persistent header and #20.
-- [ ] `GET /api/rail` — returns the canonical rail from `lazyadmin-runtime::RAIL_ENTRIES` (PLAN-15 #19), so the Web nav can't drift from the TUI rail.
+- [x] `GET /api/rail` — returns the canonical rail from `lazyadmin-runtime::RAIL_ENTRIES` (PLAN-15 #19), so the Web nav can't drift from the TUI rail.
 - [ ] All routes loopback-bind-checked via the existing guard.
 - [ ] Existing `GET /api/snapshot` left bit-identical.
 - [ ] `cargo test -p lazyadmin-web` covers each new route shape (golden JSON snapshots).

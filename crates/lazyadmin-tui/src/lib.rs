@@ -23,7 +23,7 @@ use lazyadmin_core::{
     output::listener_rows,
     snapshot::build_empty_snapshot,
 };
-use lazyadmin_runtime::view_model::{Digest, build_digest, build_doctor_groups};
+use lazyadmin_runtime::view_model::{Digest, RAIL_ENTRIES, build_digest, build_doctor_groups};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -85,6 +85,9 @@ pub struct App {
     event_ring: AdapterEventRing,
     config_reload: Option<ConfigReload>,
     overview_hint_visible: bool,
+    listener_filter: ListenerFilter,
+    listeners_hint_visible: bool,
+    listeners_hint_seen: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +169,9 @@ impl Default for App {
             event_ring: AdapterEventRing::default(),
             config_reload: None,
             overview_hint_visible: false,
+            listener_filter: ListenerFilter::All,
+            listeners_hint_visible: false,
+            listeners_hint_seen: false,
         }
     }
 }
@@ -209,6 +215,9 @@ impl TuiRuntime {
 pub enum ViewKind {
     #[default]
     Overview,
+    Listeners,
+    Workloads,
+    Processes,
     Everything,
     Ports,
     Public,
@@ -222,6 +231,30 @@ pub enum ViewKind {
     ProcessTree,
     Metrics,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListenerFilter {
+    #[default]
+    All,
+    Public,
+    Conflicts,
+    Orphans,
+    Unowned,
+    Tracked,
+}
+
+impl ListenerFilter {
+    fn label(self) -> &'static str {
+        match self {
+            ListenerFilter::All => "All",
+            ListenerFilter::Public => "Public",
+            ListenerFilter::Conflicts => "Conflicts",
+            ListenerFilter::Orphans => "Orphans",
+            ListenerFilter::Unowned => "Unowned",
+            ListenerFilter::Tracked => "Tracked",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pane {
     #[default]
@@ -794,6 +827,7 @@ pub struct ViewModel {
     pub conflicts: Vec<SummaryRowVm>,
     pub orphans: Vec<SummaryRowVm>,
     pub projects: Vec<SummaryRowVm>,
+    pub workloads: Vec<SummaryRowVm>,
     pub tracked_runs: Vec<SummaryRowVm>,
     pub doctor: DoctorVm,
     pub process_tree: ProcessTreeVm,
@@ -821,6 +855,12 @@ pub struct RowVm {
     pub exposure: String,
     pub project: String,
     pub badges: Vec<String>,
+    #[serde(default)]
+    pub is_conflict: bool,
+    #[serde(default)]
+    pub is_orphan: bool,
+    #[serde(default)]
+    pub is_tracked: bool,
     pub search_text: String,
 }
 
@@ -1092,6 +1132,15 @@ pub fn build_view_model_with_state(
     let mut rows = Vec::new();
     let mut hidden = 0usize;
     let projected_rows = listener_rows(snapshot);
+    let conflict_ids: HashSet<_> = snapshot
+        .warnings
+        .iter()
+        .filter(|w| w.code == "CONFLICT")
+        .filter_map(|w| match &w.entity {
+            Some(EntityRef::Listener(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
     for l in &snapshot.listeners {
         let is_system = l
             .provenance
@@ -1116,6 +1165,18 @@ pub fn build_view_model_with_state(
         ) {
             badges.push("PUBLIC".into());
         }
+        let is_conflict = conflict_ids.contains(&l.id) || l.owners.len() > 1;
+        let is_orphan = l.owners.is_empty();
+        let is_tracked = listener_is_tracked(l, snapshot);
+        if is_conflict {
+            badges.push("CONFLICT".into());
+        }
+        if is_orphan {
+            badges.push("ORPHAN".into());
+        }
+        if is_tracked {
+            badges.push("TRACKED".into());
+        }
         let bind = l.bind_addr.clone().unwrap_or_else(|| {
             l.path
                 .as_ref()
@@ -1135,6 +1196,9 @@ pub fn build_view_model_with_state(
             exposure,
             project: "-".into(),
             badges,
+            is_conflict,
+            is_orphan,
+            is_tracked,
             search_text,
         });
     }
@@ -1170,6 +1234,7 @@ pub fn build_view_model_with_state(
     let mut conflicts = build_conflict_rows(snapshot);
     let mut orphans = build_orphan_rows(snapshot);
     let mut projects = build_project_rows(snapshot);
+    let mut workloads = build_workload_rows(snapshot);
     let mut tracked_runs = build_tracked_run_rows(snapshot);
     let mut doctor =
         build_doctor_vm_with_state(snapshot, doctor_toggled_groups, doctor_severity_filter);
@@ -1178,6 +1243,7 @@ pub fn build_view_model_with_state(
         conflicts.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
         orphans.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
         projects.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
+        workloads.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
         tracked_runs.retain(|r| m.fuzzy_match(&summary_search_text(r), filter).is_some());
         doctor
             .rows
@@ -1192,6 +1258,7 @@ pub fn build_view_model_with_state(
         conflicts,
         orphans,
         projects,
+        workloads,
         tracked_runs,
         doctor,
         process_tree,
@@ -1336,6 +1403,24 @@ fn build_project_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
                 .unwrap_or_else(|| "project".into()),
             state: format!("{} marker(s)", project.markers.len()),
             details: project.root.display().to_string(),
+        })
+        .collect()
+}
+
+fn build_workload_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
+    snapshot
+        .workloads
+        .iter()
+        .map(|workload| SummaryRowVm {
+            name: workload.display_name.clone(),
+            kind: runtime_kind_label(&workload.runtime),
+            state: format!("{} process(es)", workload.pids.len()),
+            details: workload
+                .project
+                .as_ref()
+                .and_then(|id| snapshot.projects.iter().find(|project| &project.id == id))
+                .map(|project| project.name.clone())
+                .unwrap_or_else(|| "no project".into()),
         })
         .collect()
 }
@@ -1639,6 +1724,21 @@ pub fn build_metrics_with_adapters(
     }
 }
 
+fn listener_is_tracked(listener: &lazyadmin_core::model::Listener, snapshot: &Snapshot) -> bool {
+    listener.owners.iter().any(|owner| match owner {
+        EntityRef::Run(_) => true,
+        EntityRef::Process(key) => snapshot
+            .processes
+            .iter()
+            .any(|process| &process.key == key && process.lazyadmin_run_id.is_some()),
+        EntityRef::Workload(id) => snapshot
+            .workloads
+            .iter()
+            .any(|workload| &workload.id == id && workload.lazyadmin_run_id.is_some()),
+        _ => false,
+    })
+}
+
 fn listener_owner_label(listener: &lazyadmin_core::model::Listener, snapshot: &Snapshot) -> String {
     listener
         .owners
@@ -1939,33 +2039,11 @@ fn inspector_for_process(snapshot: &Snapshot, key: &ProcessKey) -> Option<Inspec
         ),
     })
 }
-fn groups(show_system: bool) -> Vec<String> {
-    [
-        "Overview",
-        "All/Everything",
-        "Ports",
-        "Public listeners",
-        "Conflicts",
-        "Orphans",
-        "Tracked runs",
-        "Projects",
-        "Docker/Compose",
-        "Podman",
-        "systemd:user",
-        if show_system {
-            "systemd:system"
-        } else {
-            "systemd:system [hidden]"
-        },
-        "Direct processes",
-        "Logs",
-        "Doctor",
-        "Process tree",
-        "Metrics",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+fn groups(_show_system: bool) -> Vec<String> {
+    RAIL_ENTRIES
+        .iter()
+        .map(|entry| entry.label.to_string())
+        .collect()
 }
 
 pub fn key_to_command(key: KeyEvent) -> Option<Command> {
@@ -2096,6 +2174,9 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
         "open-project",
         "refresh",
         "overview",
+        "listeners",
+        "workloads",
+        "processes",
         "view all",
         "everything",
         "public",
@@ -2141,6 +2222,8 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
             keybindings: None,
             selected_row: 0,
             overview_hint_visible: false,
+            listener_filter: ListenerFilter::All,
+            listeners_hint_visible: false,
         },
     );
 }
@@ -2166,7 +2249,10 @@ fn panel_block(title: impl Into<String>, theme: &Theme, active: bool) -> Block<'
 pub fn parse_view_kind(value: &str) -> Option<ViewKind> {
     match value.to_ascii_lowercase().replace(['-', '_'], " ").as_str() {
         "overview" | "digest" => Some(ViewKind::Overview),
-        "everything" | "all" | "listeners" => Some(ViewKind::Everything),
+        "listeners" => Some(ViewKind::Listeners),
+        "workloads" => Some(ViewKind::Workloads),
+        "processes" => Some(ViewKind::Processes),
+        "everything" | "all" => Some(ViewKind::Everything),
         "ports" => Some(ViewKind::Ports),
         "public" | "public listeners" => Some(ViewKind::Public),
         "conflicts" => Some(ViewKind::Conflicts),
@@ -2185,6 +2271,9 @@ pub fn parse_view_kind(value: &str) -> Option<ViewKind> {
 fn title_for_view(view: ViewKind) -> &'static str {
     match view {
         ViewKind::Overview => "Overview",
+        ViewKind::Listeners => "Listeners",
+        ViewKind::Workloads => "Workloads",
+        ViewKind::Processes => "Processes",
         ViewKind::Ports => "Ports",
         ViewKind::Public => "Public",
         ViewKind::Conflicts => "Conflicts",
@@ -2200,20 +2289,28 @@ fn title_for_view(view: ViewKind) -> &'static str {
     }
 }
 
+fn canonical_rail_view(view: ViewKind) -> ViewKind {
+    match view {
+        ViewKind::Everything
+        | ViewKind::Ports
+        | ViewKind::Public
+        | ViewKind::Conflicts
+        | ViewKind::Orphans
+        | ViewKind::TrackedRuns => ViewKind::Listeners,
+        ViewKind::Projects | ViewKind::Managers => ViewKind::Workloads,
+        ViewKind::Logs | ViewKind::ProcessTree => ViewKind::Processes,
+        other => other,
+    }
+}
+
 fn group_is_active(group: &str, view: ViewKind) -> bool {
     matches!(
-        (group, view),
+        (group, canonical_rail_view(view)),
         ("Overview", ViewKind::Overview)
-            | ("All/Everything", ViewKind::Everything)
-            | ("Ports", ViewKind::Ports)
-            | ("Public listeners", ViewKind::Public)
-            | ("Conflicts", ViewKind::Conflicts)
-            | ("Orphans", ViewKind::Orphans)
-            | ("Tracked runs", ViewKind::TrackedRuns)
-            | ("Projects", ViewKind::Projects)
-            | ("Logs", ViewKind::Logs)
+            | ("Listeners", ViewKind::Listeners)
+            | ("Workloads", ViewKind::Workloads)
+            | ("Processes", ViewKind::Processes)
             | ("Doctor", ViewKind::Doctor)
-            | ("Process tree", ViewKind::ProcessTree)
             | ("Metrics", ViewKind::Metrics)
     )
 }
@@ -2224,6 +2321,9 @@ fn group_is_active(group: &str, view: ViewKind) -> bool {
 fn cli_hints_for_view(view: ViewKind) -> &'static [&'static str] {
     match view {
         ViewKind::Overview => &["lazyadmin overview --json"],
+        ViewKind::Listeners => &["lazyadmin ps --json", "lazyadmin public --json"],
+        ViewKind::Workloads => &["lazyadmin projects --json"],
+        ViewKind::Processes => &["lazyadmin ps --json"],
         ViewKind::Everything => &["lazyadmin ps --json", "lazyadmin export --json"],
         ViewKind::Ports => &["lazyadmin ps --json"],
         ViewKind::Public => &["lazyadmin public --json"],
@@ -2254,21 +2354,10 @@ fn narrow_refusal_message(view: ViewKind) -> String {
 }
 
 fn group_view_kind(group: &str) -> Option<ViewKind> {
-    match group {
-        "Overview" => Some(ViewKind::Overview),
-        "All/Everything" => Some(ViewKind::Everything),
-        "Ports" => Some(ViewKind::Ports),
-        "Public listeners" => Some(ViewKind::Public),
-        "Conflicts" => Some(ViewKind::Conflicts),
-        "Orphans" => Some(ViewKind::Orphans),
-        "Tracked runs" => Some(ViewKind::TrackedRuns),
-        "Projects" => Some(ViewKind::Projects),
-        "Logs" => Some(ViewKind::Logs),
-        "Doctor" => Some(ViewKind::Doctor),
-        "Process tree" => Some(ViewKind::ProcessTree),
-        "Metrics" => Some(ViewKind::Metrics),
-        _ => None,
-    }
+    RAIL_ENTRIES
+        .iter()
+        .find(|entry| entry.label == group)
+        .and_then(|entry| parse_view_kind(entry.id))
 }
 
 fn render_header(
@@ -2342,6 +2431,8 @@ struct RenderContext<'a> {
     keybindings: Option<&'a ResolvedKeybindings>,
     selected_row: usize,
     overview_hint_visible: bool,
+    listener_filter: ListenerFilter,
+    listeners_hint_visible: bool,
 }
 
 fn render_view_kind(
@@ -2513,7 +2604,9 @@ fn render_main_pane(
             ctx.selected_row,
             ctx.overview_hint_visible,
         ),
-        ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme, active),
+        ViewKind::ProcessTree | ViewKind::Processes => {
+            render_process_tree(view_model, frame, area, theme, active)
+        }
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
         ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
         ViewKind::Doctor => {
@@ -2546,6 +2639,15 @@ fn render_main_pane(
             theme,
             active,
         ),
+        ViewKind::Workloads => render_summary_table(
+            &view_model.workloads,
+            "Workloads",
+            "No workloads discovered yet.",
+            frame,
+            area,
+            theme,
+            active,
+        ),
         ViewKind::TrackedRuns => render_summary_table(
             &view_model.tracked_runs,
             "Tracked Runs",
@@ -2563,6 +2665,8 @@ fn render_main_pane(
             ctx.view,
             ctx.selected_row,
             active,
+            ctx.listener_filter,
+            ctx.listeners_hint_visible,
         ),
     }
     if let Some(keybindings) = ctx.keybindings {
@@ -2911,15 +3015,26 @@ fn render_rows_table(
     view: ViewKind,
     selected_row: usize,
     active: bool,
+    listener_filter: ListenerFilter,
+    listeners_hint_visible: bool,
 ) {
+    let rows_area = if view == ViewKind::Listeners {
+        render_listener_chips(
+            view_model,
+            frame,
+            area,
+            theme,
+            listener_filter,
+            listeners_hint_visible,
+        )
+    } else {
+        area
+    };
+    let effective_filter = effective_listener_filter(view, listener_filter);
     let rows = view_model
         .rows
         .iter()
-        .filter(|r| match view {
-            ViewKind::Public => r.badges.iter().any(|b| b == "PUBLIC"),
-            ViewKind::Ports => r.port.is_some(),
-            _ => true,
-        })
+        .filter(|r| row_matches_view_filter(r, view, effective_filter))
         .enumerate()
         .map(|(idx, r)| {
             let quiet = if idx % 2 == 0 {
@@ -2998,16 +3113,106 @@ fn render_rows_table(
     let row_count = view_model
         .rows
         .iter()
-        .filter(|r| match view {
-            ViewKind::Public => r.badges.iter().any(|b| b == "PUBLIC"),
-            ViewKind::Ports => r.port.is_some(),
-            _ => true,
-        })
+        .filter(|r| row_matches_view_filter(r, view, effective_filter))
         .count();
     if row_count > 0 {
         state.select(Some(selected_row.min(row_count.saturating_sub(1))));
     }
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, rows_area, &mut state);
+}
+
+fn render_listener_chips(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active_filter: ListenerFilter,
+    hint_visible: bool,
+) -> Rect {
+    let toolbar_height = if hint_visible { 3 } else { 2 };
+    if area.height <= toolbar_height {
+        return area;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(toolbar_height), Constraint::Min(1)])
+        .split(area);
+    let filters = [
+        ListenerFilter::All,
+        ListenerFilter::Public,
+        ListenerFilter::Conflicts,
+        ListenerFilter::Orphans,
+        ListenerFilter::Unowned,
+        ListenerFilter::Tracked,
+    ];
+    let mut spans = vec![Span::styled(
+        "Filters ",
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color()),
+    )];
+    for filter in filters {
+        let count = view_model
+            .rows
+            .iter()
+            .filter(|row| row_matches_listener_filter(row, filter))
+            .count();
+        let label = format!("[{} {}] ", filter.label(), count);
+        let style = if filter == active_filter {
+            Style::default()
+                .fg(theme.base_bg.color())
+                .bg(theme.accent.color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color())
+        };
+        spans.push(Span::styled(label, style));
+    }
+    let mut lines = vec![Line::from(spans)];
+    if hint_visible {
+        lines.push(Line::from(Span::styled(
+            "Filters now live as chips — try [P]ublic, [C]onflicts, [/] to search.",
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.base_bg.color())),
+        chunks[0],
+    );
+    chunks[1]
+}
+
+fn effective_listener_filter(view: ViewKind, listener_filter: ListenerFilter) -> ListenerFilter {
+    match view {
+        ViewKind::Public => ListenerFilter::Public,
+        ViewKind::Conflicts => ListenerFilter::Conflicts,
+        ViewKind::Orphans => ListenerFilter::Orphans,
+        _ => listener_filter,
+    }
+}
+
+fn row_matches_listener_filter(row: &RowVm, filter: ListenerFilter) -> bool {
+    match filter {
+        ListenerFilter::All => true,
+        ListenerFilter::Public => row.badges.iter().any(|badge| badge == "PUBLIC"),
+        ListenerFilter::Conflicts => row.is_conflict,
+        ListenerFilter::Orphans | ListenerFilter::Unowned => row.is_orphan,
+        ListenerFilter::Tracked => row.is_tracked,
+    }
+}
+
+fn row_matches_view_filter(row: &RowVm, view: ViewKind, listener_filter: ListenerFilter) -> bool {
+    match view {
+        ViewKind::Ports => row.port.is_some(),
+        ViewKind::Public | ViewKind::Conflicts | ViewKind::Orphans | ViewKind::Listeners => {
+            row_matches_listener_filter(row, listener_filter)
+        }
+        _ => true,
+    }
 }
 
 fn render_inspector(
@@ -3379,12 +3584,22 @@ fn render_metrics(
 }
 
 pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
-    keybindings
+    let mut lines = keybindings
         .bindings
         .iter()
         .filter(|(_, b)| !b.is_empty())
         .map(|(a, b)| format!("{a}: {}", b.join(", ")))
-        .collect()
+        .collect::<Vec<_>>();
+    lines.push("".into());
+    lines.push("views: Overview · Listeners · Workloads · Processes · Doctor · Metrics".into());
+    lines.push(
+        "listeners chips: A all · P public · C conflicts · O orphans · U unowned · T tracked"
+            .into(),
+    );
+    lines.push(
+        "legacy views remain addressable via : public, : conflicts, : view all, or --view".into(),
+    );
+    lines
 }
 
 fn lazyadmin_state_dir() -> PathBuf {
@@ -3657,13 +3872,19 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, row)| match app.active_view {
-            ViewKind::Public => row.badges.iter().any(|badge| badge == "PUBLIC"),
+            ViewKind::Listeners | ViewKind::Public | ViewKind::Conflicts | ViewKind::Orphans => {
+                row_matches_view_filter(
+                    row,
+                    app.active_view,
+                    effective_listener_filter(app.active_view, app.listener_filter),
+                )
+            }
             ViewKind::Ports => row.port.is_some(),
-            ViewKind::Conflicts
-            | ViewKind::Orphans
-            | ViewKind::TrackedRuns
+            ViewKind::TrackedRuns
             | ViewKind::Projects
+            | ViewKind::Workloads
             | ViewKind::Managers
+            | ViewKind::Processes
             | ViewKind::ProcessTree
             | ViewKind::Metrics
             | ViewKind::Logs
@@ -3894,24 +4115,19 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
 fn navigable_views() -> &'static [ViewKind] {
     &[
         ViewKind::Overview,
-        ViewKind::Everything,
-        ViewKind::Ports,
-        ViewKind::Public,
-        ViewKind::Conflicts,
-        ViewKind::Orphans,
-        ViewKind::TrackedRuns,
-        ViewKind::Projects,
-        ViewKind::Logs,
+        ViewKind::Listeners,
+        ViewKind::Workloads,
+        ViewKind::Processes,
         ViewKind::Doctor,
-        ViewKind::ProcessTree,
         ViewKind::Metrics,
     ]
 }
 
 fn active_view_index(view: ViewKind) -> usize {
+    let rail_view = canonical_rail_view(view);
     navigable_views()
         .iter()
-        .position(|candidate| *candidate == view)
+        .position(|candidate| *candidate == rail_view)
         .unwrap_or_default()
 }
 
@@ -3924,12 +4140,34 @@ fn cycle_active_view(app: &mut App, delta: isize, width: u16) {
 }
 
 fn set_active_view(app: &mut App, view: ViewKind, width: u16) {
-    if view == ViewKind::ProcessTree {
-        if app.selected_process.is_none() {
-            app.selected_process = app.vm.process_tree.rows.first().map(|row| row.key.clone());
+    match view {
+        ViewKind::Listeners => {
+            app.selected_process = None;
+            if !app.listeners_hint_seen {
+                app.listeners_hint_visible = true;
+                app.listeners_hint_seen = true;
+            }
         }
-    } else {
-        app.selected_process = None;
+        ViewKind::Public => {
+            app.selected_process = None;
+            app.listener_filter = ListenerFilter::Public;
+        }
+        ViewKind::Conflicts => {
+            app.selected_process = None;
+            app.listener_filter = ListenerFilter::Conflicts;
+        }
+        ViewKind::Orphans => {
+            app.selected_process = None;
+            app.listener_filter = ListenerFilter::Orphans;
+        }
+        ViewKind::ProcessTree | ViewKind::Processes => {
+            if app.selected_process.is_none() {
+                app.selected_process = app.vm.process_tree.rows.first().map(|row| row.key.clone());
+            }
+        }
+        _ => {
+            app.selected_process = None;
+        }
     }
     app.active_view = view;
     app.selected_row = 0;
@@ -4065,8 +4303,37 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     if app.active_view == ViewKind::Overview
         && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
     {
-        set_active_view(app, ViewKind::Everything, width);
+        set_active_view(app, ViewKind::Listeners, width);
         return;
+    }
+    if app.active_view == ViewKind::Listeners {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                set_listener_filter(app, ListenerFilter::All, width);
+                return;
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                set_listener_filter(app, ListenerFilter::Public, width);
+                return;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                set_listener_filter(app, ListenerFilter::Conflicts, width);
+                return;
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                set_listener_filter(app, ListenerFilter::Orphans, width);
+                return;
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                set_listener_filter(app, ListenerFilter::Unowned, width);
+                return;
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                set_listener_filter(app, ListenerFilter::Tracked, width);
+                return;
+            }
+            _ => {}
+        }
     }
     if app.active_view == ViewKind::Doctor {
         match key.code {
@@ -4102,7 +4369,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             }
             Command::Filter => {
                 if app.active_view == ViewKind::Overview {
-                    set_active_view(app, ViewKind::Everything, width);
+                    set_active_view(app, ViewKind::Listeners, width);
                 }
                 app.mode = InputMode::Filter;
             }
@@ -4111,17 +4378,23 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 app.mode = InputMode::Palette;
             }
             Command::Refresh => rebuild_view_model(app, width),
-            Command::Inspect if app.active_view == ViewKind::Overview => {
-                let target = digest_target_for_index(app.selected_row);
-                set_active_view(app, target, width);
-            }
+            Command::Inspect if app.active_view == ViewKind::Overview => match app.selected_row {
+                0 => {
+                    app.listener_filter = ListenerFilter::Public;
+                    set_active_view(app, ViewKind::Listeners, width);
+                }
+                _ => {
+                    let target = digest_target_for_index(app.selected_row);
+                    set_active_view(app, target, width);
+                }
+            },
             Command::Inspect if app.active_view == ViewKind::Doctor => {
                 toggle_selected_doctor_group(app, width);
             }
             Command::NextPane => cycle_pane(app, 1, width),
             Command::PrevPane => cycle_pane(app, -1, width),
             Command::Tree => {
-                if app.active_view == ViewKind::ProcessTree {
+                if matches!(app.active_view, ViewKind::ProcessTree | ViewKind::Processes) {
                     toggle_selected_process(app);
                     rebuild_view_model(app, width);
                 } else {
@@ -4137,7 +4410,12 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             Command::Ports => {
                 set_active_view(app, ViewKind::Ports, width);
             }
-            Command::Help => app.mode = InputMode::Help,
+            Command::Help => {
+                if app.active_view == ViewKind::Listeners {
+                    app.listeners_hint_visible = false;
+                }
+                app.mode = InputMode::Help;
+            }
             Command::CopyDiagnostic => match copy_diagnostic(&app.vm.inspector.diagnostic_markdown)
             {
                 Ok(CopyDiagnosticOutcome::Clipboard) => {
@@ -4192,6 +4470,13 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     }
 }
 
+fn set_listener_filter(app: &mut App, filter: ListenerFilter, width: u16) {
+    app.listener_filter = filter;
+    app.listeners_hint_visible = false;
+    rebuild_view_model(app, width);
+    app.status = Some(format!("listeners filter: {}", filter.label()));
+}
+
 fn toggle_selected_doctor_group(app: &mut App, width: u16) {
     let Some(row) = app.vm.doctor.rows.get(app.selected_row) else {
         return;
@@ -4242,9 +4527,10 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
             }
         }
         "overview" | "digest" => set_active_view(app, ViewKind::Overview, width),
-        "view all" | "everything" | "all" | "listeners" => {
-            set_active_view(app, ViewKind::Everything, width)
-        }
+        "listeners" => set_active_view(app, ViewKind::Listeners, width),
+        "view all" | "everything" | "all" => set_active_view(app, ViewKind::Everything, width),
+        "workloads" => set_active_view(app, ViewKind::Workloads, width),
+        "processes" => set_active_view(app, ViewKind::Processes, width),
         "public" => set_active_view(app, ViewKind::Public, width),
         "conflicts" => set_active_view(app, ViewKind::Conflicts, width),
         "projects" => set_active_view(app, ViewKind::Projects, width),
@@ -4284,6 +4570,8 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
             keybindings: Some(&app.keybindings),
             selected_row: app.selected_row,
             overview_hint_visible: app.overview_hint_visible,
+            listener_filter: app.listener_filter,
+            listeners_hint_visible: app.listeners_hint_visible,
         },
     );
     let footer = Rect {
@@ -4599,6 +4887,8 @@ mod tests {
                             keybindings: None,
                             selected_row: 0,
                             overview_hint_visible: false,
+                            listener_filter: ListenerFilter::All,
+                            listeners_hint_visible: false,
                         },
                     )
                 })
@@ -4634,6 +4924,8 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
@@ -4659,7 +4951,8 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(app.active_view, ViewKind::Public);
+        assert_eq!(app.active_view, ViewKind::Listeners);
+        assert_eq!(app.listener_filter, ListenerFilter::Public);
     }
 
     #[test]
@@ -4681,6 +4974,8 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
@@ -4728,6 +5023,9 @@ mod tests {
     fn narrow_refusal_lists_view_specific_cli_hint() {
         for view in [
             ViewKind::Overview,
+            ViewKind::Listeners,
+            ViewKind::Workloads,
+            ViewKind::Processes,
             ViewKind::Everything,
             ViewKind::Ports,
             ViewKind::Public,
@@ -4781,6 +5079,8 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
@@ -4855,6 +5155,8 @@ mod tests {
                             keybindings: None,
                             selected_row: 0,
                             overview_hint_visible: false,
+                            listener_filter: ListenerFilter::All,
+                            listeners_hint_visible: false,
                         },
                     )
                 })
@@ -4970,6 +5272,145 @@ mod tests {
     }
 
     #[test]
+    fn listener_chip_predicates_match_row_flags() {
+        let mut snap = build_empty_snapshot();
+        let mut public_proc = process(2001, None, 1);
+        public_proc.lazyadmin_run_id = Some(RunId::new("tracked"));
+        let public_key = public_proc.key.clone();
+        snap.processes.push(public_proc);
+        let mut public = listener_for_process(public_key, 8080);
+        public.exposure = Exposure::Public;
+        public.bind_addr = Some("0.0.0.0".into());
+        snap.listeners.push(public);
+
+        let conflict_proc = process(2002, None, 2);
+        let conflict_key = conflict_proc.key.clone();
+        snap.processes.push(conflict_proc);
+        let mut conflict = listener_for_process(conflict_key, 8081);
+        conflict.owners.push(EntityRef::Process(ProcessKey {
+            pid: 2003,
+            boot_id: "boot".into(),
+            start_time_ticks: 3,
+        }));
+        snap.listeners.push(conflict);
+
+        let now = chrono::Utc::now();
+        snap.listeners.push(Listener {
+            id: ListenerId::new("tcp:127.0.0.1:8082"),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(8082),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "default".into(),
+            socket_inode: None,
+            exposure: Exposure::Loopback,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: now,
+            last_seen: now,
+            dual_stack_state: DualStackState::NotApplicable,
+        });
+
+        let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(
+            vm.rows
+                .iter()
+                .filter(|row| row_matches_listener_filter(row, ListenerFilter::All))
+                .count(),
+            3
+        );
+        assert_eq!(
+            vm.rows
+                .iter()
+                .filter(|row| row_matches_listener_filter(row, ListenerFilter::Public))
+                .count(),
+            1
+        );
+        assert_eq!(
+            vm.rows
+                .iter()
+                .filter(|row| row_matches_listener_filter(row, ListenerFilter::Conflicts))
+                .count(),
+            1
+        );
+        assert_eq!(
+            vm.rows
+                .iter()
+                .filter(|row| row_matches_listener_filter(row, ListenerFilter::Orphans))
+                .count(),
+            1
+        );
+        assert_eq!(
+            vm.rows
+                .iter()
+                .filter(|row| row_matches_listener_filter(row, ListenerFilter::Tracked))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn listener_chip_predicates_match_busy_fixture_legacy_views() {
+        let snap: Snapshot =
+            serde_json::from_str(include_str!("../../../testdata/snapshots/busy.json"))
+                .expect("busy snapshot fixture parses");
+        let vm = build_view_model(&snap, 120, false, "");
+        let public_rows = vm
+            .rows
+            .iter()
+            .filter(|row| row_matches_listener_filter(row, ListenerFilter::Public))
+            .count();
+        let public_legacy = vm
+            .rows
+            .iter()
+            .filter(|row| row_matches_view_filter(row, ViewKind::Public, ListenerFilter::Public))
+            .count();
+        let conflict_rows = vm
+            .rows
+            .iter()
+            .filter(|row| row_matches_listener_filter(row, ListenerFilter::Conflicts))
+            .count();
+        let orphan_rows = vm
+            .rows
+            .iter()
+            .filter(|row| row_matches_listener_filter(row, ListenerFilter::Orphans))
+            .count();
+        assert_eq!(public_rows, public_legacy);
+        assert_eq!(conflict_rows, vm.conflicts.len());
+        assert_eq!(orphan_rows, vm.orphans.len());
+    }
+
+    #[test]
+    fn view_kind_public_programmatic_entry_still_filters_public_rows() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(3001, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        let mut public = listener_for_process(key, 8080);
+        public.exposure = Exposure::Public;
+        public.bind_addr = Some("0.0.0.0".into());
+        snap.listeners.push(public);
+        let private_proc = process(3002, None, 2);
+        let private_key = private_proc.key.clone();
+        snap.processes.push(private_proc);
+        snap.listeners.push(listener_for_process(private_key, 8081));
+
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Public,
+            listener_filter: ListenerFilter::Public,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        assert_eq!(visible_row_indices(&app).len(), 1);
+        assert_eq!(selected_row(&app).unwrap().port, Some(8080));
+    }
+
+    #[test]
     fn doctor_view_renders_actionable_warning_rows() {
         let mut snap = build_empty_snapshot();
         snap.warnings.push(lazyadmin_core::model::Warning {
@@ -5003,6 +5444,8 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
@@ -5158,6 +5601,8 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
@@ -5267,7 +5712,9 @@ mod tests {
         keybindings.bindings.insert("toggle_filter".into(), vec![]);
         keybindings.bindings.insert("quit".into(), vec!["q".into()]);
         let lines = help_lines(&keybindings);
-        assert_eq!(lines, vec!["quit: q"]);
+        assert!(lines.contains(&"quit: q".into()));
+        assert!(!lines.iter().any(|line| line.contains("toggle_filter")));
+        assert!(lines.iter().any(|line| line.contains("listeners chips")));
     }
 
     #[test]
@@ -5563,48 +6010,35 @@ mod tests {
         assert_eq!(app.pane, Pane::Groups);
     }
 
-    /// Issue #2 acceptance criterion 3: TUI render tests cover the view-rail
-    /// layout in both states.
-    ///
-    /// Manager group entries (`Docker/Compose`, `Podman`, `systemd:user`,
-    /// `systemd:system`, `Direct processes`) are non-navigable filter
-    /// placeholders and must render with the "·" marker — distinct from the
-    /// "›" active marker and the "  " navigable-but-inactive marker. Down/up
-    /// arrows must skip them so they don't look like missed selections.
     #[test]
-    fn view_rail_marks_manager_groups_as_non_navigable() {
-        // Sanity: the canonical group list must include both classes for the
-        // marker assertions below to be meaningful.
+    fn view_rail_is_collapsed_to_runtime_entries() {
         let group_list = groups(false);
-        let manager_groups = ["Docker/Compose", "Podman", "Direct processes"];
-        for g in &manager_groups {
-            assert!(
-                group_list.iter().any(|item| item == g),
-                "missing manager group {g} in groups()"
-            );
-            assert!(
-                group_view_kind(g).is_none(),
-                "{g} should be non-navigable (group_view_kind returns None)"
-            );
-        }
-        for g in [
-            "Overview",
-            "All/Everything",
+        assert_eq!(group_list.len(), 6);
+        assert_eq!(
+            group_list,
+            vec![
+                "Overview",
+                "Listeners",
+                "Workloads",
+                "Processes",
+                "Doctor",
+                "Metrics"
+            ]
+        );
+        for removed in [
             "Ports",
             "Public listeners",
             "Conflicts",
             "Orphans",
             "Tracked runs",
-            "Projects",
-            "Logs",
-            "Doctor",
-            "Process tree",
-            "Metrics",
+            "Docker/Compose",
+            "Podman",
+            "systemd:user",
+            "systemd:system [hidden]",
+            "Direct processes",
         ] {
-            assert!(
-                group_view_kind(g).is_some(),
-                "{g} should be navigable (group_view_kind returns Some)"
-            );
+            assert!(!group_list.iter().any(|item| item == removed));
+            assert!(group_view_kind(removed).is_none());
         }
 
         let snap = build_empty_snapshot();
@@ -5624,53 +6058,82 @@ mod tests {
                         keybindings: None,
                         selected_row: 0,
                         overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
                     },
                 )
             })
             .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let row_text = |y: u16| -> String {
-            (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol().to_string())
-                .collect::<String>()
-        };
-        let mut combined = String::new();
-        for y in 0..buffer.area.height {
-            combined.push_str(&row_text(y));
-            combined.push('\n');
-        }
-        // Active marker on the current view.
+        let combined = format!("{:?}", terminal.backend().buffer());
         assert!(
             combined.contains("› Overview"),
             "active marker missing: {combined}"
         );
-        // Manager groups carry the non-navigable marker, never the
-        // navigable-but-inactive marker.
-        for g in &manager_groups {
-            let marked = format!("· {g}");
-            assert!(
-                combined.contains(&marked),
-                "manager group {g} missing non-navigable marker: {combined}"
-            );
-            // Also ensure they never carry the active "›" marker since they're
-            // not selectable.
-            assert!(
-                !combined.contains(&format!("› {g}")),
-                "manager group {g} should never appear active: {combined}"
-            );
+        assert!(
+            combined.contains("  Listeners"),
+            "listeners rail entry missing: {combined}"
+        );
+        assert!(!combined.contains("Docker/Compose"));
+    }
+
+    #[test]
+    fn rail_has_at_most_eight_entries() {
+        assert!(groups(false).len() <= 8);
+    }
+
+    #[test]
+    fn rail_render_has_no_hidden_or_removed_entries_at_common_widths() {
+        let snap = build_empty_snapshot();
+        for width in [70, 90, 120, 160] {
+            let vm = build_view_model(&snap, width, false, "");
+            let backend = TestBackend::new(width, 28);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    render_view_kind(
+                        &vm,
+                        f,
+                        f.area(),
+                        &Theme::default_dark(),
+                        RenderContext {
+                            view: ViewKind::Overview,
+                            active_pane: Pane::Groups,
+                            keybindings: None,
+                            selected_row: 0,
+                            overview_hint_visible: false,
+                            listener_filter: ListenerFilter::All,
+                            listeners_hint_visible: false,
+                        },
+                    )
+                })
+                .unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+            for removed in [
+                "[hidden]",
+                "Docker/Compose",
+                "Podman",
+                "systemd:user",
+                "systemd:system",
+                "Direct processes",
+                "Public listeners",
+                "Tracked runs",
+            ] {
+                assert!(
+                    !text.contains(removed),
+                    "width {width} still rendered removed rail entry {removed}: {text}"
+                );
+            }
         }
     }
 
     #[test]
-    fn down_arrow_skips_manager_groups_in_view_rail() {
-        // Anchor at the last navigable view before the manager group block
-        // (Projects). The next Down should land on Logs, not on a manager.
+    fn down_arrow_uses_collapsed_rail_order() {
         let snap = build_empty_snapshot();
         let mut app = App {
             vm: build_view_model(&snap, 120, false, ""),
             snapshot: snap,
             pane: Pane::Groups,
-            active_view: ViewKind::Projects,
+            active_view: ViewKind::Workloads,
             ..Default::default()
         };
         handle_key(
@@ -5678,18 +6141,13 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(
-            app.active_view,
-            ViewKind::Logs,
-            "down from Projects must skip the manager group block and land on Logs"
-        );
-        // Up from Logs should symmetrically jump back to Projects.
+        assert_eq!(app.active_view, ViewKind::Processes);
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(app.active_view, ViewKind::Projects);
+        assert_eq!(app.active_view, ViewKind::Workloads);
     }
 
     #[test]
@@ -5709,7 +6167,7 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(app.active_view, ViewKind::Everything);
+        assert_eq!(app.active_view, ViewKind::Listeners);
 
         handle_key(
             &mut app,
@@ -5736,7 +6194,7 @@ mod tests {
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             70,
         );
-        assert_eq!(app.active_view, ViewKind::Everything);
+        assert_eq!(app.active_view, ViewKind::Listeners);
 
         handle_key(
             &mut app,
@@ -5978,6 +6436,9 @@ accent = "#123456"
             exposure: "loopback".into(),
             project: "-".into(),
             badges: vec![],
+            is_conflict: false,
+            is_orphan: false,
+            is_tracked: false,
             search_text: "".into(),
         };
         assert!(open_url_for_row(&row, false).is_err());

@@ -157,6 +157,7 @@ fn app(state: AppState) -> Router {
         .route("/snapshot", get(snapshot))
         .route("/doctor", get(doctor))
         .route("/digest", get(digest))
+        .route("/rail", get(rail))
         .route("/events", get(events))
         .route("/views/overview", get(overview))
         .route("/entities/:kind/:id", get(entity))
@@ -293,6 +294,10 @@ async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
             None,
         ),
     }
+}
+
+async fn rail() -> impl IntoResponse {
+    Json(lazyadmin_runtime::view_model::RAIL_ENTRIES)
 }
 
 async fn digest(State(state): State<AppState>) -> impl IntoResponse {
@@ -546,6 +551,16 @@ mod tests {
         for key in ["exposed", "conflicts", "your_projects", "triage"] {
             assert!(digest_body.get(key).is_some(), "missing digest field {key}");
         }
+        let rail = app
+            .clone()
+            .oneshot(local_request("/api/rail"))
+            .await
+            .expect("rail response");
+        assert_eq!(rail.status(), StatusCode::OK);
+        let rail_body = json_body(rail).await;
+        assert_eq!(rail_body.as_array().map(Vec::len), Some(6));
+        assert_eq!(rail_body[0]["id"], "overview");
+        assert_eq!(rail_body[1]["label"], "Listeners");
         let index = app
             .clone()
             .oneshot(local_request("/"))
