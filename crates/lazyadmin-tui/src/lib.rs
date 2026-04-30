@@ -23,7 +23,7 @@ use lazyadmin_core::{
     output::listener_rows,
     snapshot::build_empty_snapshot,
 };
-use lazyadmin_runtime::view_model::build_doctor_groups;
+use lazyadmin_runtime::view_model::{Digest, build_digest, build_doctor_groups};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -84,6 +84,7 @@ pub struct App {
     doctor_severity_filter: DoctorSeverityFilter,
     event_ring: AdapterEventRing,
     config_reload: Option<ConfigReload>,
+    overview_hint_visible: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,7 +142,7 @@ impl Default for App {
             vm: ViewModel::default(),
             snapshot: build_empty_snapshot(),
             pane: Pane::Rows,
-            active_view: ViewKind::Everything,
+            active_view: ViewKind::Overview,
             query: String::new(),
             mode: InputMode::default(),
             should_quit: false,
@@ -164,6 +165,7 @@ impl Default for App {
             doctor_severity_filter: DoctorSeverityFilter::All,
             event_ring: AdapterEventRing::default(),
             config_reload: None,
+            overview_hint_visible: false,
         }
     }
 }
@@ -178,6 +180,7 @@ pub struct TuiRuntime {
     pub snapshots: Option<mpsc::Receiver<Snapshot>>,
     pub discovery_events: Option<mpsc::Receiver<DiscoveryEvent>>,
     pub config_reload: Option<ConfigReload>,
+    pub initial_view: Option<ViewKind>,
 }
 
 impl TuiRuntime {
@@ -197,6 +200,7 @@ impl TuiRuntime {
             snapshots: None,
             discovery_events: None,
             config_reload: None,
+            initial_view: None,
         }
     }
 }
@@ -204,6 +208,7 @@ impl TuiRuntime {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewKind {
     #[default]
+    Overview,
     Everything,
     Ports,
     Public,
@@ -785,6 +790,7 @@ pub struct ViewModel {
     pub layout: LayoutMode,
     pub groups: Vec<String>,
     pub rows: Vec<RowVm>,
+    pub digest: Digest,
     pub conflicts: Vec<SummaryRowVm>,
     pub orphans: Vec<SummaryRowVm>,
     pub projects: Vec<SummaryRowVm>,
@@ -1182,6 +1188,7 @@ pub fn build_view_model_with_state(
         layout,
         groups: groups(show_system),
         rows,
+        digest: build_digest(snapshot),
         conflicts,
         orphans,
         projects,
@@ -1934,6 +1941,7 @@ fn inspector_for_process(snapshot: &Snapshot, key: &ProcessKey) -> Option<Inspec
 }
 fn groups(show_system: bool) -> Vec<String> {
     [
+        "Overview",
         "All/Everything",
         "Ports",
         "Public listeners",
@@ -2087,6 +2095,13 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
         "edit-compose-file",
         "open-project",
         "refresh",
+        "overview",
+        "view all",
+        "everything",
+        "public",
+        "conflicts",
+        "projects",
+        "doctor",
         "process-tree",
         "metrics",
         "theme default-dark",
@@ -2121,10 +2136,11 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
         area,
         theme,
         RenderContext {
-            view: ViewKind::Everything,
+            view: ViewKind::Overview,
             active_pane: Pane::Rows,
             keybindings: None,
             selected_row: 0,
+            overview_hint_visible: false,
         },
     );
 }
@@ -2147,8 +2163,28 @@ fn panel_block(title: impl Into<String>, theme: &Theme, active: bool) -> Block<'
         )
 }
 
+pub fn parse_view_kind(value: &str) -> Option<ViewKind> {
+    match value.to_ascii_lowercase().replace(['-', '_'], " ").as_str() {
+        "overview" | "digest" => Some(ViewKind::Overview),
+        "everything" | "all" | "listeners" => Some(ViewKind::Everything),
+        "ports" => Some(ViewKind::Ports),
+        "public" | "public listeners" => Some(ViewKind::Public),
+        "conflicts" => Some(ViewKind::Conflicts),
+        "projects" => Some(ViewKind::Projects),
+        "managers" => Some(ViewKind::Managers),
+        "orphans" => Some(ViewKind::Orphans),
+        "tracked runs" | "runs" => Some(ViewKind::TrackedRuns),
+        "logs" => Some(ViewKind::Logs),
+        "doctor" | "warnings" => Some(ViewKind::Doctor),
+        "process tree" | "tree" => Some(ViewKind::ProcessTree),
+        "metrics" => Some(ViewKind::Metrics),
+        _ => None,
+    }
+}
+
 fn title_for_view(view: ViewKind) -> &'static str {
     match view {
+        ViewKind::Overview => "Overview",
         ViewKind::Ports => "Ports",
         ViewKind::Public => "Public",
         ViewKind::Conflicts => "Conflicts",
@@ -2167,7 +2203,8 @@ fn title_for_view(view: ViewKind) -> &'static str {
 fn group_is_active(group: &str, view: ViewKind) -> bool {
     matches!(
         (group, view),
-        ("All/Everything", ViewKind::Everything)
+        ("Overview", ViewKind::Overview)
+            | ("All/Everything", ViewKind::Everything)
             | ("Ports", ViewKind::Ports)
             | ("Public listeners", ViewKind::Public)
             | ("Conflicts", ViewKind::Conflicts)
@@ -2186,6 +2223,7 @@ fn group_is_active(group: &str, view: ViewKind) -> bool {
 /// list at least one matching CLI command for the active view.
 fn cli_hints_for_view(view: ViewKind) -> &'static [&'static str] {
     match view {
+        ViewKind::Overview => &["lazyadmin overview --json"],
         ViewKind::Everything => &["lazyadmin ps --json", "lazyadmin export --json"],
         ViewKind::Ports => &["lazyadmin ps --json"],
         ViewKind::Public => &["lazyadmin public --json"],
@@ -2217,6 +2255,7 @@ fn narrow_refusal_message(view: ViewKind) -> String {
 
 fn group_view_kind(group: &str) -> Option<ViewKind> {
     match group {
+        "Overview" => Some(ViewKind::Overview),
         "All/Everything" => Some(ViewKind::Everything),
         "Ports" => Some(ViewKind::Ports),
         "Public listeners" => Some(ViewKind::Public),
@@ -2302,6 +2341,7 @@ struct RenderContext<'a> {
     active_pane: Pane,
     keybindings: Option<&'a ResolvedKeybindings>,
     selected_row: usize,
+    overview_hint_visible: bool,
 }
 
 fn render_view_kind(
@@ -2317,6 +2357,10 @@ fn render_view_kind(
         area,
     );
     if view_model.layout == LayoutMode::Refuse || area.width < 60 {
+        if ctx.view == ViewKind::Overview {
+            render_digest_refuse(view_model, frame, area, theme);
+            return;
+        }
         let p = Paragraph::new(narrow_refusal_message(ctx.view))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false })
@@ -2460,6 +2504,15 @@ fn render_main_pane(
     active: bool,
 ) {
     match ctx.view {
+        ViewKind::Overview => render_digest(
+            view_model,
+            frame,
+            area,
+            theme,
+            active,
+            ctx.selected_row,
+            ctx.overview_hint_visible,
+        ),
         ViewKind::ProcessTree => render_process_tree(view_model, frame, area, theme, active),
         ViewKind::Metrics => render_metrics(view_model, frame, area, theme, active),
         ViewKind::Logs => render_logs(view_model, frame, area, theme, active),
@@ -2515,6 +2568,248 @@ fn render_main_pane(
     if let Some(keybindings) = ctx.keybindings {
         let _ = help_lines(keybindings);
     }
+}
+
+fn render_digest(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    active: bool,
+    selected_index: usize,
+    overview_hint_visible: bool,
+) {
+    let digest = &view_model.digest;
+    let mut lines = Vec::new();
+    if overview_hint_visible {
+        lines.push(Line::from(Span::styled(
+            "New layout: this is the digest. Press [v] for the full Listeners table.",
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            "EXPOSED ",
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{} public · {} LAN · {} unowned ({} shown)",
+                digest.exposed.total_public,
+                digest.exposed.total_lan,
+                digest.exposed.unowned_count,
+                digest.exposed.rows.len()
+            ),
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
+        ),
+    ]));
+    if digest.exposed.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", digest.exposed.empty_copy),
+            Style::default()
+                .fg(theme.ok.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else {
+        for row in &digest.exposed.rows {
+            let extra = if row.extra_ports > 0 {
+                format!(" +{} ports", row.extra_ports)
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ● {}  {}  {}{}",
+                    row.bind,
+                    row.owner_label,
+                    row.project.clone().unwrap_or_else(|| "-".into()),
+                    extra
+                ),
+                Style::default()
+                    .fg(if matches!(row.exposure, Exposure::Public) {
+                        theme.risk_public.color()
+                    } else {
+                        theme.risk_lan.color()
+                    })
+                    .bg(theme.base_bg.color()),
+            )));
+        }
+    }
+    lines.push(digest_action_line(
+        selected_index == 0,
+        format!(
+            "[view all {} →]",
+            digest.exposed.total_public + digest.exposed.total_lan
+        ),
+        theme,
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "CONFLICTS {} ({} shown)",
+            digest.conflicts.total,
+            digest.conflicts.rows.len()
+        ),
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    if digest.conflicts.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", digest.conflicts.empty_copy),
+            Style::default()
+                .fg(theme.ok.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else {
+        for row in &digest.conflicts.rows {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ┃ {}  owners={}  {}",
+                    row.bind, row.owner_count, row.reason
+                ),
+                Style::default()
+                    .fg(theme.marker_conflict.color())
+                    .bg(theme.base_bg.color()),
+            )));
+        }
+    }
+    lines.push(digest_action_line(
+        selected_index == 1,
+        format!("[view all {} →]", digest.conflicts.total),
+        theme,
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "PROJECTS {} ({} shown)",
+            digest.your_projects.total,
+            digest.your_projects.rows.len()
+        ),
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    if digest.your_projects.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", digest.your_projects.empty_copy),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else {
+        for row in &digest.your_projects.rows {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ▎ {}  {} listeners  {}",
+                    row.name, row.listener_count, row.root
+                ),
+                Style::default()
+                    .fg(theme.marker_project.color())
+                    .bg(theme.base_bg.color()),
+            )));
+        }
+    }
+    lines.push(digest_action_line(
+        selected_index == 2,
+        format!("[view all {} →]", digest.your_projects.total),
+        theme,
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "TRIAGE {} actionable · {} noisy groups",
+            digest.triage.summary.actionable, digest.triage.summary.noise_groups
+        ),
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    if digest.triage.summary.actionable == 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", digest.triage.empty_copy),
+            Style::default()
+                .fg(theme.ok.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  Press Doctor to review grouped warnings.",
+            Style::default()
+                .fg(theme.warning.color())
+                .bg(theme.base_bg.color()),
+        )));
+    }
+    lines.push(digest_action_line(
+        selected_index == 3,
+        format!("[view all {} →]", digest.triage.summary.actionable),
+        theme,
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Overview", theme, active))
+            .style(
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            ),
+        area,
+    );
+}
+
+fn digest_action_line(selected: bool, text: String, theme: &Theme) -> Line<'static> {
+    let prefix = if selected { "  › " } else { "    " };
+    let style = if selected {
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color())
+    };
+    Line::from(Span::styled(format!("{prefix}{text}"), style))
+}
+
+fn render_digest_refuse(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+) {
+    let digest = &view_model.digest;
+    let message = format!(
+        "EXPOSED {} · CONFLICTS {} · PROJECTS {} · TRIAGE {} actionable\nTry `lazyadmin overview --json` or widen the terminal.",
+        digest.exposed.total_public + digest.exposed.total_lan,
+        digest.conflicts.total,
+        digest.your_projects.total,
+        digest.triage.summary.actionable
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Overview", theme, true))
+            .style(
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            ),
+        area,
+    );
 }
 
 fn render_empty_state(
@@ -3092,6 +3387,31 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
         .collect()
 }
 
+fn lazyadmin_state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("lazyadmin")
+}
+
+fn overview_seen_flag_path() -> PathBuf {
+    lazyadmin_state_dir().join("seen-overview.flag")
+}
+
+fn overview_seen_flag_exists() -> bool {
+    overview_seen_flag_path().exists()
+}
+
+fn mark_overview_seen() -> anyhow::Result<()> {
+    let path = overview_seen_flag_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, b"seen\n")?;
+    Ok(())
+}
+
 pub fn copy_diagnostic_fallback(
     markdown: &str,
     state_home: Option<&std::path::Path>,
@@ -3239,6 +3559,7 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
     info!("tui.start");
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let initial_snapshot = runtime.initial_snapshot;
+    let initial_view = runtime.initial_view.unwrap_or_default();
     let mut app = App {
         vm: build_view_model(&initial_snapshot, w, runtime.config.show_system, ""),
         snapshot: initial_snapshot,
@@ -3248,6 +3569,8 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         status: runtime.color_hint,
         allow_open_non_loopback: runtime.allow_open_non_loopback,
         config_reload: runtime.config_reload,
+        active_view: initial_view,
+        overview_hint_visible: initial_view == ViewKind::Overview && !overview_seen_flag_exists(),
         ..Default::default()
     };
     sync_row_selection(&mut app);
@@ -3352,6 +3675,23 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
 }
 
 fn sync_row_selection(app: &mut App) {
+    if app.active_view == ViewKind::Overview {
+        app.selected_row = app
+            .selected_row
+            .min(digest_target_count().saturating_sub(1));
+        app.vm.inspector = InspectorVm {
+            title: "Overview digest".into(),
+            lines: vec![
+                "Use ↑/↓ to choose a section.".into(),
+                "Press Enter on [view all] to drill in.".into(),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::Digest".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: "# lazyadmin overview\nDigest projection from current snapshot\n"
+                .into(),
+        };
+        return;
+    }
     if app.active_view == ViewKind::Doctor {
         if app.vm.doctor.rows.is_empty() {
             app.selected_row = 0;
@@ -3397,8 +3737,24 @@ fn sync_row_selection(app: &mut App) {
     }
 }
 
+fn digest_target_count() -> usize {
+    4
+}
+
+fn digest_target_for_index(index: usize) -> ViewKind {
+    match index {
+        0 => ViewKind::Public,
+        1 => ViewKind::Conflicts,
+        2 => ViewKind::Projects,
+        3 => ViewKind::Doctor,
+        _ => ViewKind::Public,
+    }
+}
+
 fn scroll_rows(app: &mut App, delta: isize) {
-    let visible_len = if app.active_view == ViewKind::Doctor {
+    let visible_len = if app.active_view == ViewKind::Overview {
+        digest_target_count()
+    } else if app.active_view == ViewKind::Doctor {
         app.vm.doctor.rows.len()
     } else {
         visible_row_indices(app).len()
@@ -3537,6 +3893,7 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
 
 fn navigable_views() -> &'static [ViewKind] {
     &[
+        ViewKind::Overview,
         ViewKind::Everything,
         ViewKind::Ports,
         ViewKind::Public,
@@ -3609,6 +3966,12 @@ fn cycle_pane(app: &mut App, delta: isize, width: u16) {
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     if handle_confirmation_key(app, key) {
         return;
+    }
+    if app.active_view == ViewKind::Overview && app.overview_hint_visible {
+        app.overview_hint_visible = false;
+        if let Err(err) = mark_overview_seen() {
+            app.status = Some(format!("overview hint flag not saved: {err}"));
+        }
     }
     if matches!(app.mode, InputMode::Filter) {
         match key.code {
@@ -3688,12 +4051,22 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             return;
         }
         KeyCode::End => {
-            app.selected_row = visible_row_indices(app).len().saturating_sub(1);
+            app.selected_row = if app.active_view == ViewKind::Overview {
+                digest_target_count().saturating_sub(1)
+            } else {
+                visible_row_indices(app).len().saturating_sub(1)
+            };
             app.selected_process = None;
             sync_row_selection(app);
             return;
         }
         _ => {}
+    }
+    if app.active_view == ViewKind::Overview
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+    {
+        set_active_view(app, ViewKind::Everything, width);
+        return;
     }
     if app.active_view == ViewKind::Doctor {
         match key.code {
@@ -3727,12 +4100,21 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 app.show_system = !app.show_system;
                 rebuild_view_model(app, width);
             }
-            Command::Filter => app.mode = InputMode::Filter,
+            Command::Filter => {
+                if app.active_view == ViewKind::Overview {
+                    set_active_view(app, ViewKind::Everything, width);
+                }
+                app.mode = InputMode::Filter;
+            }
             Command::Palette => {
                 app.query.clear();
                 app.mode = InputMode::Palette;
             }
             Command::Refresh => rebuild_view_model(app, width),
+            Command::Inspect if app.active_view == ViewKind::Overview => {
+                let target = digest_target_for_index(app.selected_row);
+                set_active_view(app, target, width);
+            }
             Command::Inspect if app.active_view == ViewKind::Doctor => {
                 toggle_selected_doctor_group(app, width);
             }
@@ -3859,6 +4241,14 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
                 app.status = Some("reload unavailable in this runtime".into());
             }
         }
+        "overview" | "digest" => set_active_view(app, ViewKind::Overview, width),
+        "view all" | "everything" | "all" | "listeners" => {
+            set_active_view(app, ViewKind::Everything, width)
+        }
+        "public" => set_active_view(app, ViewKind::Public, width),
+        "conflicts" => set_active_view(app, ViewKind::Conflicts, width),
+        "projects" => set_active_view(app, ViewKind::Projects, width),
+        "doctor" | "warnings" => set_active_view(app, ViewKind::Doctor, width),
         "process-tree" | "show-process-tree" => {
             app.active_view = ViewKind::ProcessTree;
             rebuild_view_model(app, width);
@@ -3893,6 +4283,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
             active_pane: app.pane,
             keybindings: Some(&app.keybindings),
             selected_row: app.selected_row,
+            overview_hint_visible: app.overview_hint_visible,
         },
     );
     let footer = Rect {
@@ -4183,6 +4574,124 @@ mod tests {
     }
 
     #[test]
+    fn default_view_is_overview() {
+        assert_eq!(ViewKind::default(), ViewKind::Overview);
+        assert_eq!(App::default().active_view, ViewKind::Overview);
+    }
+
+    #[test]
+    fn digest_renders_at_120_90_70_cols() {
+        let snapshot = build_empty_snapshot();
+        for width in [120, 90, 70] {
+            let vm = build_view_model(&snapshot, width, false, "");
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    render_view_kind(
+                        &vm,
+                        f,
+                        f.area(),
+                        &Theme::default_dark(),
+                        RenderContext {
+                            view: ViewKind::Overview,
+                            active_pane: Pane::Rows,
+                            keybindings: None,
+                            selected_row: 0,
+                            overview_hint_visible: false,
+                        },
+                    )
+                })
+                .unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                text.contains("EXPOSED"),
+                "width {width} missing exposed section: {text}"
+            );
+            assert!(
+                text.contains("TRIAGE"),
+                "width {width} missing triage section: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn digest_empty_state_strings_present() {
+        let snapshot = build_empty_snapshot();
+        let vm = build_view_model(&snapshot, 120, false, "");
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Overview,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains(lazyadmin_runtime::view_model::digest::EMPTY_EXPOSED));
+        assert!(text.contains(lazyadmin_runtime::view_model::digest::EMPTY_CONFLICTS));
+        assert!(text.contains(lazyadmin_runtime::view_model::digest::EMPTY_PROJECTS));
+    }
+
+    #[test]
+    fn digest_drilldown_navigates_to_listeners_with_public_chip() {
+        let snap = build_empty_snapshot();
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Overview,
+            selected_row: 0,
+            ..Default::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Public);
+    }
+
+    #[test]
+    fn digest_refuse_mode_collapses_to_section_summary() {
+        let snapshot = build_empty_snapshot();
+        let vm = build_view_model(&snapshot, 50, false, "");
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Overview,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("EXPOSED 0"));
+        assert!(text.contains("TRIAGE"));
+        assert!(text.contains("actionable"));
+    }
+
+    #[test]
     fn render_views_golden_widths() {
         let s = build_empty_snapshot();
         for width in [120, 90, 70, 50] {
@@ -4194,9 +4703,9 @@ mod tests {
                 .unwrap();
             let text = format!("{:?}", terminal.backend().buffer());
             if width < 60 {
-                assert!(text.contains("60+ columns"));
+                assert!(text.contains("EXPOSED"));
             } else {
-                assert!(text.contains("Everything") || text.contains("Views"));
+                assert!(text.contains("Overview") || text.contains("Views"));
             }
         }
     }
@@ -4218,6 +4727,7 @@ mod tests {
     #[test]
     fn narrow_refusal_lists_view_specific_cli_hint() {
         for view in [
+            ViewKind::Overview,
             ViewKind::Everything,
             ViewKind::Ports,
             ViewKind::Public,
@@ -4270,6 +4780,7 @@ mod tests {
                         active_pane: Pane::Rows,
                         keybindings: None,
                         selected_row: 0,
+                        overview_hint_visible: false,
                     },
                 )
             })
@@ -4343,6 +4854,7 @@ mod tests {
                             active_pane: Pane::Rows,
                             keybindings: None,
                             selected_row: 0,
+                            overview_hint_visible: false,
                         },
                     )
                 })
@@ -4490,6 +5002,7 @@ mod tests {
                         active_pane: Pane::Rows,
                         keybindings: None,
                         selected_row: 0,
+                        overview_hint_visible: false,
                     },
                 )
             })
@@ -4644,6 +5157,7 @@ mod tests {
                         active_pane: Pane::Rows,
                         keybindings: None,
                         selected_row: 0,
+                        overview_hint_visible: false,
                     },
                 )
             })
@@ -4841,6 +5355,7 @@ mod tests {
         let mut app = App {
             vm: build_view_model(&snap, 120, false, ""),
             snapshot: snap,
+            active_view: ViewKind::Everything,
             ..Default::default()
         };
         sync_row_selection(&mut app);
@@ -4986,6 +5501,7 @@ mod tests {
         let mut app = App {
             vm: build_view_model(&snap, 120, false, ""),
             snapshot: snap,
+            active_view: ViewKind::Everything,
             ..Default::default()
         };
         sync_row_selection(&mut app);
@@ -5072,6 +5588,7 @@ mod tests {
             );
         }
         for g in [
+            "Overview",
             "All/Everything",
             "Ports",
             "Public listeners",
@@ -5102,10 +5619,11 @@ mod tests {
                     f.area(),
                     &Theme::default_dark(),
                     RenderContext {
-                        view: ViewKind::Everything,
+                        view: ViewKind::Overview,
                         active_pane: Pane::Groups,
                         keybindings: None,
                         selected_row: 0,
+                        overview_hint_visible: false,
                     },
                 )
             })
@@ -5123,7 +5641,7 @@ mod tests {
         }
         // Active marker on the current view.
         assert!(
-            combined.contains("› All/Everything"),
+            combined.contains("› Overview"),
             "active marker missing: {combined}"
         );
         // Manager groups carry the non-navigable marker, never the
@@ -5184,19 +5702,21 @@ mod tests {
             ..Default::default()
         };
 
+        assert_eq!(app.active_view, ViewKind::Overview);
+
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(app.active_view, ViewKind::Ports);
+        assert_eq!(app.active_view, ViewKind::Everything);
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             120,
         );
-        assert_eq!(app.active_view, ViewKind::Everything);
+        assert_eq!(app.active_view, ViewKind::Overview);
     }
 
     #[test]
@@ -5209,19 +5729,21 @@ mod tests {
         };
         assert_eq!(app.vm.layout, LayoutMode::SinglePane);
 
+        assert_eq!(app.active_view, ViewKind::Overview);
+
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             70,
         );
-        assert_eq!(app.active_view, ViewKind::Ports);
+        assert_eq!(app.active_view, ViewKind::Everything);
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
             70,
         );
-        assert_eq!(app.active_view, ViewKind::Everything);
+        assert_eq!(app.active_view, ViewKind::Overview);
     }
 
     #[test]

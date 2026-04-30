@@ -42,6 +42,7 @@ This repository now contains the v0.4 Rust workspace for `lazyadmin` after PLAN-
 - Portless interop is read-only except for `free`: route state is read from `routes.json`, aliases use `pid = 0`, orphan cleanup is only a `doctor` hint to run `portless prune`, and `lazyadmin free <port>` sends `SIGTERM` to the portless CLI `ProcessKey` rather than the descendant dev-server process.
 - The read-only Web UI is split across `crates/lazyadmin-runtime` (shared snapshot/event assembly) and `crates/lazyadmin-web` (loopback-only Axum server plus embedded static app). `lazyadmin web` refuses non-loopback binds in v1 and exposes only read-only API routes; use `--port 0 --no-open` for smoke tests.
 - The UX-overhaul shared projection layer starts in `crates/lazyadmin-runtime/src/view_model/` (`digest`, `doctor_groups`, `header_pip`, `inspector`). Keep new TUI/Web grouping and summary logic there instead of duplicating snapshot projections in each UI.
+- PLAN-15a digest landing is implemented: `ViewKind::Overview` is the default TUI view, `lazyadmin overview --json` emits the shared `Digest`, and the Web UI exposes `/api/digest` with the default route rendering the digest.
 - Warning actionability metadata lives in `lazyadmin_core::doctor::{WARNING_CODE_REGISTRY, classify}`. Add every newly emitted `Warning.code` there with an explicit `WarningTier`, label, and remediation; do not add tier/remediation fields to snapshot JSON.
 
 ## Development standards
@@ -68,6 +69,7 @@ cargo run -p lazyadmin-cli -- ps --json
 cargo run -p lazyadmin-cli -- public --json
 cargo run -p lazyadmin-cli -- conflicts --json
 cargo run -p lazyadmin-cli -- projects --json
+cargo run -p lazyadmin-cli -- overview --json
 cargo run -p lazyadmin-cli -- diff testdata/snapshots/empty.json testdata/snapshots/empty.json --json
 cargo run -p lazyadmin-cli -- config check --json
 cargo run -p lazyadmin-cli -- doctor --json

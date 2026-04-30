@@ -74,6 +74,7 @@ enum Command {
     Public,
     Conflicts,
     Projects,
+    Overview,
     Logs(LogsArgs),
     Doctor(DoctorArgs),
     Events(EventsArgs),
@@ -102,6 +103,8 @@ struct TuiArgs {
     headless: bool,
     #[arg(long)]
     theme: Option<String>,
+    #[arg(long)]
+    view: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -244,6 +247,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
                     TuiArgs {
                         headless: false,
                         theme: None,
+                        view: None,
                     },
                     cli.json,
                     cli.config.as_deref(),
@@ -297,6 +301,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
         Some(Command::Projects) => {
             run_view("projects", cli.json, cli.brief, cli.config.as_deref()).await
         }
+        Some(Command::Overview) => run_overview(cli.json, cli.config.as_deref()).await,
         Some(Command::Logs(args)) => run_logs(args, cli.json).await,
         Some(Command::Doctor(args)) => run_doctor(args, cli.json, cli.config.as_deref()).await,
         Some(Command::Events(args)) => run_events(args, cli.json, cli.config.as_deref()).await,
@@ -323,6 +328,13 @@ async fn run_tui_command(
         .downgrade_for_colors(lazyadmin_tui::detected_color_count());
     let keybindings = lazyadmin_core::config::keybindings::ResolvedKeybindings::from_config(&cfg)
         .map_err(|e| AppError::Other(eyre!(e)))?;
+    let initial_view = match args.view.as_deref() {
+        Some(view) => Some(
+            lazyadmin_tui::parse_view_kind(view)
+                .ok_or_else(|| AppError::Other(eyre!("unknown TUI view {view}")))?,
+        ),
+        None => None,
+    };
     if args.headless {
         let dump = lazyadmin_tui::headless_dump(&snap, 120, theme, keybindings);
         if json {
@@ -358,6 +370,7 @@ async fn run_tui_command(
         allow_open_non_loopback: cfg.actions.open_non_loopback,
         snapshots: Some(snapshot_rx),
         discovery_events: Some(event_rx),
+        initial_view,
         config_reload: Some(Box::new({
             let config_path = config_path.map(std::path::Path::to_path_buf);
             move || {
@@ -610,6 +623,76 @@ async fn run_view(
         );
     }
     Ok(())
+}
+
+async fn run_overview(
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let snapshot = build_snapshot(config_path).await?;
+    let digest = lazyadmin_runtime::view_model::build_digest(&snapshot);
+    if json {
+        print_json(&digest)?;
+        return Ok(());
+    }
+    println!(
+        "Overview: exposed {} public / {} LAN, conflicts {}, projects {}, triage {} actionable",
+        digest.exposed.total_public,
+        digest.exposed.total_lan,
+        digest.conflicts.total,
+        digest.your_projects.total,
+        digest.triage.summary.actionable
+    );
+    if digest.exposed.rows.is_empty() {
+        println!("Exposed: {}", digest.exposed.empty_copy);
+    } else {
+        println!("Exposed:");
+        for row in &digest.exposed.rows {
+            let folded = if row.extra_ports > 0 {
+                format!(" (+{} ports)", row.extra_ports)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {} {} owner={}{}",
+                row.bind,
+                exposure_word(&row.exposure),
+                row.owner_label,
+                folded
+            );
+        }
+    }
+    if digest.conflicts.rows.is_empty() {
+        println!("Conflicts: {}", digest.conflicts.empty_copy);
+    } else {
+        println!("Conflicts:");
+        for row in &digest.conflicts.rows {
+            println!("  {} owners={} {}", row.bind, row.owner_count, row.reason);
+        }
+    }
+    if digest.your_projects.rows.is_empty() {
+        println!("Projects: {}", digest.your_projects.empty_copy);
+    } else {
+        println!("Projects:");
+        for row in &digest.your_projects.rows {
+            println!(
+                "  {} listeners={} workloads={}",
+                row.name, row.listener_count, row.workload_count
+            );
+        }
+    }
+    Ok(())
+}
+
+fn exposure_word(exposure: &lazyadmin_core::model::Exposure) -> &'static str {
+    match exposure {
+        lazyadmin_core::model::Exposure::Public => "public",
+        lazyadmin_core::model::Exposure::LanOrPublic => "lan/public",
+        lazyadmin_core::model::Exposure::Loopback => "loopback",
+        lazyadmin_core::model::Exposure::ContainerOnly => "container",
+        lazyadmin_core::model::Exposure::UnixLocal => "unix",
+        lazyadmin_core::model::Exposure::Unknown => "unknown",
+    }
 }
 
 async fn run_point_query(

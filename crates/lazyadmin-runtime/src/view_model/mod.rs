@@ -5,7 +5,10 @@ pub mod doctor_groups;
 pub mod header_pip;
 pub mod inspector;
 
-pub use digest::Digest;
+pub use digest::{
+    ConflictsSection, Digest, DigestViewTarget, ExposedRow, ExposedSection, ProjectRow,
+    ProjectsSection, TriageSection, build_digest,
+};
 pub use doctor_groups::{
     DoctorGroupsView, TriageSummary, WarningGroup, build_doctor_groups, warning_groups,
 };

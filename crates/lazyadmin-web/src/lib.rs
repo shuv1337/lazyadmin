@@ -156,6 +156,7 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/snapshot", get(snapshot))
         .route("/doctor", get(doctor))
+        .route("/digest", get(digest))
         .route("/events", get(events))
         .route("/views/overview", get(overview))
         .route("/entities/:kind/:id", get(entity))
@@ -285,6 +286,20 @@ async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
             &snapshot,
         ))
         .into_response(),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SNAPSHOT_FAILED",
+            e.to_string(),
+            None,
+        ),
+    }
+}
+
+async fn digest(State(state): State<AppState>) -> impl IntoResponse {
+    match state.snapshot().await {
+        Ok(snapshot) => {
+            Json(lazyadmin_runtime::view_model::build_digest(&snapshot)).into_response()
+        }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "SNAPSHOT_FAILED",
@@ -521,6 +536,23 @@ mod tests {
             .expect("overview response");
         assert_eq!(overview.status(), StatusCode::OK);
         let body = json_body(overview).await;
+        let digest = app
+            .clone()
+            .oneshot(local_request("/api/digest"))
+            .await
+            .expect("digest response");
+        assert_eq!(digest.status(), StatusCode::OK);
+        let digest_body = json_body(digest).await;
+        for key in ["exposed", "conflicts", "your_projects", "triage"] {
+            assert!(digest_body.get(key).is_some(), "missing digest field {key}");
+        }
+        let index = app
+            .clone()
+            .oneshot(local_request("/"))
+            .await
+            .expect("index response");
+        assert_eq!(index.status(), StatusCode::OK);
+
         for key in [
             "listeners",
             "public_listeners",

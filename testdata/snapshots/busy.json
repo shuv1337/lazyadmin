@@ -1,0 +1,152 @@
+{
+  "schema_version": "lazyadmin.snapshot.v1",
+  "generated_at": "2026-04-30T12:00:00Z",
+  "host": { "boot_id": "boot", "hostname": "demo-host", "kernel": "6.8.0" },
+  "managers": [],
+  "processes": [
+    {
+      "key": { "pid": 17385, "boot_id": "boot", "start_time_ticks": 100 },
+      "pid": 17385,
+      "start_time_ticks": 100,
+      "boot_id": "boot",
+      "user": "shuv",
+      "exe": "/usr/bin/node",
+      "cmdline": ["node", "server.js"],
+      "cwd": "/tmp/api",
+      "ppid": 1,
+      "pgid": 17385,
+      "sid": 17385,
+      "cgroup": null,
+      "netns": "host",
+      "container_id": null,
+      "systemd_unit": null,
+      "lazyadmin_run_id": null,
+      "environment": { "keys": [] },
+      "provenance": []
+    }
+  ],
+  "listeners": [
+    {
+      "id": "tcp:0.0.0.0:3000",
+      "protocol": "tcp",
+      "family": "ipv4",
+      "bind_addr": "0.0.0.0",
+      "port": 3000,
+      "path": null,
+      "state": "listen",
+      "netns": "host",
+      "socket_inode": null,
+      "exposure": "public",
+      "owners": [{ "kind": "process", "id": { "pid": 17385, "boot_id": "boot", "start_time_ticks": 100 } }],
+      "confidence": "high",
+      "provenance": [],
+      "first_seen": "2026-04-30T11:55:00Z",
+      "last_seen": "2026-04-30T12:00:00Z",
+      "dual_stack_state": "unknown"
+    },
+    {
+      "id": "tcp:0.0.0.0:3001",
+      "protocol": "tcp",
+      "family": "ipv4",
+      "bind_addr": "0.0.0.0",
+      "port": 3001,
+      "path": null,
+      "state": "listen",
+      "netns": "host",
+      "socket_inode": null,
+      "exposure": "public",
+      "owners": [{ "kind": "process", "id": { "pid": 17385, "boot_id": "boot", "start_time_ticks": 100 } }],
+      "confidence": "high",
+      "provenance": [],
+      "first_seen": "2026-04-30T11:55:00Z",
+      "last_seen": "2026-04-30T12:00:00Z",
+      "dual_stack_state": "unknown"
+    },
+    {
+      "id": "tcp:0.0.0.0:5432",
+      "protocol": "tcp",
+      "family": "ipv4",
+      "bind_addr": "0.0.0.0",
+      "port": 5432,
+      "path": null,
+      "state": "listen",
+      "netns": "host",
+      "socket_inode": null,
+      "exposure": "lan_or_public",
+      "owners": [],
+      "confidence": "medium",
+      "provenance": [],
+      "first_seen": "2026-04-30T11:50:00Z",
+      "last_seen": "2026-04-30T12:00:00Z",
+      "dual_stack_state": "unknown"
+    },
+    {
+      "id": "tcp:127.0.0.1:8080",
+      "protocol": "tcp",
+      "family": "ipv4",
+      "bind_addr": "127.0.0.1",
+      "port": 8080,
+      "path": null,
+      "state": "listen",
+      "netns": "host",
+      "socket_inode": null,
+      "exposure": "loopback",
+      "owners": [{ "kind": "workload", "id": "workload:api" }],
+      "confidence": "high",
+      "provenance": [],
+      "first_seen": "2026-04-30T11:45:00Z",
+      "last_seen": "2026-04-30T12:00:00Z",
+      "dual_stack_state": "unknown"
+    }
+  ],
+  "workloads": [
+    {
+      "id": "workload:api",
+      "display_name": "api dev server",
+      "runtime": "direct",
+      "state": "running",
+      "pids": [{ "pid": 17385, "boot_id": "boot", "start_time_ticks": 100 }],
+      "listeners": ["tcp:127.0.0.1:8080"],
+      "project": "project:api",
+      "manager": null,
+      "source": null,
+      "actions": [],
+      "health": null,
+      "metrics": null,
+      "restart_policy": null,
+      "lazyadmin_run_id": null,
+      "provenance": []
+    }
+  ],
+  "projects": [
+    {
+      "id": "project:api",
+      "root": "/tmp/api",
+      "name": "api",
+      "markers": [{ "kind": "package_json", "path": "/tmp/api/package.json" }],
+      "git_remote": null,
+      "package_manager": "npm",
+      "dev_commands": [],
+      "provenance": []
+    }
+  ],
+  "tracked_runs": [],
+  "edges": [],
+  "warnings": [
+    {
+      "severity": "error",
+      "code": "CONFLICT",
+      "message": "port conflict on 8080",
+      "entity": { "kind": "listener", "id": "tcp:127.0.0.1:8080" },
+      "provenance": []
+    },
+    {
+      "severity": "warning",
+      "code": "PUBLIC",
+      "message": "public listener",
+      "entity": { "kind": "listener", "id": "tcp:0.0.0.0:3000" },
+      "provenance": []
+    }
+  ],
+  "metadata": { "events_dropped": 0 }
+}

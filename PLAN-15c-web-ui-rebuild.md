@@ -14,7 +14,7 @@ Throw out `crates/lazyadmin-web/static/index.html`. Rebuild around the digest fr
 ## Prerequisites
 
 - [ ] PLAN-15 Phase 0 complete (view-model module, classifier, theme tokens decided).
-- [ ] PLAN-15a's `Digest` view-model + `/api/digest` endpoint shipped.
+- [x] PLAN-15a's `Digest` view-model + `/api/digest` endpoint shipped.
 - [ ] PLAN-15b's `DoctorGroupsView` + `/api/doctor` endpoint shipped.
 - [ ] PLAN-15d's `InspectorView` view-model shipped (or stubbed) with `/api/inspector/:kind/:id`.
 
@@ -34,7 +34,7 @@ Cribbed from `~/repos/shuvbot-skills/frontend-design/SKILL.md` and the issue bod
 
 ### A. Server-side route additions
 
-- [ ] `GET /api/digest` — serializes `Digest` from PLAN-15a.
+- [x] `GET /api/digest` — serializes `Digest` from PLAN-15a.
 - [ ] `GET /api/doctor` — serializes `DoctorGroupsView` from PLAN-15b.
 - [ ] `GET /api/inspector?kind=…&id=…` — serializes the per-entity `InspectorView` from PLAN-15d. URL-encoded entity IDs.
 - [ ] `GET /api/header_pip` — serializes the `HeaderPip` from PLAN-15 Phase 0.1, used by both the persistent header and #20.
@@ -120,7 +120,7 @@ Cribbed from `~/repos/shuvbot-skills/frontend-design/SKILL.md` and the issue bod
 
 ## Acceptance criteria (mirrors #16)
 
-- [ ] Default route renders the digest.
+- [x] Default route renders the digest.
 - [ ] Metric-card row deleted.
 - [ ] Sidebar replaced with a top nav of ≤6 entries.
 - [ ] `Public`, `Conflicts`, `Orphans`, `Managers`, `Tracked runs`, `Projects`, `Warnings`, `Discovery health` are not top-level nav items.

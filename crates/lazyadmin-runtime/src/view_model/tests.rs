@@ -5,8 +5,8 @@ use lazyadmin_core::model::{ActionId, EntityRef, Snapshot, Warning, WarningSever
 fn empty_snapshot_projects_all_view_models() {
     let snapshot = Snapshot::empty();
     let models = RuntimeViewModels::from_snapshot(&snapshot);
-    assert_eq!(models.digest.exposed, 0);
-    assert_eq!(models.digest.conflicts, 0);
+    assert_eq!(models.digest.exposed.rows.len(), 0);
+    assert_eq!(models.digest.conflicts.rows.len(), 0);
     assert_eq!(models.doctor_groups.groups, Vec::new());
     assert_eq!(models.header_pip.adapters.total, 0);
 }

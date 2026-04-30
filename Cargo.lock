@@ -1752,6 +1752,7 @@ dependencies = [
  "lazyadmin-adapter-tracked",
  "lazyadmin-core",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

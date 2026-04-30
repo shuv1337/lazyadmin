@@ -6,8 +6,8 @@ Replace the default `Everything / Listeners` 1,749-row landing view with an opin
 
 ## Prerequisites
 
-- [ ] Phase 0 of PLAN-15 complete (`lazyadmin-runtime::view_model` module exists; warning classifier landed; theme slots reserved).
-- [ ] PLAN-15b's `WarningGroup` view-model exists or has a stub returning `(actionable_count, noise_groups_count)` — the triage section consumes those numbers.
+- [x] Phase 0 of PLAN-15 complete (`lazyadmin-runtime::view_model` module exists; warning classifier landed; theme slots reserved).
+- [x] PLAN-15b's `WarningGroup` view-model exists or has a stub returning `(actionable_count, noise_groups_count)` — the triage section consumes those numbers.
 
 ## Data sources (no model changes)
 
@@ -22,7 +22,7 @@ Everything below projects from the existing `Snapshot`:
 
 ### A. View-model
 
-- [ ] In `crates/lazyadmin-runtime/src/view_model/digest.rs`:
+- [x] In `crates/lazyadmin-runtime/src/view_model/digest.rs`:
   ```rust
   pub struct Digest {
       pub exposed: ExposedSection,
@@ -50,71 +50,71 @@ Everything below projects from the existing `Snapshot`:
   }
   // … plus ConflictsSection, ProjectsSection, TriageSection
   ```
-- [ ] Pure function `pub fn build_digest(snapshot: &Snapshot, classifier: &WarningClassifier) -> Digest`.
-- [ ] Ranking heuristic for `exposed.rows` (per #14):
-  - Sort key: `(unowned desc, public desc, project_known desc, port asc)`.
-  - Cap at 10 rows.
-  - Dedupe by `owner_pid`: when one process holds N ports, fold to a single row with `extra_ports = N - 1`.
-  - Stable order on ties so tests don't flake.
-- [ ] Conflicts section: top 5 by `(severity desc, owner_count desc, port asc)` from existing `Conflicts` view logic — extract that predicate from `lazyadmin-tui` and lift it into `lazyadmin-core::doctor` if it isn't there already.
-- [ ] Projects section: include only projects with ≥1 owning workload that has ≥1 active listener; sort by `(listener_count desc, last_seen desc)`. Cap at 10.
-- [ ] Triage section: consumes `WarningGroupSummary { actionable: usize, noise_groups: usize }` from PLAN-15b.
-- [ ] Affirmative empty states are part of the data shape:
+- [x] Pure function `pub fn build_digest(snapshot: &Snapshot, classifier: &WarningClassifier) -> Digest`.
+- [x] Ranking heuristic for `exposed.rows` (per #14):
+  - [x] Sort key: `(unowned desc, public desc, project_known desc, port asc)`.
+  - [x] Cap at 10 rows.
+  - [x] Dedupe by `owner_pid`: when one process holds N ports, fold to a single row with `extra_ports = N - 1`.
+  - [x] Stable order on ties so tests don't flake.
+- [x] Conflicts section: top 5 by `(severity desc, owner_count desc, port asc)` from existing `Conflicts` view logic — extract that predicate from `lazyadmin-tui` and lift it into `lazyadmin-core::doctor` if it isn't there already.
+- [x] Projects section: include only projects with ≥1 owning workload that has ≥1 active listener; sort by `(listener_count desc, last_seen desc)`. Cap at 10.
+- [x] Triage section: consumes `WarningGroupSummary { actionable: usize, noise_groups: usize }` from PLAN-15b.
+- [x] Affirmative empty states are part of the data shape:
   - `ExposedSection::rows.is_empty()` ⇒ caller renders `Nothing exposed beyond loopback. ✓`.
   - Same for Conflicts (`Nothing contended.`), Projects (`No active projects detected.`), Triage (`Everything's clean — last check {age}.`).
   - Encode the exact copy strings as `pub const EMPTY_EXPOSED: &str = "Nothing exposed beyond loopback. ✓"` so TUI and Web share wording.
-- [ ] Tests in `view_model/digest.rs`:
-  - [ ] `digest_empty_snapshot_has_all_affirmative_empty_states`.
-  - [ ] `exposed_dedupes_owner_pid_and_counts_extra_ports`.
-  - [ ] `exposed_ranking_unowned_before_owned_before_known_system`.
-  - [ ] `digest_caps_each_section_at_ten_rows`.
-  - [ ] Golden against `testdata/snapshots/busy.json`.
+- [x] Tests in `view_model/digest.rs`:
+  - [x] `digest_empty_snapshot_has_all_affirmative_empty_states`.
+  - [x] `exposed_dedupes_owner_pid_and_counts_extra_ports`.
+  - [x] `exposed_ranking_unowned_before_owned_before_known_system`.
+  - [x] `digest_caps_each_section_at_ten_rows`.
+  - [x] Golden against `testdata/snapshots/busy.json`.
 
 ### B. TUI integration
 
-- [ ] Add `ViewKind::Overview` (PLAN-15 §Phase 2 / #19 also reserves this). Make it the new `#[default]` for `ViewKind`.
-- [ ] Move the previous `Everything` to be addressable but no longer the default. Keep the keybinding (palette `view all`) and the `--view everything` CLI flag.
-- [ ] Render path:
-  - [ ] In `render_view_kind` add a `ViewKind::Overview` branch that calls a new `render_digest(area, &vm.digest, theme)`.
-  - [ ] Layout: vertical stack of the four sections; section header in `accent`; cap counts in the section header (`EXPOSED 12 (10 shown)`).
-  - [ ] Per-row rendering reuses the prefix-glyph helpers from #18 once available; use plain glyphs as a stopgap while #18 is in flight.
-  - [ ] `[view all N →]` is a tab-stop; pressing Enter sets `app.active_view = section.view_all_target` and applies any pre-set chip filter (#19).
-- [ ] Refuse-mode (<60 cols): digest collapses to one-line section summaries (`EXPOSED 12 · CONFLICTS 1 · PROJECTS 2 · TRIAGE 4 actionable`).
-- [ ] Tests:
-  - [ ] `digest_renders_at_120_90_70_cols`.
-  - [ ] `digest_drilldown_navigates_to_listeners_with_public_chip`.
-  - [ ] `digest_empty_state_strings_present`.
-  - [ ] `default_view_is_overview`.
+- [x] Add `ViewKind::Overview` (PLAN-15 §Phase 2 / #19 also reserves this). Make it the new `#[default]` for `ViewKind`.
+- [x] Move the previous `Everything` to be addressable but no longer the default. Keep the keybinding (palette `view all`) and the `--view everything` CLI flag.
+- [x] Render path:
+  - [x] In `render_view_kind` add a `ViewKind::Overview` branch that calls a new `render_digest(area, &vm.digest, theme)`.
+  - [x] Layout: vertical stack of the four sections; section header in `accent`; cap counts in the section header (`EXPOSED 12 (10 shown)`).
+  - [x] Per-row rendering reuses the prefix-glyph helpers from #18 once available; use plain glyphs as a stopgap while #18 is in flight.
+  - [x] `[view all N →]` is a tab-stop; pressing Enter sets `app.active_view = section.view_all_target` and applies any pre-set chip filter (#19).
+- [x] Refuse-mode (<60 cols): digest collapses to one-line section summaries (`EXPOSED 12 · CONFLICTS 1 · PROJECTS 2 · TRIAGE 4 actionable`).
+- [x] Tests:
+  - [x] `digest_renders_at_120_90_70_cols`.
+  - [x] `digest_drilldown_navigates_to_listeners_with_public_chip`.
+  - [x] `digest_empty_state_strings_present`.
+  - [x] `default_view_is_overview`.
 
 ### C. Web UI integration
 
-- [ ] PLAN-15c (#16) is the canonical place this lands; this plan only ensures the digest view-model is **available** and **JSON-serializable** so the Web crate consumes it via a new `GET /api/digest` endpoint.
-- [ ] Add `GET /api/digest` to `crates/lazyadmin-web/src/lib.rs` returning the `Digest` struct serialized to JSON. Reuse the existing snapshot polling cache.
-- [ ] Cross-link: PLAN-15c's "default route renders the digest" task points back here.
+- [x] PLAN-15c (#16) is the canonical place this lands; this plan only ensures the digest view-model is **available** and **JSON-serializable** so the Web crate consumes it via a new `GET /api/digest` endpoint.
+- [x] Add `GET /api/digest` to `crates/lazyadmin-web/src/lib.rs` returning the `Digest` struct serialized to JSON. Reuse the existing snapshot polling cache.
+- [x] Cross-link: PLAN-15c's "default route renders the digest" task points back here.
 
 ### D. Onboarding hint
 
-- [ ] On first launch (heuristic: `~/.local/state/lazyadmin/seen-overview.flag` absent), the TUI shows a one-line dim hint above the digest:
+- [x] On first launch (heuristic: `~/.local/state/lazyadmin/seen-overview.flag` absent), the TUI shows a one-line dim hint above the digest:
   - `New layout: this is the digest. Press [v] for the full Listeners table.`
-- [ ] After any input is received in `Overview`, write the flag and never show again.
+- [x] After any input is received in `Overview`, write the flag and never show again.
 
 ### E. CLI parity
 
-- [ ] Add `lazyadmin overview` subcommand that prints the digest as text (mirrors what the TUI shows). `lazyadmin overview --json` emits the `Digest` struct.
-- [ ] Plumbing: reuse `build_digest` directly; no new logic.
-- [ ] AGENTS.md validation list gets `cargo run -p lazyadmin-cli -- overview --json` added.
+- [x] Add `lazyadmin overview` subcommand that prints the digest as text (mirrors what the TUI shows). `lazyadmin overview --json` emits the `Digest` struct.
+- [x] Plumbing: reuse `build_digest` directly; no new logic.
+- [x] AGENTS.md validation list gets `cargo run -p lazyadmin-cli -- overview --json` added.
 
 ## Acceptance criteria (mirrors #14)
 
-- [ ] `lazyadmin tui` cold launch defaults to the digest, not a 1,749-row table.
-- [ ] `lazyadmin web` cold load default route renders the digest.
-- [ ] All four sections present with affirmative empty states when applicable.
-- [ ] `[view all N →]` deep-links to the existing filtered view in both UIs.
-- [ ] `Everything` / `All` reachable via `:` palette → `view all`, via `/` search, or via `--view everything`.
-- [ ] Snapshot polling and event hint behavior unchanged.
-- [ ] JSON snapshot contract unchanged (only **additive** `/api/digest` endpoint).
-- [ ] `cargo test --workspace` green.
-- [ ] `cargo run -p lazyadmin-cli -- export --json` byte-identical to the pre-#14 golden.
+- [x] `lazyadmin tui` cold launch defaults to the digest, not a 1,749-row table.
+- [x] `lazyadmin web` cold load default route renders the digest.
+- [x] All four sections present with affirmative empty states when applicable.
+- [x] `[view all N →]` deep-links to the existing filtered view in both UIs.
+- [x] `Everything` / `All` reachable via `:` palette → `view all`, via `/` search, or via `--view everything`.
+- [x] Snapshot polling and event hint behavior unchanged.
+- [x] JSON snapshot contract unchanged (only **additive** `/api/digest` endpoint).
+- [x] `cargo test --workspace` green.
+- [x] `cargo run -p lazyadmin-cli -- export --json` byte-identical to the pre-#14 golden.
 
 ## Out of scope
 

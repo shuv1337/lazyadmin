@@ -111,14 +111,14 @@ Goal: stand up the shared infrastructure every later issue depends on. No user-v
 
 Both issues are written up in dedicated plans. They can land in either order but #14 will lean on #15's `WarningGroup` count for its triage section, so prefer #15 first or stub the count.
 
-- [ ] **#14 — Digest landing screen.** See [PLAN-15a-digest-landing.md](./PLAN-15a-digest-landing.md).
+- [x] **#14 — Digest landing screen.** See [PLAN-15a-digest-landing.md](./PLAN-15a-digest-landing.md).
 - [x] **#15 — Doctor: aggregate warnings by `(code, severity)` and rank by actionability.** See [PLAN-15b-doctor-grouping.md](./PLAN-15b-doctor-grouping.md).
 
 ### Phase 1 acceptance
 
-- [ ] Cold `lazyadmin tui` shows the digest as the default view.
-- [ ] `lazyadmin doctor` (TUI view) shows grouped warnings with affirmative empty state.
-- [ ] `lazyadmin export --json` and `lazyadmin doctor --json` outputs are unchanged byte-for-byte from pre-#14.
+- [x] Cold `lazyadmin tui` shows the digest as the default view.
+- [x] `lazyadmin doctor` (TUI view) shows grouped warnings with affirmative empty state.
+- [x] `lazyadmin export --json` and `lazyadmin doctor --json` outputs are unchanged byte-for-byte from pre-#14.
 - [ ] Fresh dogfood TUI run captured under `dogfood-tui-output/` shows the digest landing.
 
 ---
@@ -253,7 +253,7 @@ Each checkbox is a small mechanical PR or a polish-bundle PR.
 ## Phase 5 — Tracking close
 
 - [ ] Fresh dogfood TUI run on the same host as the v0.4 baseline:
-  - [ ] Default screen is the digest (#14).
+  - [x] Default screen is the digest (#14).
   - [ ] Rail shows ≤8 entries (#19).
   - [x] Doctor view shows grouped warnings (#15).
   - [ ] Inspector is full-fidelity (#17).
