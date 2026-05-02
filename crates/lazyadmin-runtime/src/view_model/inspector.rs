@@ -1979,6 +1979,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 impl ListenerInspector {
     fn sections(&self) -> Vec<InspectorSection> {
         listener_sections(self)

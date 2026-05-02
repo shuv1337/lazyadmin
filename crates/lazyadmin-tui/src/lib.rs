@@ -23,7 +23,10 @@ use lazyadmin_core::{
     output::listener_rows,
     snapshot::build_empty_snapshot,
 };
-use lazyadmin_runtime::view_model::{Digest, RAIL_ENTRIES, build_digest, build_doctor_groups};
+use lazyadmin_runtime::view_model::{
+    Digest, InspectorView, RAIL_ENTRIES, build_digest, build_doctor_groups,
+    inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -88,6 +91,13 @@ pub struct App {
     listener_filter: ListenerFilter,
     listeners_hint_visible: bool,
     listeners_hint_seen: bool,
+    related_listener_filter: Option<RelatedListenerFilter>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RelatedListenerFilter {
+    ids: HashSet<String>,
+    label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +182,7 @@ impl Default for App {
             listener_filter: ListenerFilter::All,
             listeners_hint_visible: false,
             listeners_hint_seen: false,
+            related_listener_filter: None,
         }
     }
 }
@@ -276,6 +287,7 @@ pub struct Confirmation {
     pub typed: String,
     pub required: String,
     pub target: String,
+    pub command_preview: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -974,10 +986,32 @@ pub struct DoctorRowVm {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorVm {
     pub title: String,
+    /// Legacy plain-text fallback used by logs/diagnostic surfaces and by
+    /// non-entity inspector states (overview / empty selections). Entity
+    /// inspectors render `sections` instead.
     pub lines: Vec<String>,
     pub provenance: Vec<String>,
     pub provenance_expanded: bool,
     pub diagnostic_markdown: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<InspectorSectionVm>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump_targets: Vec<JumpTarget>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSectionVm {
+    pub heading: String,
+    pub rows: Vec<InspectorRow>,
+}
+
+impl From<RuntimeInspectorSection> for InspectorSectionVm {
+    fn from(section: RuntimeInspectorSection) -> Self {
+        Self {
+            heading: section.heading.to_string(),
+            rows: section.rows,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1209,13 +1243,9 @@ pub fn build_view_model_with_state(
     let inspector = selected_process
         .as_ref()
         .and_then(|key| inspector_for_process(snapshot, key))
-        .or_else(|| rows.first().map(inspector_for_row))
-        .unwrap_or_else(|| InspectorVm {
-            title: "No selection".into(),
-            lines: vec!["No workloads/listeners discovered yet".into()],
-            provenance: vec![],
-            provenance_expanded: false,
-            diagnostic_markdown: "# lazyadmin diagnostic\nNo selection\n".into(),
+        .or_else(|| rows.first().map(|row| inspector_for_row(snapshot, row)))
+        .unwrap_or_else(|| {
+            plain_inspector("No selection", "No workloads/listeners discovered yet")
         });
     let mut process_tree =
         build_process_tree_with_collapsed(snapshot, selected_process.clone(), collapsed_processes);
@@ -1898,146 +1928,128 @@ fn compact_words(value: &str, max_chars: usize) -> String {
         .unwrap_or(prefix);
     format!("{trimmed}…")
 }
-fn inspector_for_row(row: &RowVm) -> InspectorVm {
-    InspectorVm {
-        title: format!(
-            "Listener {}",
-            row.port
-                .map(|port| port.to_string())
-                .unwrap_or_else(|| short_id(&row.id))
-        ),
-        lines: vec![
-            format!(
-                "Port: {}",
-                row.port
-                    .map(|port| port.to_string())
-                    .unwrap_or_else(|| "-".into())
-            ),
-            format!("Bind: {}", row.bind),
-            format!("Owner: {}", row.owner),
-            format!("Runtime: {}", row.runtime),
-            format!("Scope: {}", row.exposure),
-            format!("Project: {}", row.project),
-            "Logs: unavailable for direct processes".into(),
-            format!(
-                "Warnings: {}",
-                if row.badges.is_empty() {
-                    "-".into()
-                } else {
-                    row.badges.join(", ")
-                }
-            ),
-            "Actions: open  logs  restart  stop  free-port".into(),
-        ],
-        provenance: vec![
-            format!("listener id {}", short_id(&row.id)),
-            "core snapshot services; confidence best-effort".into(),
-        ],
-        provenance_expanded: false,
-        diagnostic_markdown: format!(
-            "# lazyadmin diagnostic\n\n- owner: {}\n- port: {:?}\n- bind: {}\n- runtime: {}\n- scope: {}\n- provenance: core snapshot\n",
-            row.owner, row.port, row.bind, row.runtime, row.exposure
-        ),
-    }
+fn inspector_for_row(snapshot: &Snapshot, row: &RowVm) -> InspectorVm {
+    InspectorView::lookup(snapshot, "listener", &row.id)
+        .map(inspector_vm_from_view)
+        .unwrap_or_else(|| {
+            plain_inspector("No selection", "Listener vanished from the latest snapshot")
+        })
 }
 
 fn inspector_for_process(snapshot: &Snapshot, key: &ProcessKey) -> Option<InspectorVm> {
-    let process = snapshot.processes.iter().find(|p| &p.key == key)?;
-    let ports = snapshot
-        .listeners
+    let id = serde_json::to_string(key).ok()?;
+    InspectorView::lookup(snapshot, "process", &id).map(inspector_vm_from_view)
+}
+
+fn inspector_vm_from_view(view: InspectorView) -> InspectorVm {
+    let title = match &view {
+        InspectorView::Process(process) => {
+            format!("pid {} — {}", process.identity.pid, process.title)
+        }
+        _ => view.title().to_string(),
+    };
+    let kind = view.kind().to_string();
+    let sections: Vec<InspectorSectionVm> =
+        view.to_sections().into_iter().map(Into::into).collect();
+    let jump_targets = inspector_jump_targets(&sections);
+    let lines = sections_to_plain_lines(&sections);
+    let diagnostic_markdown = inspector_diagnostic_markdown(&title, &kind, &sections);
+    InspectorVm {
+        title,
+        lines,
+        provenance: vec![format!(
+            "lazyadmin_runtime::view_model::InspectorView::{kind}"
+        )],
+        provenance_expanded: false,
+        diagnostic_markdown,
+        sections,
+        jump_targets,
+    }
+}
+
+fn inspector_jump_targets(sections: &[InspectorSectionVm]) -> Vec<JumpTarget> {
+    sections
         .iter()
-        .filter(|listener| {
-            listener
-                .owners
+        .flat_map(|section| {
+            section
+                .rows
                 .iter()
-                .any(|owner| matches!(owner, EntityRef::Process(process_key) if process_key == key))
+                .filter(move |row| row_receives_shortcut(&section.heading, row))
         })
-        .filter_map(|listener| listener.port.map(|p| p.to_string()))
-        .collect::<Vec<_>>();
-    let workload = snapshot
-        .workloads
+        .filter_map(|row| row.jump_target.clone())
+        .take(9)
+        .collect()
+}
+
+fn related_listener_ids(sections: &[InspectorSectionVm]) -> Vec<String> {
+    sections
         .iter()
-        .find(|workload| workload.pids.contains(key));
-    let project = workload
-        .and_then(|workload| workload.project.as_ref())
-        .and_then(|project_id| {
-            snapshot
-                .projects
-                .iter()
-                .find(|project| &project.id == project_id)
+        .filter(|section| section.heading == "RELATED")
+        .flat_map(|section| section.rows.iter())
+        .filter_map(|row| match &row.jump_target {
+            Some(JumpTarget::Listener { id }) => Some(id.to_string()),
+            _ => None,
         })
-        .map(|project| project.name.clone())
-        .unwrap_or_else(|| "-".into());
-    let tracked = process
-        .lazyadmin_run_id
-        .as_ref()
-        .map(ToString::to_string)
-        .or_else(|| {
-            workload
-                .and_then(|workload| workload.lazyadmin_run_id.as_ref())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| "-".into());
-    let runtime = process
-        .systemd_unit
-        .as_ref()
-        .map(|unit| format!("systemd:{unit}"))
-        .or_else(|| {
-            process
-                .container_id
-                .as_ref()
-                .map(|container| format!("container:{container}"))
-        })
-        .unwrap_or_else(|| "direct".into());
-    Some(InspectorVm {
-        title: format!("pid {}", process.pid),
-        lines: vec![
-            format!(
-                "Identity: pid {} start {}",
-                process.pid, process.start_time_ticks
-            ),
-            "State: running".into(),
-            format!("Runtime: {runtime}"),
-            format!(
-                "Ports: {}",
-                if ports.is_empty() {
-                    "-".into()
-                } else {
-                    ports.join(", ")
-                }
-            ),
-            format!("Project: {project}"),
-            format!("Tracked: {tracked}"),
-            format!(
-                "Logs: {}",
-                process
-                    .lazyadmin_run_id
-                    .as_ref()
-                    .map(|_| "tracked run logs available")
-                    .unwrap_or("no direct process log source")
-            ),
-            "Warnings: -".into(),
-            "Actions: open  logs  restart  stop  free-port".into(),
-        ],
-        provenance: process
-            .provenance
-            .iter()
-            .map(|p| format!("{}: {} ({:?})", p.adapter, p.claim, p.confidence))
-            .collect(),
-        provenance_expanded: true,
-        diagnostic_markdown: format!(
-            "# lazyadmin process diagnostic\n\n- pid: {}\n- start_time_ticks: {}\n- runtime: {}\n- ports: {}\n- project: {}\n",
-            process.pid,
-            process.start_time_ticks,
-            runtime,
-            if ports.is_empty() {
-                "-".into()
-            } else {
-                ports.join(", ")
-            },
-            project
-        ),
-    })
+        .collect()
+}
+
+fn row_receives_shortcut(heading: &str, row: &InspectorRow) -> bool {
+    row.jump_target.is_some()
+        && !matches!(
+            heading,
+            "IDENTITY" | "CONFIDENCE" | "ACTIONS" | "WARNING GROUP"
+        )
+        && !(heading == "PROCESS" && row.label == "pid")
+}
+
+fn sections_to_plain_lines(sections: &[InspectorSectionVm]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for section in sections {
+        lines.push(section.heading.to_string());
+        for row in &section.rows {
+            let mut value = row.value.clone();
+            if let Some(secondary) = &row.secondary {
+                value.push_str("  ");
+                value.push_str(secondary);
+            }
+            lines.push(format!("  {}: {}", row.label, value));
+        }
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn inspector_diagnostic_markdown(
+    title: &str,
+    kind: &str,
+    sections: &[InspectorSectionVm],
+) -> String {
+    let mut out = format!("# lazyadmin inspector\n\n- title: {title}\n- kind: {kind}\n");
+    for section in sections {
+        out.push_str(&format!("\n## {}\n", section.heading));
+        for row in &section.rows {
+            out.push_str(&format!("- {}: {}", row.label, row.value));
+            if let Some(secondary) = &row.secondary {
+                out.push_str(&format!(" ({secondary})"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn plain_inspector(title: impl Into<String>, line: impl Into<String>) -> InspectorVm {
+    let title = title.into();
+    let line = line.into();
+    InspectorVm {
+        title: title.clone(),
+        lines: vec![line.clone()],
+        provenance: vec![],
+        provenance_expanded: false,
+        diagnostic_markdown: format!("# {title}\n\n{line}\n"),
+        sections: vec![],
+        jump_targets: vec![],
+    }
 }
 fn groups(_show_system: bool) -> Vec<String> {
     RAIL_ENTRIES
@@ -2224,6 +2236,7 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
             overview_hint_visible: false,
             listener_filter: ListenerFilter::All,
             listeners_hint_visible: false,
+            related_listener_filter: None,
         },
     );
 }
@@ -2433,6 +2446,7 @@ struct RenderContext<'a> {
     overview_hint_visible: bool,
     listener_filter: ListenerFilter,
     listeners_hint_visible: bool,
+    related_listener_filter: Option<&'a RelatedListenerFilter>,
 }
 
 fn render_view_kind(
@@ -2667,6 +2681,7 @@ fn render_main_pane(
             active,
             ctx.listener_filter,
             ctx.listeners_hint_visible,
+            ctx.related_listener_filter,
         ),
     }
     if let Some(keybindings) = ctx.keybindings {
@@ -3007,6 +3022,7 @@ fn render_summary_table(
     frame.render_widget(table, area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_rows_table(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -3017,6 +3033,7 @@ fn render_rows_table(
     active: bool,
     listener_filter: ListenerFilter,
     listeners_hint_visible: bool,
+    related_listener_filter: Option<&RelatedListenerFilter>,
 ) {
     let rows_area = if view == ViewKind::Listeners {
         render_listener_chips(
@@ -3026,6 +3043,7 @@ fn render_rows_table(
             theme,
             listener_filter,
             listeners_hint_visible,
+            related_listener_filter,
         )
     } else {
         area
@@ -3034,7 +3052,9 @@ fn render_rows_table(
     let rows = view_model
         .rows
         .iter()
-        .filter(|r| row_matches_view_filter(r, view, effective_filter))
+        .filter(|r| {
+            row_matches_visible_listener_scope(r, view, effective_filter, related_listener_filter)
+        })
         .enumerate()
         .map(|(idx, r)| {
             let quiet = if idx % 2 == 0 {
@@ -3113,7 +3133,9 @@ fn render_rows_table(
     let row_count = view_model
         .rows
         .iter()
-        .filter(|r| row_matches_view_filter(r, view, effective_filter))
+        .filter(|r| {
+            row_matches_visible_listener_scope(r, view, effective_filter, related_listener_filter)
+        })
         .count();
     if row_count > 0 {
         state.select(Some(selected_row.min(row_count.saturating_sub(1))));
@@ -3128,8 +3150,13 @@ fn render_listener_chips(
     theme: &Theme,
     active_filter: ListenerFilter,
     hint_visible: bool,
+    related_listener_filter: Option<&RelatedListenerFilter>,
 ) -> Rect {
-    let toolbar_height = if hint_visible { 3 } else { 2 };
+    let toolbar_height = if hint_visible || related_listener_filter.is_some() {
+        3
+    } else {
+        2
+    };
     if area.height <= toolbar_height {
         return area;
     }
@@ -3171,7 +3198,18 @@ fn render_listener_chips(
         spans.push(Span::styled(label, style));
     }
     let mut lines = vec![Line::from(spans)];
-    if hint_visible {
+    if let Some(filter) = related_listener_filter {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Related filter: {} listeners from {} — press [A]ll to clear.",
+                filter.ids.len(),
+                filter.label
+            ),
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else if hint_visible {
         lines.push(Line::from(Span::styled(
             "Filters now live as chips — try [P]ublic, [C]onflicts, [/] to search.",
             Style::default()
@@ -3215,6 +3253,16 @@ fn row_matches_view_filter(row: &RowVm, view: ViewKind, listener_filter: Listene
     }
 }
 
+fn row_matches_visible_listener_scope(
+    row: &RowVm,
+    view: ViewKind,
+    listener_filter: ListenerFilter,
+    related_listener_filter: Option<&RelatedListenerFilter>,
+) -> bool {
+    row_matches_view_filter(row, view, listener_filter)
+        && related_listener_filter.is_none_or(|filter| filter.ids.contains(&row.id))
+}
+
 fn render_inspector(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -3222,28 +3270,11 @@ fn render_inspector(
     theme: &Theme,
     active: bool,
 ) {
-    let mut lines: Vec<Line<'_>> = view_model
-        .inspector
-        .lines
-        .iter()
-        .map(|line| inspector_line(line, theme))
-        .collect();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Provenance",
-        Style::default()
-            .fg(theme.accent.color())
-            .bg(theme.base_bg.color())
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.extend(view_model.inspector.provenance.iter().map(|p| {
-        Line::from(Span::styled(
-            format!("  {}", compact_text(p, 72)),
-            Style::default()
-                .fg(theme.footer.color())
-                .bg(theme.base_bg.color()),
-        ))
-    }));
+    let lines = if view_model.inspector.sections.is_empty() {
+        render_plain_inspector_lines(&view_model.inspector, theme)
+    } else {
+        render_section_lines(&view_model.inspector.sections, theme)
+    };
     let widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(panel_block(
@@ -3257,6 +3288,154 @@ fn render_inspector(
                 .bg(theme.base_bg.color()),
         );
     frame.render_widget(widget, area);
+}
+
+fn render_plain_inspector_lines<'a>(inspector: &'a InspectorVm, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line<'a>> = inspector
+        .lines
+        .iter()
+        .map(|line| inspector_line(line, theme))
+        .collect();
+    if !inspector.provenance.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_heading_line("Provenance", theme));
+        lines.extend(inspector.provenance.iter().map(|p| {
+            Line::from(Span::styled(
+                format!("  {p}"),
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color()),
+            ))
+        }));
+    }
+    lines
+}
+
+fn render_section_lines<'a>(sections: &'a [InspectorSectionVm], theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+    let mut jump_index = 1usize;
+    for (section_idx, section) in sections.iter().enumerate() {
+        if section_idx > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(section_heading_line(&section.heading, theme));
+        let mut shortcut_rows = 0usize;
+        for row in &section.rows {
+            let shortcut = row_receives_shortcut(&section.heading, row)
+                .then(|| {
+                    shortcut_rows += 1;
+                    if jump_index <= 9 {
+                        let current = jump_index;
+                        jump_index += 1;
+                        Some(format!("[{current}] "))
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+            let disabled = section.heading == "ACTIONS" && row.label.contains("disabled");
+            lines.push(inspector_section_row(
+                row,
+                shortcut.as_deref(),
+                theme,
+                disabled,
+            ));
+        }
+        if section.heading == "RELATED" && shortcut_rows > 9 {
+            lines.push(inspector_affordance_line(
+                "[v] view all related",
+                format!("{} total", shortcut_rows),
+                theme,
+            ));
+        }
+    }
+    lines
+}
+
+fn section_heading_line<'a>(heading: &'a str, theme: &Theme) -> Line<'a> {
+    Line::from(Span::styled(
+        heading,
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn inspector_affordance_line(
+    label: impl Into<String>,
+    secondary: impl Into<String>,
+    theme: &Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "  ",
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            label.into(),
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", secondary.into()),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ),
+    ])
+}
+
+fn inspector_section_row<'a>(
+    row: &'a InspectorRow,
+    shortcut: Option<&str>,
+    theme: &Theme,
+    dim: bool,
+) -> Line<'a> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        "  ",
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color()),
+    ));
+    if let Some(shortcut) = shortcut {
+        spans.push(Span::styled(
+            shortcut.to_string(),
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let row_fg = if dim {
+        theme.footer.color()
+    } else {
+        theme.base_fg.color()
+    };
+    spans.push(Span::styled(
+        format!("{:<13}", row.label),
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color()),
+    ));
+    spans.push(Span::styled(
+        row.value.clone(),
+        Style::default().fg(row_fg).bg(theme.base_bg.color()),
+    ));
+    if let Some(secondary) = &row.secondary {
+        spans.push(Span::styled(
+            format!("  {secondary}"),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn inspector_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
@@ -3873,10 +4052,11 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
         .enumerate()
         .filter(|(_, row)| match app.active_view {
             ViewKind::Listeners | ViewKind::Public | ViewKind::Conflicts | ViewKind::Orphans => {
-                row_matches_view_filter(
+                row_matches_visible_listener_scope(
                     row,
                     app.active_view,
                     effective_listener_filter(app.active_view, app.listener_filter),
+                    app.related_listener_filter.as_ref(),
                 )
             }
             ViewKind::Ports => row.port.is_some(),
@@ -3910,19 +4090,17 @@ fn sync_row_selection(app: &mut App) {
             provenance_expanded: false,
             diagnostic_markdown: "# lazyadmin overview\nDigest projection from current snapshot\n"
                 .into(),
+            ..Default::default()
         };
         return;
     }
     if app.active_view == ViewKind::Doctor {
         if app.vm.doctor.rows.is_empty() {
             app.selected_row = 0;
-            app.vm.inspector = InspectorVm {
-                title: "No warning group".into(),
-                lines: vec!["Everything's clean — no actionable warnings.".into()],
-                provenance: vec![],
-                provenance_expanded: false,
-                diagnostic_markdown: "# lazyadmin doctor\nNo warning group\n".into(),
-            };
+            app.vm.inspector = plain_inspector(
+                "No warning group",
+                "Everything's clean — no actionable warnings.",
+            );
             return;
         }
         app.selected_row = app
@@ -3935,13 +4113,8 @@ fn sync_row_selection(app: &mut App) {
     if visible.is_empty() {
         app.selected_row = 0;
         if app.selected_process.is_none() {
-            app.vm.inspector = InspectorVm {
-                title: "No selection".into(),
-                lines: vec!["No workloads/listeners discovered yet".into()],
-                provenance: vec![],
-                provenance_expanded: false,
-                diagnostic_markdown: "# lazyadmin diagnostic\nNo selection\n".into(),
-            };
+            app.vm.inspector =
+                plain_inspector("No selection", "No workloads/listeners discovered yet");
         }
         return;
     }
@@ -3953,7 +4126,7 @@ fn sync_row_selection(app: &mut App) {
             .get(app.selected_row)
             .and_then(|idx| app.vm.rows.get(*idx))
         {
-            app.vm.inspector = inspector_for_row(row);
+            app.vm.inspector = inspector_for_row(&app.snapshot, row);
         }
     }
 }
@@ -4013,6 +4186,7 @@ fn inspector_for_doctor_row(row: &DoctorRowVm) -> InspectorVm {
             "# {title}\n\n- code: {}\n- action: {}\n",
             row.code, row.suggested_action
         ),
+        ..Default::default()
     }
 }
 
@@ -4020,6 +4194,110 @@ fn selected_row(app: &App) -> Option<&RowVm> {
     visible_row_indices(app)
         .get(app.selected_row)
         .and_then(|idx| app.vm.rows.get(*idx))
+}
+
+fn jump_to_inspector_target(app: &mut App, target: JumpTarget, width: u16) {
+    match target {
+        JumpTarget::Listener { id } => {
+            let id = id.to_string();
+            app.active_view = ViewKind::Listeners;
+            app.listener_filter = ListenerFilter::All;
+            app.related_listener_filter = None;
+            app.selected_process = None;
+            app.selected_row = 0;
+            rebuild_view_model(app, width);
+            if let Some(pos) = visible_row_indices(app)
+                .iter()
+                .position(|idx| app.vm.rows.get(*idx).is_some_and(|row| row.id == id))
+            {
+                app.selected_row = pos;
+                sync_row_selection(app);
+            }
+            app.status = Some(format!("jumped to listener {id}"));
+        }
+        JumpTarget::Process { key } => {
+            app.active_view = ViewKind::ProcessTree;
+            app.selected_process = Some(key.clone());
+            app.selected_row = 0;
+            rebuild_view_model(app, width);
+            app.status = Some(format!("jumped to pid {}", key.pid));
+        }
+        JumpTarget::Project { id } => {
+            jump_to_lookup_only_target(app, width, ViewKind::Projects, "project", &id.to_string());
+        }
+        JumpTarget::Workload { id } => {
+            jump_to_lookup_only_target(
+                app,
+                width,
+                ViewKind::Workloads,
+                "workload",
+                &id.to_string(),
+            );
+        }
+        JumpTarget::Manager { id } => {
+            jump_to_lookup_only_target(app, width, ViewKind::Managers, "manager", &id.to_string());
+        }
+        JumpTarget::TrackedRun { id } => {
+            jump_to_lookup_only_target(
+                app,
+                width,
+                ViewKind::TrackedRuns,
+                "tracked_run",
+                &id.to_string(),
+            );
+        }
+        JumpTarget::WarningGroup { code } => {
+            app.active_view = ViewKind::Doctor;
+            app.selected_process = None;
+            app.selected_row = 0;
+            rebuild_view_model(app, width);
+            if let Some(pos) = app.vm.doctor.rows.iter().position(|row| row.code == code) {
+                app.selected_row = pos;
+                sync_row_selection(app);
+            } else if let Some(view) = InspectorView::lookup(&app.snapshot, "warning_group", &code)
+            {
+                app.vm.inspector = inspector_vm_from_view(view);
+            }
+            app.status = Some(format!("jumped to warning group {code}"));
+        }
+    }
+}
+
+fn view_all_related_listeners(app: &mut App, width: u16) {
+    let ids = related_listener_ids(&app.vm.inspector.sections);
+    if ids.len() <= 9 {
+        app.status = Some("no hidden related listeners to show".into());
+        return;
+    }
+    let label = app.vm.inspector.title.clone();
+    app.active_view = ViewKind::Listeners;
+    app.listener_filter = ListenerFilter::All;
+    app.related_listener_filter = Some(RelatedListenerFilter {
+        ids: ids.into_iter().collect(),
+        label: label.clone(),
+    });
+    app.selected_process = None;
+    app.selected_row = 0;
+    rebuild_view_model(app, width);
+    info!(target = %label, "tui inspector view all related listeners");
+    app.status = Some(format!("viewing all related listeners for {label}"));
+}
+
+fn jump_to_lookup_only_target(app: &mut App, width: u16, view: ViewKind, kind: &str, id: &str) {
+    app.active_view = view;
+    app.selected_process = None;
+    app.selected_row = 0;
+    rebuild_view_model(app, width);
+    if let Some(inspector) =
+        InspectorView::lookup(&app.snapshot, kind, id).map(inspector_vm_from_view)
+    {
+        app.vm.inspector = inspector;
+        app.status = Some(format!("jumped to {kind} {id}"));
+    } else {
+        app.status = Some(format!(
+            "jump failed: {kind} {id} is no longer in the snapshot"
+        ));
+    }
 }
 
 fn action_target(row: Option<&RowVm>) -> String {
@@ -4043,15 +4321,121 @@ fn action_target(row: Option<&RowVm>) -> String {
 
 fn start_confirmation(app: &mut App, command: Command, required: &str) {
     let target = action_target(selected_row(app));
+    let command_preview = CommandDispatcher::plan_for_target(&command, &target);
+    start_confirmation_with_preview(app, command, required, target, command_preview);
+}
+
+fn start_confirmation_with_preview(
+    app: &mut App,
+    command: Command,
+    required: &str,
+    target: String,
+    command_preview: String,
+) {
     app.confirmation = Some(Confirmation {
         command,
         typed: String::new(),
         required: required.into(),
         target: target.clone(),
+        command_preview,
     });
     app.status = Some(format!(
         "confirm {required} for {target}; type {required} then Enter, Esc cancels"
     ));
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InspectorAction {
+    command: Command,
+    required: String,
+    target: String,
+    command_preview: String,
+    disabled_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedInspectorAction {
+    key_hint: String,
+    action: InspectorAction,
+}
+
+fn handle_inspector_action_key(app: &mut App, key: KeyEvent) -> bool {
+    let Some(action) = inspector_action_for_key(&app.vm.inspector, key) else {
+        return false;
+    };
+    if let Some(reason) = action.disabled_reason {
+        app.status = Some(format!("action disabled: {reason}"));
+        return true;
+    }
+    info!(
+        command = ?action.command,
+        target = %action.target,
+        preview = %action.command_preview,
+        "tui inspector action confirmation opened"
+    );
+    start_confirmation_with_preview(
+        app,
+        action.command,
+        &action.required,
+        action.target,
+        action.command_preview,
+    );
+    true
+}
+
+fn inspector_action_for_key(inspector: &InspectorVm, key: KeyEvent) -> Option<InspectorAction> {
+    let pressed = key_event_to_spec(key)?;
+    let mut action = inspector
+        .sections
+        .iter()
+        .find(|section| section.heading == "ACTIONS")?
+        .rows
+        .iter()
+        .filter_map(inspector_action_from_row)
+        .find(|parsed| normalize_key_spec(&parsed.key_hint) == normalize_key_spec(&pressed))?
+        .action;
+    action.target = inspector.title.clone();
+    Some(action)
+}
+
+fn inspector_action_from_row(row: &InspectorRow) -> Option<ParsedInspectorAction> {
+    let (key_hint, rest) = row.label.strip_prefix('[')?.split_once("] ")?;
+    let (verb, disabled_reason) = match rest.split_once(" — disabled (") {
+        Some((verb, reason)) => (verb, Some(reason.trim_end_matches(')').to_string())),
+        None => (rest, None),
+    };
+    let required = inspector_required_confirmation_text(verb);
+    let command = inspector_command_for_verb(verb)?;
+    Some(ParsedInspectorAction {
+        key_hint: key_hint.to_string(),
+        action: InspectorAction {
+            command,
+            required,
+            target: verb.to_string(),
+            command_preview: row.value.clone(),
+            disabled_reason,
+        },
+    })
+}
+
+fn inspector_required_confirmation_text(verb: &str) -> String {
+    if verb.starts_with("free") {
+        "free".into()
+    } else {
+        verb.split_whitespace().next().unwrap_or(verb).to_string()
+    }
+}
+
+fn inspector_command_for_verb(verb: &str) -> Option<Command> {
+    match verb.split_whitespace().next()? {
+        "free" => Some(Command::Free),
+        "forget" => Some(Command::Run),
+        "kill" => Some(Command::Kill),
+        "logs" => Some(Command::Logs),
+        "restart" => Some(Command::Restart),
+        "stop" => Some(Command::Stop),
+        _ => None,
+    }
 }
 
 /// Confirmation modal owns ALL key input while it is open. This is intentional
@@ -4080,7 +4464,7 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
                 CommandDispatcher::execute(&command);
                 app.status = Some(format!(
                     "{}; awaiting action executor for {target}",
-                    CommandDispatcher::plan_for_target(&command, &target)
+                    confirmation.command_preview
                 ));
             } else {
                 app.status = Some(format!(
@@ -4140,6 +4524,7 @@ fn cycle_active_view(app: &mut App, delta: isize, width: u16) {
 }
 
 fn set_active_view(app: &mut App, view: ViewKind, width: u16) {
+    app.related_listener_filter = None;
     match view {
         ViewKind::Listeners => {
             app.selected_process = None;
@@ -4299,6 +4684,21 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             return;
         }
         _ => {}
+    }
+    if app.pane == Pane::Inspector
+        && let KeyCode::Char(c) = key.code
+        && let Some(index) = c.to_digit(10).and_then(|n| n.checked_sub(1))
+        && let Some(target) = app.vm.inspector.jump_targets.get(index as usize).cloned()
+    {
+        jump_to_inspector_target(app, target, width);
+        return;
+    }
+    if app.pane == Pane::Inspector && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+        view_all_related_listeners(app, width);
+        return;
+    }
+    if app.pane == Pane::Inspector && handle_inspector_action_key(app, key) {
+        return;
     }
     if app.active_view == ViewKind::Overview
         && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
@@ -4472,6 +4872,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
 
 fn set_listener_filter(app: &mut App, filter: ListenerFilter, width: u16) {
     app.listener_filter = filter;
+    app.related_listener_filter = None;
     app.listeners_hint_visible = false;
     rebuild_view_model(app, width);
     app.status = Some(format!("listeners filter: {}", filter.label()));
@@ -4572,6 +4973,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
             overview_hint_visible: app.overview_hint_visible,
             listener_filter: app.listener_filter,
             listeners_hint_visible: app.listeners_hint_visible,
+            related_listener_filter: app.related_listener_filter.as_ref(),
         },
     );
     let footer = Rect {
@@ -4583,6 +4985,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
     let status = match app.mode {
         InputMode::Filter => format!("Filter: {}  (Enter apply, Esc clear)", app.query),
         InputMode::Palette => format!("Command: {}  (Enter run, Esc cancel)", app.query),
+        _ if app.confirmation.is_some() => String::new(),
         _ => app.status.clone().unwrap_or_default(),
     };
     if !status.is_empty() {
@@ -4625,7 +5028,15 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
     }
     if let Some(confirmation) = &app.confirmation {
         let area = centered_rect(62, 38, f.area());
+        let modal_title = format!(
+            "Confirm action — {}",
+            compact_text(&confirmation.command_preview, 42)
+        );
         let body = vec![
+            Line::from(vec![
+                Span::styled("Preview: ", Style::default().fg(app.theme.footer.color())),
+                Span::raw(confirmation.command_preview.clone()),
+            ]),
             Line::from(vec![
                 Span::styled("Action: ", Style::default().fg(app.theme.footer.color())),
                 Span::raw(format!("{:?}", confirmation.command)),
@@ -4653,7 +5064,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         ];
         let prompt = Paragraph::new(body)
             .wrap(Wrap { trim: false })
-            .block(panel_block("Confirm action", &app.theme, true))
+            .block(panel_block(modal_title, &app.theme, true))
             .style(
                 Style::default()
                     .fg(app.theme.base_fg.color())
@@ -4889,6 +5300,7 @@ mod tests {
                             overview_hint_visible: false,
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
+                            related_listener_filter: None,
                         },
                     )
                 })
@@ -4926,6 +5338,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -4976,6 +5389,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -5081,6 +5495,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -5157,6 +5572,7 @@ mod tests {
                             overview_hint_visible: false,
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
+                            related_listener_filter: None,
                         },
                     )
                 })
@@ -5446,6 +5862,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -5603,6 +6020,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -5793,6 +6211,243 @@ mod tests {
         }
     }
 
+    fn render_inspector_text(vm: &ViewModel, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_inspector(vm, f, f.area(), &Theme::default_dark(), true))
+            .unwrap();
+        format!("{:?}", terminal.backend().buffer())
+    }
+
+    #[test]
+    fn inspector_lists_related_listeners_at_38_col_width() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key.clone(), 8443));
+        snap.listeners.push(listener_for_process(key, 8444));
+        let vm = build_view_model(&snap, 38, false, "");
+        assert!(vm.inspector.sections.iter().any(|s| s.heading == "RELATED"));
+        let text = render_inspector_text(&vm, 38, 18);
+        assert!(text.contains("RELATED"), "{text}");
+        assert!(text.contains("[1]"), "{text}");
+        assert!(text.contains("8444"), "{text}");
+    }
+
+    #[test]
+    fn inspector_jump_shortcut_selects_related_listener() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key.clone(), 8443));
+        snap.listeners.push(listener_for_process(key, 8444));
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Listeners,
+            pane: Pane::Inspector,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        assert_eq!(app.vm.inspector.jump_targets.len(), 1);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(selected_row(&app).unwrap().port, Some(8444));
+    }
+
+    #[test]
+    fn inspector_view_all_related_filters_listener_table() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        for offset in 0..11 {
+            snap.listeners
+                .push(listener_for_process(key.clone(), 8400 + offset));
+        }
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Listeners,
+            pane: Pane::Inspector,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        let text = render_inspector_text(&app.vm, 120, 40);
+        assert!(text.contains("[v] view all related"), "{text}");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Listeners);
+        assert_eq!(visible_row_indices(&app).len(), 10);
+        assert!(app.related_listener_filter.is_some());
+        assert_eq!(selected_row(&app).unwrap().port, Some(8401));
+    }
+
+    #[test]
+    fn inspector_action_key_opens_confirmation_with_command_preview() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, 8443));
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Listeners,
+            pane: Pane::Inspector,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            120,
+        );
+        let confirmation = app.confirmation.as_ref().unwrap();
+        assert_eq!(confirmation.required, "free");
+        assert!(confirmation.command_preview.contains("lazyadmin free 8443"));
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_app(f, &app)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("Confirm action"), "{text}");
+        assert!(text.contains("lazyadmin free 8443"), "{text}");
+        assert!(text.contains("Type 'free'"), "{text}");
+    }
+
+    #[test]
+    fn inspector_disabled_action_key_shows_reason_without_confirmation() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(5555, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        let mut app = App {
+            vm: build_view_model_with_state(
+                &snap,
+                120,
+                false,
+                "",
+                Some(key),
+                &HashSet::new(),
+                None,
+                &HashSet::new(),
+                DoctorSeverityFilter::All,
+            ),
+            snapshot: snap,
+            active_view: ViewKind::ProcessTree,
+            pane: Pane::Inspector,
+            selected_process: None,
+            ..Default::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT),
+            120,
+        );
+        assert!(app.confirmation.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("logs only available"),
+            "{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn inspector_listener_id_full_string_present_at_38_col_width() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, 8443));
+        let vm = build_view_model(&snap, 38, false, "");
+        let plain = vm.inspector.lines.join("\n");
+        assert!(plain.contains("tcp:127.0.0.1:8443"), "{plain}");
+        let text = render_inspector_text(&vm, 38, 18);
+        assert!(text.contains("tcp:127.0.0.1:8443"), "{text}");
+        assert!(!text.contains("tcp:127.0.0.1…"), "{text}");
+    }
+
+    #[test]
+    fn inspector_full_cmdline_wraps_without_truncation() {
+        let mut snap = build_empty_snapshot();
+        let mut proc = process(5555, None, 1);
+        proc.cmdline = vec![
+            "node".into(),
+            "packages/web/dev-server-with-a-very-specific-script-name.js".into(),
+            "--flag=value".into(),
+        ];
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        let vm = build_view_model_with_state(
+            &snap,
+            60,
+            false,
+            "",
+            Some(key),
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            DoctorSeverityFilter::All,
+        );
+        let plain = vm.inspector.lines.join("\n");
+        assert!(
+            plain.contains("packages/web/dev-server-with-a-very-specific-script-name.js"),
+            "{plain}"
+        );
+        assert!(!plain.contains('…'), "{plain}");
+    }
+
+    #[test]
+    fn inspector_disabled_action_renders_with_reason() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(5555, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        let vm = build_view_model_with_state(
+            &snap,
+            120,
+            false,
+            "",
+            Some(key),
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            DoctorSeverityFilter::All,
+        );
+        let text = render_inspector_text(&vm, 120, 18);
+        assert!(text.contains("[L] logs"), "{text}");
+        assert!(text.contains("disabled"), "{text}");
+        assert!(text.contains("tracked runs"), "{text}");
+    }
+
+    #[test]
+    fn inspector_no_dash_rows_visible() {
+        let mut snap = build_empty_snapshot();
+        let proc = process(4321, None, 1);
+        let key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.listeners.push(listener_for_process(key, 8443));
+        let vm = build_view_model(&snap, 120, false, "");
+        let rendered = vm.inspector.lines.join("\n");
+        assert!(!rendered.contains("Warnings: -"), "{rendered}");
+        assert!(!rendered.contains("Project: -"), "{rendered}");
+        assert!(!rendered.contains("unavailable"), "{rendered}");
+    }
+
     fn app_with_listener(port: u16) -> App {
         let mut snap = build_empty_snapshot();
         let proc = process(4321, None, 1);
@@ -5834,6 +6489,11 @@ mod tests {
         assert!(text.contains("Confirm action"));
         assert!(text.contains("8080"));
         assert!(text.contains("Type 'kill'"));
+        let footer_line = text.lines().last().unwrap_or_default();
+        assert!(
+            !footer_line.contains("confirm kill"),
+            "confirmation hint belongs in modal, not footer: {footer_line}"
+        );
     }
 
     #[test]
@@ -6060,6 +6720,7 @@ mod tests {
                         overview_hint_visible: false,
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
+                        related_listener_filter: None,
                     },
                 )
             })
@@ -6103,6 +6764,7 @@ mod tests {
                             overview_hint_visible: false,
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
+                            related_listener_filter: None,
                         },
                     )
                 })

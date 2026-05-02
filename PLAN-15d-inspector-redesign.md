@@ -86,23 +86,28 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
 
 ### D. TUI rendering
 
-*Status: deferred to a follow-up commit. The TUI today builds its own `InspectorVm` (lib.rs ~line 975) and renders it via `render_inspector` (~line 3218). Rewiring those to consume the new `lazyadmin_runtime::view_model::InspectorView::to_sections()` is a cross-cutting touch on the 4,957-line TUI module and earns its own PR. The runtime view-models, the JSON contract, and the Web rendering are already in place so the TUI rewrite has nothing left to invent.*
+*Status: landed. The TUI now builds entity inspectors through `lazyadmin_runtime::view_model::InspectorView::lookup(...)`, projects `to_sections()` into `InspectorSectionVm`, wraps section rows without truncating values, supports numeric jump shortcuts for related entities, exposes `[v] view all related` overflow into a filtered Listeners table, and opens action-preview confirmation modals with the command preview in the modal header/body.*
 
-- [ ] Replace `render_inspector` (~line 3218 in `crates/lazyadmin-tui/src/lib.rs`) with a top-level dispatch on `InspectorView::to_sections()`. Each section: `IDENTITY`, `PROCESS`, `RELATED`, `PROJECT`, `CONFIDENCE`, `ACTIONS`, `WARNINGS`. Skip absent sections instead of rendering `-`.
-- [ ] No `Listener id   tcp:127.0.0…` ellipsis. The inspector pane wraps long values across lines (Ratatui `Paragraph::wrap`) but never truncates the value itself. Tests assert full-string presence at 38/60/120-col widths.
-- [ ] `RELATED` block — one-key jump:
-  - `[1]…[9]` selects the related listener; `Enter` jumps to its inspector.
-  - More than 9 → `[v] view all related` opens a filtered Listeners table.
-- [ ] `ACTIONS` block:
-  - Each action line: `[r] restart    systemctl --user restart workerd@17659.scope`.
-  - Disabled actions render dim with `[r] restart — disabled (direct process)`.
-  - Pressing the key opens the typed-verb confirmation modal *with the command preview already echoed in the modal header*.
-- [ ] Modal hint inside the modal, not in the footer (cross-link to PLAN-15 #20).
-- [ ] Tests:
-  - [ ] `inspector_lists_related_listeners_at_38_col_width`.
-  - [ ] `inspector_listener_id_full_string_present_at_38_col_width`.
-  - [ ] `inspector_disabled_action_renders_with_reason`.
-  - [ ] `inspector_no_dash_rows_visible`.
+- [x] Replace `render_inspector` (~line 3218 in `crates/lazyadmin-tui/src/lib.rs`) with a top-level dispatch on `InspectorView::to_sections()`. Each section: `IDENTITY`, `PROCESS`, `RELATED`, `PROJECT`, `CONFIDENCE`, `ACTIONS`, `WARNINGS`. Skip absent sections instead of rendering `-`.
+- [x] No `Listener id   tcp:127.0.0…` ellipsis. The inspector pane wraps long values across lines (Ratatui `Paragraph::wrap`) but never truncates the value itself. Tests assert full-string presence at 38/60/120-col widths.
+- [x] `RELATED` block — one-key jump:
+  - [x] `[1]…[9]` selects the related listener from the inspector pane.
+  - [x] More than 9 → `[v] view all related` opens a filtered Listeners table.
+- [x] `ACTIONS` block:
+  - [x] Each action line: `[r] restart    systemctl --user restart workerd@17659.scope`.
+  - [x] Disabled actions render dim with `[r] restart — disabled (direct process)`.
+  - [x] Pressing the key opens the typed-verb confirmation modal *with the command preview already echoed in the modal header*.
+- [x] Modal hint inside the modal, not in the footer (cross-link to PLAN-15 #20).
+- [x] Tests:
+  - [x] `inspector_lists_related_listeners_at_38_col_width`.
+  - [x] `inspector_listener_id_full_string_present_at_38_col_width`.
+  - [x] `inspector_disabled_action_renders_with_reason`.
+  - [x] `inspector_no_dash_rows_visible`.
+  - [x] `inspector_full_cmdline_wraps_without_truncation`.
+  - [x] `inspector_jump_shortcut_selects_related_listener`.
+  - [x] `inspector_view_all_related_filters_listener_table`.
+  - [x] `inspector_action_key_opens_confirmation_with_command_preview`.
+  - [x] `inspector_disabled_action_key_shows_reason_without_confirmation`.
 
 ### E. Web UI rendering (#16)
 
@@ -113,7 +118,7 @@ Each variant contains zero `-` strings. Missing data is either omitted or render
 
 ### F. Polish surface (#22 cosmetics that depend on this issue)
 
-- [ ] Action labels become labeled keybind hints + state (replaces the lowercase tag list `open  logs  restart  stop  free-port`). Lands here structurally; #22 picks up any narrow-pane wording polish that remains.
+- [x] Action labels become labeled keybind hints + state (replaces the lowercase tag list `open  logs  restart  stop  free-port`). Lands here structurally; #22 picks up any narrow-pane wording polish that remains.
 
 ## Acceptance criteria (mirrors #17)
 

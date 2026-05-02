@@ -128,7 +128,7 @@ Both issues are written up in dedicated plans. They can land in either order but
 #16 and #17 are written up in dedicated plans. #19 is straightforward enough to track inline.
 
 - [x] **#16 — Web UI rebuild.** See [PLAN-15c-web-ui-rebuild.md](./PLAN-15c-web-ui-rebuild.md). Static UI rebuilt as `index.html` + `app.css` + `app.js`; new `/api/header_pip` and `/api/inspector` routes; rail mirrors `RAIL_ENTRIES`; templated inspector, no `<pre>{JSON}</pre>` in the visible UI.
-- [~] **#17 — Inspector pane.** See [PLAN-15d-inspector-redesign.md](./PLAN-15d-inspector-redesign.md). Per-kind `InspectorView` view-models, `/api/inspector` typed shape, Web rendering, and confidence-signal classification all shipped. The TUI `render_inspector` rewrite (Task D) is the only remaining piece and is tracked as a follow-up.
+- [x] **#17 — Inspector pane.** See [PLAN-15d-inspector-redesign.md](./PLAN-15d-inspector-redesign.md). Per-kind `InspectorView` view-models, `/api/inspector` typed shape, Web rendering, confidence-signal classification, and the TUI `render_inspector` rewrite are shipped.
 
 ### #19 — Collapse the rail to ~6 verbs (inline)
 
@@ -156,7 +156,7 @@ Both issues are written up in dedicated plans. They can land in either order but
 - [x] TUI rail has ≤8 entries; no disabled adapter rows.
 - [x] Chips inside `Listeners` reproduce the previous filtered-view results 1:1 (golden test).
 - [x] Web UI default route is the digest; no metric-card row; inspector is templated, not `<pre>{JSON}</pre>`.
-- [~] Inspector layouts implemented for all 7 entity kinds; no `-` rows. *(Runtime view-models + Web rendering shipped; TUI `render_inspector` rewrite still pending under PLAN-15d Task D.)*
+- [x] Inspector layouts implemented for all 7 entity kinds; no `-` rows. Runtime view-models, Web rendering, and TUI section rendering all consume the same inspector contract.
 
 ---
 
