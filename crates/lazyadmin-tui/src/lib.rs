@@ -24,7 +24,7 @@ use lazyadmin_core::{
     snapshot::build_empty_snapshot,
 };
 use lazyadmin_runtime::view_model::{
-    Digest, InspectorView, RAIL_ENTRIES, build_digest, build_doctor_groups,
+    Digest, HeaderPip, InspectorView, RAIL_ENTRIES, build_digest, build_doctor_groups,
     inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
 };
 use ratatui::{
@@ -115,6 +115,15 @@ pub struct Toast {
 }
 
 impl App {
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.push_status(
+            StatusChannel::Toast {
+                ttl: Duration::from_secs(2),
+            },
+            message,
+        );
+    }
+
     pub fn push_status(&mut self, channel: StatusChannel, message: impl Into<String>) {
         let message = message.into();
         match channel {
@@ -123,7 +132,7 @@ impl App {
                 self.toasts.push_back(Toast {
                     message,
                     ttl,
-                    created_at: None,
+                    created_at: Some(Instant::now()),
                 });
             }
             StatusChannel::HeaderPip | StatusChannel::ModalHint => {
@@ -843,7 +852,7 @@ pub fn install_panic_guard() {
     }));
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewModel {
     pub width: u16,
     pub layout: LayoutMode,
@@ -858,10 +867,37 @@ pub struct ViewModel {
     pub doctor: DoctorVm,
     pub process_tree: ProcessTreeVm,
     pub metrics: MetricsVm,
+    pub header_pip: HeaderPip,
     pub inspector: InspectorVm,
     pub hidden_system_count: usize,
     pub degraded: Option<String>,
     pub events_dropped: u64,
+}
+
+impl Default for ViewModel {
+    fn default() -> Self {
+        let snapshot = build_empty_snapshot();
+        Self {
+            width: 0,
+            layout: LayoutMode::default(),
+            groups: Vec::new(),
+            rows: Vec::new(),
+            digest: Digest::default(),
+            conflicts: Vec::new(),
+            orphans: Vec::new(),
+            projects: Vec::new(),
+            workloads: Vec::new(),
+            tracked_runs: Vec::new(),
+            doctor: DoctorVm::default(),
+            process_tree: ProcessTreeVm::default(),
+            metrics: MetricsVm::default(),
+            header_pip: HeaderPip::from_snapshot(&snapshot),
+            inspector: InspectorVm::default(),
+            hidden_system_count: 0,
+            degraded: None,
+            events_dropped: 0,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutMode {
@@ -1328,6 +1364,7 @@ pub fn build_view_model_with_state(
         doctor,
         process_tree,
         metrics: build_metrics_with_adapters(snapshot, None, adapter_metrics.unwrap_or_default()),
+        header_pip: HeaderPip::from_snapshot(snapshot),
         inspector,
         hidden_system_count: hidden,
         degraded: snapshot
@@ -2621,6 +2658,70 @@ fn listener_signal_counts(rows: &[RowVm]) -> (usize, usize, usize) {
     })
 }
 
+fn pad_to_width(mut line: Line<'static>, width: u16) -> Line<'static> {
+    let width = width as usize;
+    let current = line.width();
+    if current < width {
+        line.spans.push(Span::raw(" ".repeat(width - current)));
+    }
+    line
+}
+
+fn header_pip_spans(pip: &HeaderPip, theme: &Theme) -> Vec<Span<'static>> {
+    let dropped = pip.drops.as_ref().map(|drops| drops.dropped).unwrap_or(0);
+    let stale = pip.freshness.age_seconds > 5;
+    let degraded = pip.adapters.degraded > 0;
+    let (glyph, label, color) = if dropped > 0 {
+        (
+            "⚠",
+            format!("events dropped {dropped}"),
+            theme.pip_error.color(),
+        )
+    } else if stale {
+        (
+            "●",
+            format!("refresh stale ({}s)", pip.freshness.age_seconds),
+            theme.pip_warn.color(),
+        )
+    } else if degraded {
+        ("●", "degraded".to_string(), theme.pip_warn.color())
+    } else {
+        ("●", "healthy".to_string(), theme.pip_ok.color())
+    };
+    let color = signal_color(theme, color);
+    let mut spans = vec![
+        Span::styled(
+            format!("  {glyph} {label}"),
+            Style::default()
+                .fg(color)
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  adapters: {}/{} active",
+                pip.adapters.active, pip.adapters.total
+            ),
+            Style::default()
+                .fg(theme.info.color())
+                .bg(theme.base_bg.color()),
+        ),
+    ];
+    if dropped == 0 {
+        spans.push(Span::styled(
+            format!("  last update {}s ago", pip.freshness.age_seconds),
+            Style::default()
+                .fg(if stale {
+                    signal_color(theme, theme.pip_warn.color())
+                } else {
+                    theme.footer.color()
+                })
+                .bg(theme.base_bg.color()),
+        ));
+    }
+    spans
+}
+
 fn render_header(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -2630,11 +2731,10 @@ fn render_header(
 ) {
     let total = view_model.rows.len();
     let (public, lan, loopback) = listener_signal_counts(&view_model.rows);
-    let adapters = view_model.metrics.adapters.len();
     let inactive = Style::default()
         .fg(theme.footer.color())
         .bg(theme.base_bg.color());
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             "lazyadmin",
             Style::default()
@@ -2685,13 +2785,9 @@ fn render_header(
                 })
                 .bg(theme.base_bg.color()),
         ),
-        Span::styled(
-            format!("  {adapters} adapters"),
-            Style::default()
-                .fg(theme.info.color())
-                .bg(theme.base_bg.color()),
-        ),
-    ]);
+    ];
+    spans.extend(header_pip_spans(&view_model.header_pip, theme));
+    let line = Line::from(spans);
     frame.render_widget(
         Paragraph::new(line)
             .block(
@@ -2729,8 +2825,13 @@ fn render_view_kind(
         area,
     );
     if view_model.layout == LayoutMode::Refuse || area.width < 60 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
         if ctx.view == ViewKind::Overview {
-            render_digest_refuse(view_model, frame, area, theme);
+            render_digest_refuse(view_model, frame, chunks[0], theme);
+            render_footer_hints(view_model, frame, chunks[1], theme, ctx);
             return;
         }
         let p = Paragraph::new(narrow_refusal_message(ctx.view))
@@ -2742,7 +2843,8 @@ fn render_view_kind(
                     .bg(theme.base_bg.color()),
             )
             .block(panel_block("lazyadmin", theme, true));
-        frame.render_widget(p, area);
+        frame.render_widget(p, chunks[0]);
+        render_footer_hints(view_model, frame, chunks[1], theme, ctx);
         return;
     }
     let vertical = Layout::default()
@@ -2832,38 +2934,60 @@ fn render_view_kind(
     } else {
         render_main_pane(view_model, frame, chunks[0], theme, ctx, true);
     }
-    let mut status = Vec::new();
+    render_footer_hints(view_model, frame, vertical[2], theme, ctx);
+}
+
+fn footer_hint_line(
+    view_model: &ViewModel,
+    ctx: RenderContext<'_>,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        match ctx.active_pane {
+            Pane::Groups => "[↑↓] views   [enter] open   [tab] pane",
+            Pane::Rows => "[?] help   [:] palette   [/] filter   [enter] inspect   [q] quit",
+            Pane::Inspector => "[1-9] jump   [v] view related   [tab] pane   [q] quit",
+        },
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color()),
+    )];
     if view_model.hidden_system_count > 0 {
-        status.push(format!(
-            "hidden: {} system services. press S to toggle",
-            view_model.hidden_system_count
+        spans.push(Span::styled(
+            format!(
+                "   hidden system: {}   [S] show",
+                view_model.hidden_system_count
+            ),
+            Style::default()
+                .fg(theme.system_noise.color())
+                .bg(theme.base_bg.color()),
         ));
     }
-    if view_model.events_dropped > 0 {
-        status.push("EVENTS DROPPED — refresh may lag".into());
-    }
-    if let Some(degraded) = &view_model.degraded {
-        status.push(format!("DEGRADED {degraded}"));
-    }
-    if status.is_empty() {
-        status.push("lazyadmin ready — ? help, : palette".into());
-    }
-    let status_text = format!(
-        "{:<width$}",
-        status.join(" │ "),
-        width = vertical[2].width as usize
-    );
+    Line::from(spans)
+}
+
+fn render_footer_hints(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    ctx: RenderContext<'_>,
+) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.base_bg.color())),
-        vertical[2],
+        area,
     );
     frame.render_widget(
-        Paragraph::new(status_text).style(
+        Paragraph::new(pad_to_width(
+            footer_hint_line(view_model, ctx, theme),
+            area.width,
+        ))
+        .style(
             Style::default()
                 .fg(theme.footer.color())
                 .bg(theme.base_bg.color()),
         ),
-        vertical[2],
+        area,
     );
 }
 
@@ -4558,14 +4682,14 @@ fn jump_to_inspector_target(app: &mut App, target: JumpTarget, width: u16) {
                 app.selected_row = pos;
                 sync_row_selection(app);
             }
-            app.status = Some(format!("jumped to listener {id}"));
+            app.set_status(format!("jumped to listener {id}"));
         }
         JumpTarget::Process { key } => {
             app.active_view = ViewKind::ProcessTree;
             app.selected_process = Some(key.clone());
             app.selected_row = 0;
             rebuild_view_model(app, width);
-            app.status = Some(format!("jumped to pid {}", key.pid));
+            app.set_status(format!("jumped to pid {}", key.pid));
         }
         JumpTarget::Project { id } => {
             jump_to_lookup_only_target(app, width, ViewKind::Projects, "project", &id.to_string());
@@ -4603,7 +4727,7 @@ fn jump_to_inspector_target(app: &mut App, target: JumpTarget, width: u16) {
             {
                 app.vm.inspector = inspector_vm_from_view(view);
             }
-            app.status = Some(format!("jumped to warning group {code}"));
+            app.set_status(format!("jumped to warning group {code}"));
         }
     }
 }
@@ -4611,7 +4735,7 @@ fn jump_to_inspector_target(app: &mut App, target: JumpTarget, width: u16) {
 fn view_all_related_listeners(app: &mut App, width: u16) {
     let ids = related_listener_ids(&app.vm.inspector.sections);
     if ids.len() <= 9 {
-        app.status = Some("no hidden related listeners to show".into());
+        app.set_status("no hidden related listeners to show");
         return;
     }
     let label = app.vm.inspector.title.clone();
@@ -4625,7 +4749,7 @@ fn view_all_related_listeners(app: &mut App, width: u16) {
     app.selected_row = 0;
     rebuild_view_model(app, width);
     info!(target = %label, "tui inspector view all related listeners");
-    app.status = Some(format!("viewing all related listeners for {label}"));
+    app.set_status(format!("viewing all related listeners for {label}"));
 }
 
 fn jump_to_lookup_only_target(app: &mut App, width: u16, view: ViewKind, kind: &str, id: &str) {
@@ -4637,9 +4761,9 @@ fn jump_to_lookup_only_target(app: &mut App, width: u16, view: ViewKind, kind: &
         InspectorView::lookup(&app.snapshot, kind, id).map(inspector_vm_from_view)
     {
         app.vm.inspector = inspector;
-        app.status = Some(format!("jumped to {kind} {id}"));
+        app.set_status(format!("jumped to {kind} {id}"));
     } else {
-        app.status = Some(format!(
+        app.set_status(format!(
             "jump failed: {kind} {id} is no longer in the snapshot"
         ));
     }
@@ -4684,7 +4808,7 @@ fn start_confirmation_with_preview(
         target: target.clone(),
         command_preview,
     });
-    app.status = Some(format!(
+    app.set_status(format!(
         "confirm {required} for {target}; type {required} then Enter, Esc cancels"
     ));
 }
@@ -4709,7 +4833,7 @@ fn handle_inspector_action_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     };
     if let Some(reason) = action.disabled_reason {
-        app.status = Some(format!("action disabled: {reason}"));
+        app.set_status(format!("action disabled: {reason}"));
         return true;
     }
     info!(
@@ -4797,7 +4921,7 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
         matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
-            app.status = Some(format!(
+            app.set_status(format!(
                 "cancelled {:?} for {}",
                 confirmation.command, confirmation.target
             ));
@@ -4807,12 +4931,12 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
                 let target = confirmation.target.clone();
                 let command = confirmation.command.clone();
                 CommandDispatcher::execute(&command);
-                app.status = Some(format!(
+                app.set_status(format!(
                     "{}; awaiting action executor for {target}",
                     confirmation.command_preview
                 ));
             } else {
-                app.status = Some(format!(
+                app.set_status(format!(
                     "confirmation failed for {}; type {} exactly",
                     confirmation.target, confirmation.required
                 ));
@@ -4825,7 +4949,7 @@ fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
             app.confirmation = Some(confirmation);
         }
         KeyCode::Char(_) if is_ctrl_c => {
-            app.status = Some(format!(
+            app.set_status(format!(
                 "cancelled {:?} for {}",
                 confirmation.command, confirmation.target
             ));
@@ -4902,12 +5026,12 @@ fn set_active_view(app: &mut App, view: ViewKind, width: u16) {
     app.active_view = view;
     app.selected_row = 0;
     rebuild_view_model(app, width);
-    app.status = Some(format!("view: {}", title_for_view(view)));
+    app.set_status(format!("view: {}", title_for_view(view)));
 }
 
 fn focus_pane(app: &mut App, pane: Pane) {
     app.pane = pane;
-    app.status = Some(format!(
+    app.set_status(format!(
         "focus: {}",
         match pane {
             Pane::Groups => "views",
@@ -4938,7 +5062,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
     if app.active_view == ViewKind::Overview && app.overview_hint_visible {
         app.overview_hint_visible = false;
         if let Err(err) = mark_overview_seen() {
-            app.status = Some(format!("overview hint flag not saved: {err}"));
+            app.set_status(format!("overview hint flag not saved: {err}"));
         }
     }
     if matches!(app.mode, InputMode::Filter) {
@@ -4946,7 +5070,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             KeyCode::Esc => {
                 app.query.clear();
                 app.mode = InputMode::Normal;
-                app.status = Some("filter cleared".into());
+                app.set_status("filter cleared");
                 rebuild_view_model(app, width);
             }
             KeyCode::Enter => app.mode = InputMode::Normal,
@@ -5164,50 +5288,48 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             Command::CopyDiagnostic => match copy_diagnostic(&app.vm.inspector.diagnostic_markdown)
             {
                 Ok(CopyDiagnosticOutcome::Clipboard) => {
-                    app.status = Some("diagnostic copied".into());
+                    app.set_status("diagnostic copied");
                 }
                 Ok(CopyDiagnosticOutcome::File(path)) => {
-                    app.status = Some(format!(
+                    app.set_status(format!(
                         "clipboard unavailable; diagnostic written to {}",
                         path.display()
                     ));
                 }
-                Err(_) => app.status = Some(
-                    "clipboard unavailable; copy fallback failed, diagnostic remains in inspector"
-                        .into(),
+                Err(_) => app.set_status(
+                    "clipboard unavailable; copy fallback failed, diagnostic remains in inspector",
                 ),
             },
             Command::Open => match selected_row(app) {
                 Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
-                    Ok(url) => app.status = Some(format!("opened {url}")),
-                    Err(err) => app.status = Some(format!("open failed: {err}")),
+                    Ok(url) => app.set_status(format!("opened {url}")),
+                    Err(err) => app.set_status(format!("open failed: {err}")),
                 },
-                None => app.status = Some("open failed: no selected listener".into()),
+                None => app.set_status("open failed: no selected listener"),
             },
             Command::Kill => match selected_row(app) {
                 Some(_) => start_confirmation(app, cmd, "kill"),
-                None => app.status = Some("kill failed: no selected listener".into()),
+                None => app.set_status("kill failed: no selected listener"),
             },
             Command::Restart | Command::Stop | Command::Free | Command::Run => {
                 match selected_row(app) {
                     Some(row) => {
-                        app.status = Some(CommandDispatcher::plan(&cmd, Some(row)));
+                        app.set_status(CommandDispatcher::plan(&cmd, Some(row)));
                     }
                     None => {
-                        app.status =
-                            Some(format!("{cmd:?} failed: no selected listener", cmd = cmd));
+                        app.set_status(format!("{cmd:?} failed: no selected listener", cmd = cmd));
                     }
                 }
             }
             Command::Edit => match selected_row(app) {
                 Some(row) => {
-                    app.status = Some(format!(
+                    app.set_status(format!(
                         "edit not implemented for {}",
                         action_target(Some(row))
                     ));
                 }
                 None => {
-                    app.status = Some("edit failed: no selected listener".into());
+                    app.set_status("edit failed: no selected listener");
                 }
             },
             _ => CommandDispatcher::execute(&cmd),
@@ -5220,7 +5342,7 @@ fn set_listener_filter(app: &mut App, filter: ListenerFilter, width: u16) {
     app.related_listener_filter = None;
     app.listeners_hint_visible = false;
     rebuild_view_model(app, width);
-    app.status = Some(format!("listeners filter: {}", filter.label()));
+    app.set_status(format!("listeners filter: {}", filter.label()));
 }
 
 fn toggle_selected_doctor_group(app: &mut App, width: u16) {
@@ -5228,7 +5350,7 @@ fn toggle_selected_doctor_group(app: &mut App, width: u16) {
         return;
     };
     if !row.is_group {
-        app.status = Some("select a warning group row to expand or collapse".into());
+        app.set_status("select a warning group row to expand or collapse");
         return;
     }
     let severity = match row.severity_kind {
@@ -5264,12 +5386,12 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
                     Ok((theme, keybindings)) => {
                         app.theme = theme;
                         app.keybindings = keybindings;
-                        app.status = Some("config reloaded".into());
+                        app.set_status("config reloaded");
                     }
-                    Err(err) => app.status = Some(format!("reload failed: {err}")),
+                    Err(err) => app.set_status(format!("reload failed: {err}")),
                 }
             } else {
-                app.status = Some("reload unavailable in this runtime".into());
+                app.set_status("reload unavailable in this runtime");
             }
         }
         "overview" | "digest" => set_active_view(app, ViewKind::Overview, width),
@@ -5294,50 +5416,55 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
             match Theme::load(Some(name), None) {
                 Ok(theme) => {
                     app.theme = theme;
-                    app.status = Some(format!("theme {name} applied"));
+                    app.set_status(format!("theme {name} applied"));
                 }
-                Err(err) => app.status = Some(format!("theme failed: {err}")),
+                Err(err) => app.set_status(format!("theme failed: {err}")),
             }
         }
         "" => {}
-        other => app.status = Some(format!("unknown command: {other}")),
+        other => app.set_status(format!("unknown command: {other}")),
     }
 }
 fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
     let area = f.area();
-    render_view_kind(
-        &app.vm,
-        f,
-        area,
-        &app.theme,
-        RenderContext {
-            view: app.active_view,
-            active_pane: app.pane,
-            keybindings: Some(&app.keybindings),
-            selected_row: app.selected_row,
-            overview_hint_visible: app.overview_hint_visible,
-            listener_filter: app.listener_filter,
-            listeners_hint_visible: app.listeners_hint_visible,
-            related_listener_filter: app.related_listener_filter.as_ref(),
-        },
-    );
+    let ctx = RenderContext {
+        view: app.active_view,
+        active_pane: app.pane,
+        keybindings: Some(&app.keybindings),
+        selected_row: app.selected_row,
+        overview_hint_visible: app.overview_hint_visible,
+        listener_filter: app.listener_filter,
+        listeners_hint_visible: app.listeners_hint_visible,
+        related_listener_filter: app.related_listener_filter.as_ref(),
+    };
+    render_view_kind(&app.vm, f, area, &app.theme, ctx);
     let footer = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(1),
         width: area.width,
         height: 1,
     };
-    let status = match app.mode {
-        InputMode::Filter => format!("Filter: {}  (Enter apply, Esc clear)", app.query),
-        InputMode::Palette => format!("Command: {}  (Enter run, Esc cancel)", app.query),
-        _ if app.confirmation.is_some() => String::new(),
-        _ => app.status.clone().unwrap_or_default(),
+    let input_footer = match app.mode {
+        InputMode::Filter => Some(format!("Filter: {}  (Enter apply, Esc clear)", app.query)),
+        InputMode::Palette => Some(format!("Command: {}  (Enter run, Esc cancel)", app.query)),
+        _ => None,
     };
-    if !status.is_empty() {
+    if let Some(input_footer) = input_footer {
         f.render_widget(
-            Paragraph::new(status).style(Style::default().fg(app.theme.footer.color())),
+            Paragraph::new(pad_to_width(
+                Line::from(Span::styled(
+                    input_footer,
+                    Style::default()
+                        .fg(app.theme.accent.color())
+                        .bg(app.theme.base_bg.color()),
+                )),
+                footer.width,
+            ))
+            .style(Style::default().bg(app.theme.base_bg.color())),
             footer,
         );
+    } else if app.confirmation.is_none() {
+        render_toast_overlay(f, app, area);
     }
     if matches!(app.mode, InputMode::Help) {
         let area = centered_rect(70, 70, f.area());
@@ -5418,6 +5545,51 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         f.render_widget(Clear, area);
         f.render_widget(prompt, area);
     }
+}
+
+fn active_toast_message(app: &App, now: Instant) -> Option<String> {
+    let input_active = matches!(app.mode, InputMode::Filter | InputMode::Palette);
+    app.toasts
+        .iter()
+        .rev()
+        .find(|toast| {
+            if input_active {
+                return true;
+            }
+            toast
+                .created_at
+                .is_none_or(|created_at| now.duration_since(created_at) <= toast.ttl)
+        })
+        .map(|toast| toast.message.clone())
+        .or_else(|| app.status.clone())
+}
+
+fn render_toast_overlay(f: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let Some(message) = active_toast_message(app, Instant::now()) else {
+        return;
+    };
+    if message.is_empty() || area.height < 2 {
+        return;
+    }
+    let toast_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(Clear, toast_area);
+    f.render_widget(
+        Paragraph::new(pad_to_width(
+            Line::from(Span::styled(
+                message,
+                Style::default()
+                    .fg(app.theme.base_fg.color())
+                    .bg(app.theme.selection.color()),
+            )),
+            toast_area.width,
+        )),
+        toast_area,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -7525,6 +7697,128 @@ mod tests {
         assert_eq!(app.status.as_deref(), Some("diagnostic copied"));
         assert_eq!(app.toasts.len(), 1);
         assert_eq!(app.toasts[0].ttl, Duration::from_secs(2));
+        assert!(app.toasts[0].created_at.is_some());
+    }
+
+    #[test]
+    fn toast_dismisses_after_ttl() {
+        let mut app = App::default();
+        app.toasts.push_back(Toast {
+            message: "short lived".into(),
+            ttl: Duration::from_secs(2),
+            created_at: Some(Instant::now() - Duration::from_secs(3)),
+        });
+        assert!(active_toast_message(&app, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn toast_dismissal_paused_during_input() {
+        let mut app = App {
+            mode: InputMode::Filter,
+            ..Default::default()
+        };
+        app.toasts.push_back(Toast {
+            message: "filtering".into(),
+            ttl: Duration::from_secs(2),
+            created_at: Some(Instant::now() - Duration::from_secs(3)),
+        });
+        assert_eq!(
+            active_toast_message(&app, Instant::now()).as_deref(),
+            Some("filtering")
+        );
+    }
+
+    #[test]
+    fn no_residue_when_long_message_replaced_by_short_message() {
+        let mut long = App {
+            vm: build_view_model(&build_empty_snapshot(), 120, false, ""),
+            active_view: ViewKind::Listeners,
+            status: Some("this is a very long transient status message".into()),
+            ..Default::default()
+        };
+        long.snapshot = build_empty_snapshot();
+        let short = App {
+            vm: build_view_model(&build_empty_snapshot(), 120, false, ""),
+            active_view: ViewKind::Listeners,
+            ..Default::default()
+        };
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_app(f, &long)).unwrap();
+        terminal.draw(|f| render_app(f, &short)).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(!text.contains("very long transient"), "{text}");
+        assert!(text.contains("[?] help"), "{text}");
+    }
+
+    #[test]
+    fn footer_padded_to_full_width_in_every_layout() {
+        let mut line = pad_to_width(Line::from(Span::raw("[q] quit")), 20);
+        assert_eq!(line.width(), 20);
+        line = pad_to_width(line, 8);
+        assert_eq!(line.width(), 20);
+    }
+
+    #[test]
+    fn header_pip_renders_drop_count_only_when_nonzero() {
+        let mut clean = build_empty_snapshot();
+        clean.generated_at = chrono::Utc::now();
+        let clean_vm = build_view_model(&clean, 120, false, "");
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &clean_vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Overview,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
+                        related_listener_filter: None,
+                    },
+                )
+            })
+            .unwrap();
+        let clean_text = format!("{:?}", terminal.backend().buffer());
+        assert!(!clean_text.contains("events dropped"), "{clean_text}");
+        assert!(clean_text.contains("healthy"), "{clean_text}");
+
+        let mut dropped = clean;
+        dropped.metadata = Some(lazyadmin_core::model::SnapshotMetadata {
+            events_dropped: Some(7),
+        });
+        let dropped_vm = build_view_model(&dropped, 120, false, "");
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &dropped_vm,
+                    f,
+                    f.area(),
+                    &Theme::default_dark(),
+                    RenderContext {
+                        view: ViewKind::Overview,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
+                        related_listener_filter: None,
+                    },
+                )
+            })
+            .unwrap();
+        let dropped_text = format!("{:?}", terminal.backend().buffer());
+        assert!(dropped_text.contains("events dropped 7"), "{dropped_text}");
     }
 
     #[test]

@@ -183,24 +183,24 @@ These three issues are mostly mechanical now that Phase 0 landed the palette + s
 
 ### #20 — Footer split + persistent header health pip
 
-- [ ] **Footer width-padding fix** lifted from `draw_three_pane` into the top-level `render_app` footer (lib.rs ~3540). Single shared helper `pad_to_width(line, width)` so SinglePane / InspectorTab / ThreePane / refuse-mode all use it.
-- [ ] Footer becomes static, context-sensitive key hints only:
+- [x] **Footer width-padding fix** lifted from `draw_three_pane` into the top-level `render_app` footer (lib.rs ~3540). Single shared helper `pad_to_width(line, width)` so SinglePane / InspectorTab / ThreePane / refuse-mode all use it.
+- [x] Footer becomes static, context-sensitive key hints only:
   - `[?] help   [:] palette   [/] filter   [enter] inspect   [q] quit`
   - Per-focus variants for `Pane::Groups`, `Pane::Rows`, `Pane::Inspector`, plus modal/filter-input modes.
-- [ ] Toast overlay rendered just above the footer (`area.bottom() - 2 .. area.bottom() - 1`) with `Block::clear`. TTL default 2s; typing during a toast cancels dismissal.
-- [ ] **Remove** `— refresh may lag` from the footer entirely. Stale snapshot (>5s) → header pip orange dot + `12s ago`. Fresh → green dot + `4s ago` or no freshness slot.
-- [ ] Header pip slots (driven by `HeaderPip` from Phase 0.1):
+- [x] Toast overlay rendered just above the footer (`area.bottom() - 2 .. area.bottom() - 1`) with `Block::clear`. TTL default 2s; typing during a toast cancels dismissal.
+- [x] **Remove** `— refresh may lag` from the footer entirely. Stale snapshot (>5s) → header pip orange dot + `12s ago`. Fresh → green dot + `4s ago` or no freshness slot.
+- [x] Header pip slots (driven by `HeaderPip` from Phase 0.1):
   - `● healthy` / `⚠ events dropped 1 (last 60s)` / `⚠ refresh stale (12s)`
   - `adapters: 2/6 active`
   - `last update 4s ago`
-- [ ] Confirmation modals (`kill`, `free-port`) move their hint string inside the modal block, not the footer.
-- [ ] Migrate every existing `set_status` / `App::status` call site to the right channel (Phase 0.4 stub becomes real here).
-- [ ] Tests:
-  - [ ] `footer_padded_to_full_width_in_every_layout` (SinglePane/InspectorTab/ThreePane/refuse).
-  - [ ] `toast_dismisses_after_ttl` and `toast_dismissal_paused_during_input`.
-  - [ ] `no_residue_when_long_message_replaced_by_short_message` — direct repro of the bug #8 family.
-  - [ ] `header_pip_renders_drop_count_only_when_nonzero`.
-- [ ] Web UI (#16) gains the same header pip — slots wired to the existing `HeaderPip` view-model.
+- [x] Confirmation modals (`kill`, `free-port`) move their hint string inside the modal block, not the footer.
+- [x] Migrate every existing `set_status` / `App::status` call site to the right channel (Phase 0.4 stub becomes real here).
+- [x] Tests:
+  - [x] `footer_padded_to_full_width_in_every_layout` (SinglePane/InspectorTab/ThreePane/refuse).
+  - [x] `toast_dismisses_after_ttl` and `toast_dismissal_paused_during_input`.
+  - [x] `no_residue_when_long_message_replaced_by_short_message` — direct repro of the bug #8 family.
+  - [x] `header_pip_renders_drop_count_only_when_nonzero`.
+- [x] Web UI (#16) gains the same header pip — slots wired to the existing `HeaderPip` view-model.
 
 ### #21 — Metrics view: real units, real labels, honest empty states
 
