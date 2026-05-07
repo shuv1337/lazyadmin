@@ -370,6 +370,7 @@ struct ThemeFile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaletteMode {
+    Monochrome,
     Sixteen,
     TwoFiftySix,
     Truecolor,
@@ -873,6 +874,10 @@ pub struct RowVm {
     pub is_orphan: bool,
     #[serde(default)]
     pub is_tracked: bool,
+    #[serde(default)]
+    pub is_project: bool,
+    #[serde(default)]
+    pub is_system: bool,
     pub search_text: String,
 }
 
@@ -1202,6 +1207,7 @@ pub fn build_view_model_with_state(
         let is_conflict = conflict_ids.contains(&l.id) || l.owners.len() > 1;
         let is_orphan = l.owners.is_empty();
         let is_tracked = listener_is_tracked(l, snapshot);
+        let is_project = listener_is_project_member(l, snapshot);
         if is_conflict {
             badges.push("CONFLICT".into());
         }
@@ -1233,6 +1239,8 @@ pub fn build_view_model_with_state(
             is_conflict,
             is_orphan,
             is_tracked,
+            is_project,
+            is_system,
             search_text,
         });
     }
@@ -1766,6 +1774,31 @@ fn listener_is_tracked(listener: &lazyadmin_core::model::Listener, snapshot: &Sn
             .iter()
             .any(|workload| &workload.id == id && workload.lazyadmin_run_id.is_some()),
         _ => false,
+    })
+}
+
+fn listener_is_project_member(
+    listener: &lazyadmin_core::model::Listener,
+    snapshot: &Snapshot,
+) -> bool {
+    if listener
+        .owners
+        .iter()
+        .any(|owner| matches!(owner, EntityRef::Project(_)))
+    {
+        return true;
+    }
+    snapshot.workloads.iter().any(|workload| {
+        workload.project.is_some()
+            && (workload.listeners.iter().any(|id| id == &listener.id)
+                || listener
+                    .owners
+                    .iter()
+                    .any(|owner| matches!(owner, EntityRef::Workload(id) if id == &workload.id))
+                || listener.owners.iter().any(|owner| match owner {
+                    EntityRef::Process(key) => workload.pids.iter().any(|pid| pid == key),
+                    _ => false,
+                }))
     })
 }
 
@@ -2373,6 +2406,101 @@ fn group_view_kind(group: &str) -> Option<ViewKind> {
         .and_then(|entry| parse_view_kind(entry.id))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExposureSignal {
+    Public,
+    Lan,
+    Loopback,
+}
+
+fn row_exposure_signal(row: &RowVm) -> ExposureSignal {
+    match row.exposure.as_str() {
+        "public" => ExposureSignal::Public,
+        "lan/public" => ExposureSignal::Lan,
+        _ => ExposureSignal::Loopback,
+    }
+}
+
+fn signal_color(theme: &Theme, color: Color) -> Color {
+    if theme.fallback_palette == PaletteMode::Monochrome {
+        theme.base_fg.color()
+    } else {
+        color
+    }
+}
+
+fn exposure_signal_color(signal: ExposureSignal, theme: &Theme) -> Color {
+    match signal {
+        ExposureSignal::Public => signal_color(theme, theme.risk_public.color()),
+        ExposureSignal::Lan => signal_color(theme, theme.risk_lan.color()),
+        ExposureSignal::Loopback => signal_color(theme, theme.risk_loopback.color()),
+    }
+}
+
+fn exposure_signal_glyph(signal: ExposureSignal) -> &'static str {
+    match signal {
+        ExposureSignal::Public => "●",
+        ExposureSignal::Lan => "◐",
+        ExposureSignal::Loopback => " ",
+    }
+}
+
+fn row_marker_glyph(row: &RowVm) -> &'static str {
+    if row.is_conflict {
+        "┃"
+    } else if row.is_tracked || row.is_project {
+        "▎"
+    } else {
+        " "
+    }
+}
+
+fn row_marker_color(row: &RowVm, theme: &Theme) -> Color {
+    if row.is_conflict {
+        signal_color(theme, theme.marker_conflict.color())
+    } else if row.is_tracked {
+        signal_color(theme, theme.marker_tracked.color())
+    } else if row.is_project {
+        signal_color(theme, theme.marker_project.color())
+    } else {
+        theme.footer.color()
+    }
+}
+
+fn row_signal_cell(row: &RowVm, theme: &Theme) -> Cell<'static> {
+    let signal = row_exposure_signal(row);
+    let marker = row_marker_glyph(row);
+    Cell::from(Line::from(vec![
+        Span::styled(
+            marker.to_string(),
+            Style::default()
+                .fg(row_marker_color(row, theme))
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            exposure_signal_glyph(signal).to_string(),
+            Style::default()
+                .fg(exposure_signal_color(signal, theme))
+                .bg(theme.base_bg.color())
+                .add_modifier(match signal {
+                    ExposureSignal::Public => Modifier::BOLD,
+                    ExposureSignal::Lan | ExposureSignal::Loopback => Modifier::empty(),
+                }),
+        ),
+    ]))
+}
+
+fn listener_signal_counts(rows: &[RowVm]) -> (usize, usize, usize) {
+    rows.iter().fold((0, 0, 0), |mut counts, row| {
+        match row_exposure_signal(row) {
+            ExposureSignal::Public => counts.0 += 1,
+            ExposureSignal::Lan => counts.1 += 1,
+            ExposureSignal::Loopback => counts.2 += 1,
+        }
+        counts
+    })
+}
+
 fn render_header(
     view_model: &ViewModel,
     frame: &mut ratatui::Frame<'_>,
@@ -2381,12 +2509,11 @@ fn render_header(
     view: ViewKind,
 ) {
     let total = view_model.rows.len();
-    let public = view_model
-        .rows
-        .iter()
-        .filter(|row| row.badges.iter().any(|badge| badge == "PUBLIC"))
-        .count();
+    let (public, lan, loopback) = listener_signal_counts(&view_model.rows);
     let adapters = view_model.metrics.adapters.len();
+    let inactive = Style::default()
+        .fg(theme.footer.color())
+        .bg(theme.base_bg.color());
     let line = Line::from(vec![
         Span::styled(
             "lazyadmin",
@@ -2402,17 +2529,37 @@ fn render_header(
                 .bg(theme.base_bg.color())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("{total} listeners"),
-            Style::default()
-                .fg(theme.footer.color())
-                .bg(theme.base_bg.color()),
-        ),
+        Span::styled(format!("{total} listeners"), inactive),
         Span::styled(
             format!("  {public} public"),
             Style::default()
                 .fg(if public > 0 {
-                    theme.warning.color()
+                    signal_color(theme, theme.risk_public.color())
+                } else {
+                    theme.footer.color()
+                })
+                .bg(theme.base_bg.color())
+                .add_modifier(if public > 0 {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::styled(
+            format!("  {lan} LAN"),
+            Style::default()
+                .fg(if lan > 0 {
+                    signal_color(theme, theme.risk_lan.color())
+                } else {
+                    theme.footer.color()
+                })
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            format!("  {loopback} loopback"),
+            Style::default()
+                .fg(if loopback > 0 {
+                    signal_color(theme, theme.risk_loopback.color())
                 } else {
                     theme.footer.color()
                 })
@@ -3057,26 +3204,50 @@ fn render_rows_table(
         })
         .enumerate()
         .map(|(idx, r)| {
-            let quiet = if idx % 2 == 0 {
+            let quiet = if r.is_system {
+                theme.system_noise.color()
+            } else if idx % 2 == 0 {
                 theme.base_fg.color()
             } else {
                 theme.footer.color()
             };
-            let exposure_style = if r.badges.iter().any(|badge| badge == "PUBLIC") {
-                Style::default()
-                    .fg(theme.warning.color())
-                    .bg(theme.base_bg.color())
-                    .add_modifier(Modifier::BOLD)
+            let owner_fg = if r.is_system {
+                theme.system_noise.color()
             } else {
-                Style::default()
-                    .fg(theme.footer.color())
+                theme.base_fg.color()
+            };
+            let runtime_fg = if r.is_system {
+                theme.system_noise.color()
+            } else {
+                theme.info.color()
+            };
+            let exposure_signal = row_exposure_signal(r);
+            let exposure_style = match exposure_signal {
+                ExposureSignal::Public => Style::default()
+                    .fg(signal_color(theme, theme.risk_public.color()))
                     .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::BOLD),
+                ExposureSignal::Lan => Style::default()
+                    .fg(signal_color(theme, theme.risk_lan.color()))
+                    .bg(theme.base_bg.color()),
+                ExposureSignal::Loopback => Style::default()
+                    .fg(if r.is_system {
+                        theme.system_noise.color()
+                    } else {
+                        theme.footer.color()
+                    })
+                    .bg(theme.base_bg.color()),
             };
             Row::new(vec![
+                row_signal_cell(r, theme),
                 Cell::from(Span::styled(
                     r.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                     Style::default()
-                        .fg(theme.accent.color())
+                        .fg(if r.is_system {
+                            theme.system_noise.color()
+                        } else {
+                            theme.accent.color()
+                        })
                         .bg(theme.base_bg.color()),
                 )),
                 Cell::from(Span::styled(
@@ -3085,15 +3256,11 @@ fn render_rows_table(
                 )),
                 Cell::from(Span::styled(
                     r.owner.clone(),
-                    Style::default()
-                        .fg(theme.base_fg.color())
-                        .bg(theme.base_bg.color()),
+                    Style::default().fg(owner_fg).bg(theme.base_bg.color()),
                 )),
                 Cell::from(Span::styled(
                     r.runtime.clone(),
-                    Style::default()
-                        .fg(theme.info.color())
-                        .bg(theme.base_bg.color()),
+                    Style::default().fg(runtime_fg).bg(theme.base_bg.color()),
                 )),
                 Cell::from(Span::styled(r.exposure.clone(), exposure_style)),
             ])
@@ -3102,15 +3269,16 @@ fn render_rows_table(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(7),
-            Constraint::Length(18),
-            Constraint::Min(24),
-            Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Length(2),
+            Constraint::Length(5),
+            Constraint::Length(14),
+            Constraint::Min(12),
+            Constraint::Length(9),
+            Constraint::Length(10),
         ],
     )
     .header(
-        Row::new(["Port", "Bind", "Owner", "Runtime", "Scope"]).style(
+        Row::new(["", "Port", "Bind", "Owner", "Runtime", "Scope"]).style(
             Style::default()
                 .fg(theme.accent.color())
                 .bg(theme.base_bg.color())
@@ -3172,6 +3340,34 @@ fn render_listener_chips(
         ListenerFilter::Unowned,
         ListenerFilter::Tracked,
     ];
+    let (public, lan, loopback) = listener_signal_counts(&view_model.rows);
+    let count_spans = vec![
+        Span::styled(
+            "Exposure ",
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            format!("● {public} public  "),
+            Style::default()
+                .fg(signal_color(theme, theme.risk_public.color()))
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("◐ {lan} LAN  "),
+            Style::default()
+                .fg(signal_color(theme, theme.risk_lan.color()))
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            format!("{loopback} loopback"),
+            Style::default()
+                .fg(signal_color(theme, theme.risk_loopback.color()))
+                .bg(theme.base_bg.color()),
+        ),
+    ];
     let mut spans = vec![Span::styled(
         "Filters ",
         Style::default()
@@ -3197,7 +3393,7 @@ fn render_listener_chips(
         };
         spans.push(Span::styled(label, style));
     }
-    let mut lines = vec![Line::from(spans)];
+    let mut lines = vec![Line::from(count_spans), Line::from(spans)];
     if let Some(filter) = related_listener_filter {
         lines.push(Line::from(Span::styled(
             format!(
@@ -5800,6 +5996,82 @@ mod tests {
     }
 
     #[test]
+    fn risk_glyphs_present_without_color() {
+        let mut snap = build_empty_snapshot();
+
+        let public_proc = process(4001, None, 1);
+        let public_key = public_proc.key.clone();
+        snap.processes.push(public_proc);
+        let mut public = listener_for_process(public_key, 8080);
+        public.exposure = Exposure::Public;
+        public.bind_addr = Some("0.0.0.0".into());
+        snap.listeners.push(public);
+
+        let lan_proc = process(4002, None, 2);
+        let lan_key = lan_proc.key.clone();
+        snap.processes.push(lan_proc);
+        let mut lan = listener_for_process(lan_key, 8081);
+        lan.exposure = Exposure::LanOrPublic;
+        lan.bind_addr = Some("0.0.0.0".into());
+        snap.listeners.push(lan);
+
+        let conflict_proc = process(4003, None, 3);
+        let conflict_key = conflict_proc.key.clone();
+        snap.processes.push(conflict_proc);
+        let mut conflict = listener_for_process(conflict_key, 8082);
+        conflict.owners.push(EntityRef::Process(ProcessKey {
+            pid: 4004,
+            boot_id: "boot".into(),
+            start_time_ticks: 4,
+        }));
+        snap.listeners.push(conflict);
+
+        let mut tracked_proc = process(4005, None, 5);
+        tracked_proc.lazyadmin_run_id = Some(RunId::new("tracked"));
+        let tracked_key = tracked_proc.key.clone();
+        snap.processes.push(tracked_proc);
+        snap.listeners.push(listener_for_process(tracked_key, 8083));
+
+        let vm = build_view_model(&snap, 120, false, "");
+        let mut theme = Theme::default_dark();
+        theme.fallback_palette = PaletteMode::Monochrome;
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &theme,
+                    RenderContext {
+                        view: ViewKind::Listeners,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
+                        related_listener_filter: None,
+                    },
+                )
+            })
+            .unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        for glyph in ["●", "◐", "┃", "▎"] {
+            assert!(
+                text.contains(glyph),
+                "missing {glyph} in monochrome render: {text}"
+            );
+        }
+        assert!(
+            text.contains("public"),
+            "public count/label missing: {text}"
+        );
+        assert!(text.contains("LAN"), "LAN count/label missing: {text}");
+    }
+
+    #[test]
     fn view_kind_public_programmatic_entry_still_filters_public_rows() {
         let mut snap = build_empty_snapshot();
         let proc = process(3001, None, 1);
@@ -7101,6 +7373,8 @@ accent = "#123456"
             is_conflict: false,
             is_orphan: false,
             is_tracked: false,
+            is_project: false,
+            is_system: false,
             search_text: "".into(),
         };
         assert!(open_url_for_row(&row, false).is_err());

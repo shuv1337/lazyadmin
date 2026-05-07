@@ -352,7 +352,7 @@ function listenerTableRow(l) {
   const exposure = l.exposure || "loopback";
   const expClass = exposure === "public" ? "exp-public"
     : exposure === "lan_or_public" ? "exp-lan" : "exp-loop";
-  const expGlyph = exposure === "public" ? "●" : exposure === "lan_or_public" ? "●" : "·";
+  const expGlyph = exposure === "public" ? "●" : exposure === "lan_or_public" ? "◐" : "·";
   const bind = l.path || `${l.bind_addr || "*"}:${l.port ?? "?"}`;
   const owner = ownerLabel(l);
   const project = projectFor(l);
