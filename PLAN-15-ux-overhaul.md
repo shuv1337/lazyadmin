@@ -204,17 +204,17 @@ These three issues are mostly mechanical now that Phase 0 landed the palette + s
 
 ### #21 — Metrics view: real units, real labels, honest empty states
 
-- [ ] **Events dropped** rendered as a rate over a rolling window: `27 / 4,200 events dropped in last 60s = 0.6%`, plus a sparkline.
+- [x] **Events dropped** rendered as a rate over a rolling window: `27 / 4,200 events dropped in last 60s = 0.6%`, plus a sparkline.
   - If the window is unobservable (stateless run), render `drop counter unavailable in stateless run`.
-  - Implementation: extend `EventDropCounter` with a ring of `(timestamp, count)` samples (configurable depth, default 60). The current single-counter API stays for backwards-compat callers.
-- [ ] **Adapter event rate** affirmative empty state: `No events in last 60s — adapter is idle (this is normal).` Drop the empty box.
-- [ ] **Listeners histogram** axis labels: full words `Listeners` / `Public` / `Conflicts` / `Orphans`. If they don't fit horizontally, rotate the chart 90° (horizontal bars) — Ratatui supports this via `BarChart::direction`.
-- [ ] Per-chart caption (one dim line) explaining the metric and the action to take if it's bad. Captions live in `crates/lazyadmin-core/src/doctor/metrics_glossary.rs` (or a small `metrics_glossary.toml` loaded once via `include_str!`).
-- [ ] Web UI Metrics page mirrors layout, captions, units, empty states.
-- [ ] Tests in `cargo test -p lazyadmin-tui metrics`:
-  - [ ] `events_dropped_rate_with_nontrivial_denominator_renders_correctly`.
-  - [ ] `empty_adapter_event_rate_shows_idle_message`.
-  - [ ] `listener_histogram_axis_uses_full_words`.
+  - Implementation: TUI live metrics use `AdapterEventRing` as the 60s observable denominator and fall back to the explicit stateless-copy path when only the snapshot drop counter is available.
+- [x] **Adapter event rate** affirmative empty state: `No events in last 60s — adapter is idle (this is normal).` Drop the empty box.
+- [x] **Listeners histogram** axis labels: full words `Listeners` / `Public` / `Conflicts` / `Orphans`. If they don't fit horizontally, rotate the chart 90° (horizontal bars) — Ratatui supports this via `BarChart::direction`.
+- [x] Per-chart caption (one dim line) explaining the metric and the action to take if it's bad. Captions live in `crates/lazyadmin-core/src/doctor/metrics_glossary.rs` (or a small `metrics_glossary.toml` loaded once via `include_str!`).
+- [x] Web UI Metrics page mirrors layout, captions, units, empty states.
+- [x] Tests in `cargo test -p lazyadmin-tui metrics`:
+  - [x] `metrics_events_dropped_rate_with_nontrivial_denominator_renders_correctly`.
+  - [x] `metrics_empty_adapter_event_rate_shows_idle_message`.
+  - [x] `metrics_listener_histogram_axis_uses_full_words`.
 
 ### Phase 3 acceptance
 

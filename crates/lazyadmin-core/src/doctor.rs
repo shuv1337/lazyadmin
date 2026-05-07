@@ -17,6 +17,35 @@ pub struct WarningCodeMeta {
     pub remediation: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetricCaption {
+    pub key: &'static str,
+    pub caption: &'static str,
+}
+
+pub const METRIC_CAPTIONS: &[MetricCaption] = &[
+    MetricCaption {
+        key: "events_dropped",
+        caption: "Dropped discovery hints mean the next full snapshot is authoritative; increase event capacity only if this keeps rising.",
+    },
+    MetricCaption {
+        key: "adapter_event_rate",
+        caption: "Adapter events are refresh hints. Zero events usually means the system is idle, not broken.",
+    },
+    MetricCaption {
+        key: "listener_histogram",
+        caption: "Listener counts show exposure and triage shape; public, conflict, and orphan bars deserve review first.",
+    },
+];
+
+pub fn metric_caption(key: &str) -> &'static str {
+    METRIC_CAPTIONS
+        .iter()
+        .find(|metric| metric.key == key)
+        .map(|metric| metric.caption)
+        .unwrap_or("Metric is derived from the current read-only snapshot.")
+}
+
 pub const ALL_CODES: &[WarningCodeMeta] = &[
     WarningCodeMeta {
         code: "CONFLICT",

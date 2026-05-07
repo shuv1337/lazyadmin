@@ -544,9 +544,10 @@ function renderMetrics() {
 
   const dropped = snap.metadata?.events_dropped ?? 0;
   const eventsBlock = dropped > 0
-    ? `<div class="value-line"><span class="accent">${dropped}</span> events dropped since startup</div>
-       <div class="caption">If this number climbs steadily, raise <code>events.queue_capacity</code> in your config.</div>`
-    : `<div class="empty">No events dropped — fan-in is keeping up.</div>`;
+    ? `<div class="value-line warn">drop counter unavailable in stateless run</div>
+       <div class="caption">${dropped} event drop(s) were reported without a live 60s denominator. Dropped discovery hints mean the next full snapshot is authoritative.</div>`
+    : `<div class="empty">No events dropped in the observable window.</div>
+       <div class="caption">Dropped discovery hints mean the next full snapshot is authoritative; increase event capacity only if this keeps rising.</div>`;
 
   const adapterBlock = snap.managers && snap.managers.length
     ? `<table class="table" style="margin-top:6px">
@@ -555,7 +556,8 @@ function renderMetrics() {
           `<tr><td class="mono">${esc(m.name)}</td><td>${m.available ? "yes" : "no"}</td><td>${esc(m.permission)}</td></tr>`,
         ).join("")}</tbody>
       </table>`
-    : `<div class="empty">No managers reachable in this snapshot.</div>`;
+    : `<div class="empty">No events in last 60s — adapter is idle (this is normal).</div>
+       <div class="caption">Adapter events are refresh hints. Zero events usually means the system is idle, not broken.</div>`;
 
   return `
     <section class="page-head"><h1>Metrics</h1>
@@ -563,7 +565,7 @@ function renderMetrics() {
     <div class="metrics-stack">
       <div class="metric-block">
         <h3>Listener exposure histogram</h3>
-        <div class="caption">Counts of listeners broken out by exposure tier and warning class.</div>
+        <div class="caption">Listener counts show exposure and triage shape; public, conflict, and orphan bars deserve review first.</div>
         <div class="histogram">${histRows}</div>
       </div>
       <div class="metric-block">

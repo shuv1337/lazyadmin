@@ -466,6 +466,7 @@ body.with-inspector .main {
   font-size: 14px;
 }
 .metric-block .value-line .accent { color: var(--accent); }
+.metric-block .value-line.warn { color: var(--pip-warn); }
 .metric-block .empty { color: var(--pip-ok); }
 
 .histogram { display: grid; gap: 6px; }

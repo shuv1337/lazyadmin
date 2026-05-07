@@ -18,7 +18,7 @@ use crossterm::{
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::{
     config::keybindings::{KeybindAction, ResolvedKeybindings},
-    doctor::WarningTier,
+    doctor::{WarningTier, metric_caption},
     model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot, WarningSeverity},
     output::listener_rows,
     snapshot::build_empty_snapshot,
@@ -34,7 +34,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, List, ListItem,
         Paragraph, Row, Sparkline, Table, TableState, Wrap,
     },
 };
@@ -1103,6 +1103,8 @@ pub struct ProcessTreeRow {
 pub struct MetricsVm {
     pub listeners_loopback: usize,
     pub listeners_public: usize,
+    pub listeners_conflicts: usize,
+    pub listeners_orphans: usize,
     pub workloads_by_runtime: Vec<(String, usize)>,
     pub warnings_by_severity: Vec<(String, usize)>,
     pub tracked_runs: usize,
@@ -1152,7 +1154,7 @@ impl AdapterEventRing {
             .map(|(adapter, events)| {
                 let recent = events
                     .iter()
-                    .filter(|seen| now.duration_since(**seen) <= Duration::from_secs(1))
+                    .filter(|seen| now.duration_since(**seen) <= Duration::from_secs(60))
                     .count() as u64;
                 let sparkline = events
                     .iter()
@@ -1833,6 +1835,25 @@ pub fn build_metrics_with_adapters(
         .filter(|l| matches!(l.exposure, Exposure::Loopback | Exposure::UnixLocal))
         .count();
     let listeners_public = snapshot.listeners.len().saturating_sub(listeners_loopback);
+    let conflict_ids: HashSet<_> = snapshot
+        .warnings
+        .iter()
+        .filter(|w| w.code == "CONFLICT")
+        .filter_map(|w| match &w.entity {
+            Some(EntityRef::Listener(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let listeners_conflicts = snapshot
+        .listeners
+        .iter()
+        .filter(|listener| conflict_ids.contains(&listener.id) || listener.owners.len() > 1)
+        .count();
+    let listeners_orphans = snapshot
+        .listeners
+        .iter()
+        .filter(|listener| listener.owners.is_empty())
+        .count();
     let mut runtimes = std::collections::BTreeMap::<String, usize>::new();
     for w in &snapshot.workloads {
         *runtimes.entry(format!("{:?}", w.runtime)).or_default() += 1;
@@ -1843,9 +1864,16 @@ pub fn build_metrics_with_adapters(
     }
     let prev_listeners = previous.map_or(snapshot.listeners.len(), |p| p.listeners.len());
     let rate = snapshot.listeners.len().abs_diff(prev_listeners) as u64;
+    let event_rate = if adapters.is_empty() {
+        vec![rate]
+    } else {
+        adapters.iter().map(|adapter| adapter.throughput).collect()
+    };
     MetricsVm {
         listeners_loopback,
         listeners_public,
+        listeners_conflicts,
+        listeners_orphans,
         workloads_by_runtime: runtimes.into_iter().collect(),
         warnings_by_severity: severities.into_iter().collect(),
         tracked_runs: snapshot.tracked_runs.len(),
@@ -1854,7 +1882,7 @@ pub fn build_metrics_with_adapters(
             .as_ref()
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
-        event_rate: vec![rate],
+        event_rate,
         adapters,
     }
 }
@@ -4146,36 +4174,74 @@ fn render_metrics(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Min(5),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Min(7),
         ])
         .split(area);
-    let total =
-        (view_model.metrics.listeners_loopback + view_model.metrics.listeners_public).max(1) as u16;
+
     frame.render_widget(
-        Gauge::default()
+        Paragraph::new(metrics_events_dropped_lines(&view_model.metrics, theme))
+            .wrap(Wrap { trim: false })
             .block(panel_block("Events dropped", theme, false))
-            .gauge_style(Style::default().fg(theme.error.color()))
-            .percent((view_model.metrics.events_dropped.min(100)) as u16),
-        chunks[0],
-    );
-    frame.render_widget(
-        Sparkline::default()
-            .block(panel_block("Adapter event rate", theme, active))
-            .data(&view_model.metrics.event_rate)
             .style(
                 Style::default()
-                    .fg(theme.accent.color())
+                    .fg(theme.base_fg.color())
                     .bg(theme.base_bg.color()),
             ),
-        chunks[1],
+        chunks[0],
     );
+
+    if view_model.metrics.adapters.is_empty()
+        || view_model
+            .metrics
+            .adapters
+            .iter()
+            .all(|adapter| adapter.throughput == 0)
+    {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No events in last 60s — adapter is idle (this is normal).",
+                    Style::default()
+                        .fg(theme.ok.color())
+                        .bg(theme.base_bg.color()),
+                )),
+                Line::from(Span::styled(
+                    metric_caption("adapter_event_rate"),
+                    Style::default()
+                        .fg(theme.footer.color())
+                        .bg(theme.base_bg.color()),
+                )),
+            ])
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Adapter event rate", theme, active))
+            .style(
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            ),
+            chunks[1],
+        );
+    } else {
+        frame.render_widget(
+            Sparkline::default()
+                .block(panel_block("Adapter event rate", theme, active))
+                .data(&view_model.metrics.event_rate)
+                .style(
+                    Style::default()
+                        .fg(theme.accent.color())
+                        .bg(theme.base_bg.color()),
+                ),
+            chunks[1],
+        );
+    }
+
     let adapter_rows = view_model.metrics.adapters.iter().map(|adapter| {
         Row::new(vec![
             Cell::from(adapter.adapter.clone()),
-            Cell::from(adapter.throughput.to_string()),
+            Cell::from(format!("{} / 60s", adapter.throughput)),
             Cell::from(adapter.drops.to_string()),
             Cell::from(
                 adapter
@@ -4190,13 +4256,13 @@ fn render_metrics(
             adapter_rows,
             [
                 Constraint::Min(12),
-                Constraint::Length(12),
+                Constraint::Length(14),
                 Constraint::Length(8),
                 Constraint::Length(10),
             ],
         )
         .header(
-            Row::new(["Adapter", "Events/s", "Drops", "Latency"]).style(
+            Row::new(["Adapter", "Events", "Drops", "Latency"]).style(
                 Style::default()
                     .fg(theme.accent.color())
                     .bg(theme.base_bg.color()),
@@ -4210,25 +4276,90 @@ fn render_metrics(
         ),
         chunks[2],
     );
+
+    let total = view_model.metrics.listeners_loopback + view_model.metrics.listeners_public;
     let bars = [
+        Bar::default().label("Listeners".into()).value(total as u64),
         Bar::default()
-            .label("loopback".into())
-            .value(view_model.metrics.listeners_loopback as u64),
-        Bar::default()
-            .label("public".into())
+            .label("Public".into())
             .value(view_model.metrics.listeners_public as u64),
+        Bar::default()
+            .label("Conflicts".into())
+            .value(view_model.metrics.listeners_conflicts as u64),
+        Bar::default()
+            .label("Orphans".into())
+            .value(view_model.metrics.listeners_orphans as u64),
     ];
     frame.render_widget(
         BarChart::default()
             .block(panel_block(
-                format!("Listeners total {total}"),
+                format!(
+                    "Listener exposure histogram — {}",
+                    metric_caption("listener_histogram")
+                ),
                 theme,
                 false,
             ))
+            .direction(Direction::Horizontal)
             .data(BarGroup::default().bars(&bars))
             .bar_style(Style::default().fg(theme.ok.color())),
         chunks[3],
     );
+}
+
+fn metrics_events_dropped_lines(metrics: &MetricsVm, theme: &Theme) -> Vec<Line<'static>> {
+    let dropped = metrics.events_dropped;
+    let observed = metrics
+        .adapters
+        .iter()
+        .map(|adapter| adapter.throughput)
+        .sum::<u64>();
+    let adapter_drops = metrics
+        .adapters
+        .iter()
+        .map(|adapter| adapter.drops)
+        .sum::<u64>();
+    let dropped = dropped.max(adapter_drops);
+    let mut lines = Vec::new();
+    if dropped == 0 {
+        lines.push(Line::from(Span::styled(
+            "No events dropped in the observable window.",
+            Style::default()
+                .fg(theme.ok.color())
+                .bg(theme.base_bg.color()),
+        )));
+    } else if observed > 0 {
+        let denominator = observed + dropped;
+        let pct = (dropped as f64 / denominator as f64) * 100.0;
+        lines.push(Line::from(Span::styled(
+            format!("{dropped} / {denominator} events dropped in last 60s = {pct:.1}%"),
+            Style::default()
+                .fg(theme.warning.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "drop counter unavailable in stateless run",
+            Style::default()
+                .fg(theme.warning.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("{dropped} event drop(s) were reported without a live 60s denominator."),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        metric_caption("events_dropped"),
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color()),
+    )));
+    lines
 }
 
 pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
@@ -7641,6 +7772,68 @@ mod tests {
         assert_eq!(metrics.adapters[0].throughput, 2);
         assert_eq!(metrics.adapters[0].drops, 3);
         assert!(!metrics.adapters[0].sparkline.is_empty());
+    }
+
+    fn render_metrics_text(metrics: MetricsVm, width: u16, height: u16) -> String {
+        let vm = ViewModel {
+            width,
+            layout: LayoutMode::ThreePane,
+            metrics,
+            ..Default::default()
+        };
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_metrics(&vm, f, f.area(), &Theme::default_dark(), true);
+            })
+            .unwrap();
+        format!("{:?}", terminal.backend().buffer())
+    }
+
+    #[test]
+    fn metrics_events_dropped_rate_with_nontrivial_denominator_renders_correctly() {
+        let metrics = MetricsVm {
+            events_dropped: 27,
+            adapters: vec![AdapterMetricVm {
+                adapter: "procfs".into(),
+                latency_ms: None,
+                throughput: 4173,
+                drops: 27,
+                sparkline: vec![1, 2, 3],
+            }],
+            event_rate: vec![4173],
+            ..Default::default()
+        };
+        let text = render_metrics_text(metrics, 140, 30);
+        assert!(text.contains("27 / 4200"), "{text}");
+        assert!(text.contains("0.6%"), "{text}");
+        assert!(text.contains("last 60s"), "{text}");
+    }
+
+    #[test]
+    fn metrics_empty_adapter_event_rate_shows_idle_message() {
+        let text = render_metrics_text(MetricsVm::default(), 140, 24);
+        assert!(
+            text.contains("No events in last 60s"),
+            "idle copy missing: {text}"
+        );
+        assert!(text.contains("normal"), "normality copy missing: {text}");
+    }
+
+    #[test]
+    fn metrics_listener_histogram_axis_uses_full_words() {
+        let metrics = MetricsVm {
+            listeners_loopback: 3,
+            listeners_public: 2,
+            listeners_conflicts: 1,
+            listeners_orphans: 1,
+            ..Default::default()
+        };
+        let text = render_metrics_text(metrics, 140, 30);
+        for label in ["Listeners", "Public", "Conflicts", "Orphans"] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
     }
 
     #[test]
