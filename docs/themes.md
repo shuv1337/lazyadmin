@@ -1,8 +1,8 @@
 # TUI themes
 
-Built-ins: `default-dark` (Night Owl), `night-owl` (alias of `default-dark`), `default-light` (Night Owl Light), `night-owl-light` (alias of `default-light`), `high-contrast`, `solarized-dark`.
+Built-ins: `default-dark` (Night Owl), `night-owl` (alias of `default-dark`), `default-light` (Night Owl Light), `night-owl-light` (alias of `default-light`), `high-contrast`, `colorblind-safe`, `solarized-dark`.
 
-The default dark and light themes ship Sarah Drasner's [Night Owl](https://github.com/sdras/night-owl-vscode-theme) palette so the lazyadmin TUI matches the editor/terminal theme used elsewhere in the workspace.
+The default dark and light themes ship Sarah Drasner's [Night Owl](https://github.com/sdras/night-owl-vscode-theme) palette so the lazyadmin TUI matches the editor/terminal theme used elsewhere in the workspace. The `colorblind-safe` variant keeps the Night Owl base surfaces and swaps risk/marker/status slots to a high-luminance Okabe-Ito-style palette.
 
 Configure either a built-in name or a TOML path:
 

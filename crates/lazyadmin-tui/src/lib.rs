@@ -500,6 +500,19 @@ impl Theme {
                 t.fallback_palette = PaletteMode::Sixteen;
                 Some(t)
             }
+            "colorblind-safe" => {
+                t.name = name.into();
+                t.risk_public = ColorSpec("#d55e00".into());
+                t.risk_lan = ColorSpec("#e69f00".into());
+                t.risk_loopback = ColorSpec("#009e73".into());
+                t.marker_conflict = ColorSpec("#d55e00".into());
+                t.marker_tracked = ColorSpec("#0072b2".into());
+                t.marker_project = ColorSpec("#cc79a7".into());
+                t.pip_ok = ColorSpec("#009e73".into());
+                t.pip_warn = ColorSpec("#e69f00".into());
+                t.pip_error = ColorSpec("#d55e00".into());
+                Some(t)
+            }
             "solarized-dark" => {
                 t.base_bg = ColorSpec("#002b36".into());
                 t.base_fg = ColorSpec("#839496".into());
@@ -887,6 +900,14 @@ pub struct SummaryRowVm {
     pub kind: String,
     pub state: String,
     pub details: String,
+    #[serde(default)]
+    pub is_conflict: bool,
+    #[serde(default)]
+    pub is_tracked: bool,
+    #[serde(default)]
+    pub is_project: bool,
+    #[serde(default)]
+    pub is_system: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1034,6 +1055,12 @@ pub struct ProcessTreeRow {
     pub workload: Option<String>,
     pub warnings: Vec<String>,
     pub expanded: bool,
+    #[serde(default)]
+    pub is_tracked: bool,
+    #[serde(default)]
+    pub is_project: bool,
+    #[serde(default)]
+    pub is_system: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1349,6 +1376,13 @@ fn listener_to_summary_row(
         kind: format!("{:?}", listener.protocol).to_ascii_lowercase(),
         state: owner,
         details,
+        is_conflict: listener.owners.len() > 1,
+        is_tracked: listener_is_tracked(listener, snapshot),
+        is_project: listener_is_project_member(listener, snapshot),
+        is_system: listener
+            .provenance
+            .iter()
+            .any(|p| p.claim.contains("systemd:system")),
     }
 }
 
@@ -1377,7 +1411,10 @@ fn build_conflict_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
             } else {
                 "listed in CONFLICT warning".into()
             };
-            listener_to_summary_row(listener, snapshot, details)
+            SummaryRowVm {
+                is_conflict: true,
+                ..listener_to_summary_row(listener, snapshot, details)
+            }
         })
         .collect()
 }
@@ -1441,6 +1478,8 @@ fn build_project_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
                 .unwrap_or_else(|| "project".into()),
             state: format!("{} marker(s)", project.markers.len()),
             details: project.root.display().to_string(),
+            is_project: true,
+            ..SummaryRowVm::default()
         })
         .collect()
 }
@@ -1449,16 +1488,21 @@ fn build_workload_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
     snapshot
         .workloads
         .iter()
-        .map(|workload| SummaryRowVm {
-            name: workload.display_name.clone(),
-            kind: runtime_kind_label(&workload.runtime),
-            state: format!("{} process(es)", workload.pids.len()),
-            details: workload
+        .map(|workload| {
+            let project = workload
                 .project
                 .as_ref()
                 .and_then(|id| snapshot.projects.iter().find(|project| &project.id == id))
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| "no project".into()),
+                .map(|project| project.name.clone());
+            SummaryRowVm {
+                name: workload.display_name.clone(),
+                kind: runtime_kind_label(&workload.runtime),
+                state: format!("{} process(es)", workload.pids.len()),
+                details: project.clone().unwrap_or_else(|| "no project".into()),
+                is_tracked: workload.lazyadmin_run_id.is_some(),
+                is_project: project.is_some(),
+                ..SummaryRowVm::default()
+            }
         })
         .collect()
 }
@@ -1479,6 +1523,8 @@ fn build_tracked_run_rows(snapshot: &Snapshot) -> Vec<SummaryRowVm> {
             } else {
                 run.command.join(" ")
             },
+            is_tracked: true,
+            ..SummaryRowVm::default()
         })
         .collect()
 }
@@ -1683,17 +1729,27 @@ fn push_process_row(
         .or(process.container_id.as_ref().map(|_| "container"))
         .unwrap_or("direct")
         .to_string();
-    let workload = snapshot
+    let workload_ref = snapshot
         .workloads
         .iter()
-        .find(|w| w.pids.contains(&process.key))
-        .map(|w| w.display_name.clone())
-        .or_else(|| {
-            process
-                .lazyadmin_run_id
-                .as_ref()
-                .map(|r| format!("run:{r}"))
-        });
+        .find(|w| w.pids.contains(&process.key));
+    let workload = workload_ref.map(|w| w.display_name.clone()).or_else(|| {
+        process
+            .lazyadmin_run_id
+            .as_ref()
+            .map(|r| format!("run:{r}"))
+    });
+    let warnings = snapshot
+        .warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning.entity.as_ref(),
+                Some(EntityRef::Process(key)) if key == &process.key
+            )
+        })
+        .map(|warning| warning.code.clone())
+        .collect::<Vec<_>>();
     rows.push(ProcessTreeRow {
         key: process.key.clone(),
         depth,
@@ -1709,8 +1765,12 @@ fn push_process_row(
         ),
         runtime,
         workload,
-        warnings: Vec::new(),
+        warnings,
         expanded: is_expanded,
+        is_tracked: process.lazyadmin_run_id.is_some()
+            || workload_ref.is_some_and(|w| w.lazyadmin_run_id.is_some()),
+        is_project: workload_ref.is_some_and(|w| w.project.is_some()),
+        is_system: process.systemd_unit.is_some(),
     });
     if is_expanded {
         if let Some(kids) = children.get(&Some(process.pid)) {
@@ -2234,6 +2294,7 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
         "theme night-owl",
         "theme night-owl-light",
         "theme high-contrast",
+        "theme colorblind-safe",
         "theme solarized-dark",
         "theme default-light",
         "reload",
@@ -2467,6 +2528,28 @@ fn row_marker_color(row: &RowVm, theme: &Theme) -> Color {
     }
 }
 
+fn marker_glyph(is_conflict: bool, is_tracked: bool, is_project: bool) -> &'static str {
+    if is_conflict {
+        "┃"
+    } else if is_tracked || is_project {
+        "▎"
+    } else {
+        " "
+    }
+}
+
+fn marker_color(is_conflict: bool, is_tracked: bool, is_project: bool, theme: &Theme) -> Color {
+    if is_conflict {
+        signal_color(theme, theme.marker_conflict.color())
+    } else if is_tracked {
+        signal_color(theme, theme.marker_tracked.color())
+    } else if is_project {
+        signal_color(theme, theme.marker_project.color())
+    } else {
+        theme.footer.color()
+    }
+}
+
 fn row_signal_cell(row: &RowVm, theme: &Theme) -> Cell<'static> {
     let signal = row_exposure_signal(row);
     let marker = row_marker_glyph(row);
@@ -2485,6 +2568,43 @@ fn row_signal_cell(row: &RowVm, theme: &Theme) -> Cell<'static> {
                 .add_modifier(match signal {
                     ExposureSignal::Public => Modifier::BOLD,
                     ExposureSignal::Lan | ExposureSignal::Loopback => Modifier::empty(),
+                }),
+        ),
+    ]))
+}
+
+fn marker_cell(
+    is_conflict: bool,
+    is_tracked: bool,
+    is_project: bool,
+    theme: &Theme,
+) -> Cell<'static> {
+    Cell::from(Span::styled(
+        marker_glyph(is_conflict, is_tracked, is_project),
+        Style::default()
+            .fg(marker_color(is_conflict, is_tracked, is_project, theme))
+            .bg(theme.base_bg.color()),
+    ))
+}
+
+fn process_signal_cell(row: &ProcessTreeRow, theme: &Theme) -> Cell<'static> {
+    let alert = if row.warnings.is_empty() { " " } else { "⚠" };
+    Cell::from(Line::from(vec![
+        Span::styled(
+            marker_glyph(false, row.is_tracked, row.is_project),
+            Style::default()
+                .fg(marker_color(false, row.is_tracked, row.is_project, theme))
+                .bg(theme.base_bg.color()),
+        ),
+        Span::styled(
+            alert,
+            Style::default()
+                .fg(signal_color(theme, theme.pip_warn.color()))
+                .bg(theme.base_bg.color())
+                .add_modifier(if row.warnings.is_empty() {
+                    Modifier::empty()
+                } else {
+                    Modifier::BOLD
                 }),
         ),
     ]))
@@ -2891,21 +3011,20 @@ fn render_digest(
             } else {
                 String::new()
             };
+            let (glyph, color) = if matches!(row.exposure, Exposure::Public) {
+                ("●", signal_color(theme, theme.risk_public.color()))
+            } else {
+                ("◐", signal_color(theme, theme.risk_lan.color()))
+            };
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  ● {}  {}  {}{}",
+                    "  {glyph} {}  {}  {}{}",
                     row.bind,
                     row.owner_label,
                     row.project.clone().unwrap_or_else(|| "-".into()),
                     extra
                 ),
-                Style::default()
-                    .fg(if matches!(row.exposure, Exposure::Public) {
-                        theme.risk_public.color()
-                    } else {
-                        theme.risk_lan.color()
-                    })
-                    .bg(theme.base_bg.color()),
+                Style::default().fg(color).bg(theme.base_bg.color()),
             )));
         }
     }
@@ -2944,7 +3063,7 @@ fn render_digest(
                     row.bind, row.owner_count, row.reason
                 ),
                 Style::default()
-                    .fg(theme.marker_conflict.color())
+                    .fg(signal_color(theme, theme.marker_conflict.color()))
                     .bg(theme.base_bg.color()),
             )));
         }
@@ -2981,7 +3100,7 @@ fn render_digest(
                     row.name, row.listener_count, row.root
                 ),
                 Style::default()
-                    .fg(theme.marker_project.color())
+                    .fg(signal_color(theme, theme.marker_project.color()))
                     .bg(theme.base_bg.color()),
             )));
         }
@@ -3114,18 +3233,28 @@ fn render_summary_table(
         return;
     }
     let table_rows = rows.iter().map(|row| {
+        let row_fg = if row.is_system {
+            theme.system_noise.color()
+        } else {
+            theme.base_fg.color()
+        };
         Row::new(vec![
+            marker_cell(row.is_conflict, row.is_tracked, row.is_project, theme),
             Cell::from(Span::styled(
                 compact_text(&row.name, 24),
                 Style::default()
-                    .fg(theme.base_fg.color())
+                    .fg(row_fg)
                     .bg(theme.base_bg.color())
                     .add_modifier(Modifier::BOLD),
             )),
             Cell::from(Span::styled(
                 compact_text(&row.kind, 14),
                 Style::default()
-                    .fg(theme.info.color())
+                    .fg(if row.is_system {
+                        theme.system_noise.color()
+                    } else {
+                        theme.info.color()
+                    })
                     .bg(theme.base_bg.color()),
             )),
             Cell::from(Span::styled(
@@ -3136,9 +3265,7 @@ fn render_summary_table(
             )),
             Cell::from(Span::styled(
                 compact_text(&row.details, 64),
-                Style::default()
-                    .fg(theme.base_fg.color())
-                    .bg(theme.base_bg.color()),
+                Style::default().fg(row_fg).bg(theme.base_bg.color()),
             )),
         ])
         .style(Style::default().bg(theme.base_bg.color()))
@@ -3146,6 +3273,7 @@ fn render_summary_table(
     let table = Table::new(
         table_rows,
         [
+            Constraint::Length(1),
             Constraint::Length(24),
             Constraint::Length(14),
             Constraint::Length(18),
@@ -3153,7 +3281,7 @@ fn render_summary_table(
         ],
     )
     .header(
-        Row::new(["Name", "Kind", "State", "Details"]).style(
+        Row::new(["", "Name", "Kind", "State", "Details"]).style(
             Style::default()
                 .fg(theme.accent.color())
                 .bg(theme.base_bg.color())
@@ -3794,18 +3922,25 @@ fn render_process_tree(
 ) {
     let rows = view_model.process_tree.rows.iter().map(|r| {
         let marker = if r.expanded { "▾" } else { "▸" };
+        let row_fg = if r.is_system {
+            theme.system_noise.color()
+        } else {
+            theme.base_fg.color()
+        };
+        let runtime_fg = if r.is_system {
+            theme.system_noise.color()
+        } else {
+            theme.info.color()
+        };
         Row::new(vec![
+            process_signal_cell(r, theme),
             Cell::from(Span::styled(
                 format!("{}{} {}", "  ".repeat(r.depth), marker, r.label),
-                Style::default()
-                    .fg(theme.base_fg.color())
-                    .bg(theme.base_bg.color()),
+                Style::default().fg(row_fg).bg(theme.base_bg.color()),
             )),
             Cell::from(Span::styled(
                 r.runtime.clone(),
-                Style::default()
-                    .fg(theme.info.color())
-                    .bg(theme.base_bg.color()),
+                Style::default().fg(runtime_fg).bg(theme.base_bg.color()),
             )),
             Cell::from(Span::styled(
                 r.workload.clone().unwrap_or_else(|| "-".into()),
@@ -3825,6 +3960,7 @@ fn render_process_tree(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(2),
             Constraint::Min(24),
             Constraint::Length(12),
             Constraint::Length(16),
@@ -3832,13 +3968,26 @@ fn render_process_tree(
         ],
     )
     .header(
-        Row::new(["Process", "Runtime", "Workload", "Warnings"]).style(
+        Row::new(["", "Process", "Runtime", "Workload", "Warnings"]).style(
             Style::default()
                 .fg(theme.accent.color())
                 .bg(theme.base_bg.color()),
         ),
     )
-    .block(panel_block("Process Tree", theme, active))
+    .block(panel_block(
+        format!(
+            "Process Tree — {} processes, {} roots",
+            view_model.process_tree.rows.len(),
+            view_model
+                .process_tree
+                .rows
+                .iter()
+                .filter(|row| row.depth == 0)
+                .count()
+        ),
+        theme,
+        active,
+    ))
     .style(
         Style::default()
             .fg(theme.base_fg.color())
@@ -6072,6 +6221,114 @@ mod tests {
     }
 
     #[test]
+    fn visual_signal_glyphs_reach_process_and_workload_surfaces() {
+        let mut snap = build_empty_snapshot();
+        let project_id = lazyadmin_core::model::ProjectId::new("project");
+        snap.projects.push(lazyadmin_core::model::Project {
+            id: project_id.clone(),
+            root: PathBuf::from("/repo"),
+            name: "repo".into(),
+            markers: Vec::new(),
+            git_remote: None,
+            package_manager: Some("cargo".into()),
+            dev_commands: Vec::new(),
+            provenance: Vec::new(),
+        });
+
+        let proc = process(4101, None, 1);
+        let proc_key = proc.key.clone();
+        snap.processes.push(proc);
+        snap.workloads.push(lazyadmin_core::model::Workload {
+            id: lazyadmin_core::model::WorkloadId::new("workload"),
+            display_name: "api".into(),
+            runtime: lazyadmin_core::model::RuntimeKind::Direct,
+            state: lazyadmin_core::model::WorkloadState::Running,
+            pids: vec![proc_key.clone()],
+            listeners: Vec::new(),
+            project: Some(project_id),
+            manager: None,
+            source: None,
+            actions: Vec::new(),
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: Vec::new(),
+        });
+        snap.warnings.push(lazyadmin_core::model::Warning {
+            severity: WarningSeverity::Warning,
+            code: "TEST_WARNING".into(),
+            message: "process warning".into(),
+            entity: Some(EntityRef::Process(proc_key)),
+            provenance: Vec::new(),
+        });
+
+        let vm = build_view_model(&snap, 120, false, "");
+        let mut theme = Theme::default_dark();
+        theme.fallback_palette = PaletteMode::Monochrome;
+
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &theme,
+                    RenderContext {
+                        view: ViewKind::Processes,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
+                        related_listener_filter: None,
+                    },
+                )
+            })
+            .unwrap();
+        let process_text = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            process_text.contains("▎"),
+            "project process marker missing: {process_text}"
+        );
+        assert!(
+            process_text.contains("⚠"),
+            "process warning glyph missing: {process_text}"
+        );
+
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_view_kind(
+                    &vm,
+                    f,
+                    f.area(),
+                    &theme,
+                    RenderContext {
+                        view: ViewKind::Workloads,
+                        active_pane: Pane::Rows,
+                        keybindings: None,
+                        selected_row: 0,
+                        overview_hint_visible: false,
+                        listener_filter: ListenerFilter::All,
+                        listeners_hint_visible: false,
+                        related_listener_filter: None,
+                    },
+                )
+            })
+            .unwrap();
+        let workload_text = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            workload_text.contains("▎"),
+            "project workload marker missing: {workload_text}"
+        );
+    }
+
+    #[test]
     fn view_kind_public_programmatic_entry_still_filters_public_rows() {
         let mut snap = build_empty_snapshot();
         let proc = process(3001, None, 1);
@@ -7222,6 +7479,7 @@ mod tests {
             "default-light",
             "night-owl-light",
             "high-contrast",
+            "colorblind-safe",
             "solarized-dark",
         ] {
             let mut theme = Theme::builtin(name).unwrap();

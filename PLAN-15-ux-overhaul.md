@@ -166,19 +166,19 @@ These three issues are mostly mechanical now that Phase 0 landed the palette + s
 
 ### #18 — Visual hierarchy: encode signals in row weight
 
-- [ ] In the row renderer for `Listeners` (and Process Tree, Workloads, the digest sections), add a leading-glyph + color prefix slot.
+- [x] In the row renderer for `Listeners` (and Process Tree, Workloads, the digest sections), add a leading-glyph + color prefix slot.
   - Public exposure: `●` colored `risk_public`.
-  - LAN exposure: `●` colored `risk_lan`.
+  - LAN exposure: `◐` colored `risk_lan`.
   - Loopback: no prefix, default weight.
-- [ ] Add a left-border marker slot independent of the prefix:
+- [x] Add a left-border marker slot independent of the prefix:
   - Conflict: `┃` in `marker_conflict`.
   - Tracked-run / project member: `▎` in `marker_tracked` / `marker_project`.
-- [ ] Header counts colored to match: `120 public` in `risk_public`, `12 LAN` in `risk_lan`.
-- [ ] System-noise dimming: rows owned by known-system daemons (DNS resolver, journald, etc.) render in `system_noise`. Toggle remains `S` (existing `Command::ToggleSystem`).
-- [ ] Monochrome safety: every signal uses a distinct glyph + weight, not just color. Add a TUI test that runs rendering with `PaletteMode::Monochrome` and asserts every row class is still distinguishable by glyph.
-- [ ] Colorblind safety: pick a red/orange pair with distinct luminance, *or* ship a `colorblind-safe` theme variant alongside `default-dark`. Document in `docs/themes.md`.
-- [ ] Web UI mirrors the same encoding via CSS classes (`.risk-public`, `.marker-conflict`, etc.) bound to the CSS custom properties from Phase 0.3.
-- [ ] Theme tests: `theme_builtins_validate_and_downgrade` covers the new slots; new test `risk_glyphs_present_without_color` for monochrome.
+- [x] Header counts colored to match: `120 public` in `risk_public`, `12 LAN` in `risk_lan`.
+- [x] System-noise dimming: rows owned by known-system daemons (DNS resolver, journald, etc.) render in `system_noise`. Toggle remains `S` (existing `Command::ToggleSystem`).
+- [x] Monochrome safety: every signal uses a distinct glyph + weight, not just color. Add a TUI test that runs rendering with `PaletteMode::Monochrome` and asserts every row class is still distinguishable by glyph.
+- [x] Colorblind safety: pick a red/orange pair with distinct luminance, *or* ship a `colorblind-safe` theme variant alongside `default-dark`. Document in `docs/themes.md`.
+- [x] Web UI mirrors the same encoding via CSS classes (`.risk-public`, `.marker-conflict`, etc.) bound to the CSS custom properties from Phase 0.3.
+- [x] Theme tests: `theme_builtins_validate_and_downgrade` covers the new slots; new test `risk_glyphs_present_without_color` for monochrome.
 - [ ] Update `dogfood-tui-output` fixture screenshots after landing.
 
 ### #20 — Footer split + persistent header health pip
