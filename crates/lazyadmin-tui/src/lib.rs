@@ -45,6 +45,11 @@ use tokio::{
 };
 use tracing::{debug, info, info_span};
 
+const NAV_PANE_WIDTH: u16 = 26;
+const MAIN_PANE_MIN_WIDTH: u16 = 40;
+const INSPECTOR_PANE_WIDTH: u16 = 48;
+const THREE_PANE_MIN_WIDTH: u16 = NAV_PANE_WIDTH + MAIN_PANE_MIN_WIDTH + INSPECTOR_PANE_WIDTH;
+
 pub type ConfigReload = Box<dyn FnMut() -> anyhow::Result<(Theme, ResolvedKeybindings)> + Send>;
 
 #[derive(Clone, Debug)]
@@ -1228,8 +1233,8 @@ pub fn build_view_model_with_state(
     doctor_severity_filter: DoctorSeverityFilter,
 ) -> ViewModel {
     let layout = match width {
-        100..=u16::MAX => LayoutMode::ThreePane,
-        80..=99 => LayoutMode::InspectorTab,
+        THREE_PANE_MIN_WIDTH..=u16::MAX => LayoutMode::ThreePane,
+        80..=113 => LayoutMode::InspectorTab,
         60..=79 => LayoutMode::SinglePane,
         _ => LayoutMode::Refuse,
     };
@@ -2889,9 +2894,9 @@ fn render_view_kind(
         LayoutMode::ThreePane => Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(26),
-                Constraint::Min(48),
-                Constraint::Length(40),
+                Constraint::Length(NAV_PANE_WIDTH),
+                Constraint::Min(MAIN_PANE_MIN_WIDTH),
+                Constraint::Length(INSPECTOR_PANE_WIDTH),
             ])
             .split(body),
         _ => Layout::default()
@@ -5749,9 +5754,9 @@ fn render_app_legacy(f: &mut ratatui::Frame<'_>, app: &App) {
         LayoutMode::ThreePane => Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(24),
-                Constraint::Min(40),
-                Constraint::Length(32),
+                Constraint::Length(NAV_PANE_WIDTH),
+                Constraint::Min(MAIN_PANE_MIN_WIDTH),
+                Constraint::Length(INSPECTOR_PANE_WIDTH),
             ])
             .split(area),
         LayoutMode::InspectorTab | LayoutMode::SinglePane | LayoutMode::Refuse => Layout::default()
