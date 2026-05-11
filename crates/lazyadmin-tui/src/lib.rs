@@ -94,6 +94,7 @@ pub struct App {
     config_reload: Option<ConfigReload>,
     overview_hint_visible: bool,
     listener_filter: ListenerFilter,
+    listener_sort: ListenerSort,
     listeners_hint_visible: bool,
     listeners_hint_seen: bool,
     related_listener_filter: Option<RelatedListenerFilter>,
@@ -194,6 +195,7 @@ impl Default for App {
             config_reload: None,
             overview_hint_visible: false,
             listener_filter: ListenerFilter::All,
+            listener_sort: ListenerSort::default(),
             listeners_hint_visible: false,
             listeners_hint_seen: false,
             related_listener_filter: None,
@@ -281,6 +283,82 @@ impl ListenerFilter {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListenerSortColumn {
+    #[default]
+    Port,
+    Bind,
+    Owner,
+    Runtime,
+    Scope,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerSort {
+    pub column: ListenerSortColumn,
+    pub direction: SortDirection,
+}
+
+impl ListenerSort {
+    fn next_column(self) -> Self {
+        let column = match self.column {
+            ListenerSortColumn::Port => ListenerSortColumn::Bind,
+            ListenerSortColumn::Bind => ListenerSortColumn::Owner,
+            ListenerSortColumn::Owner => ListenerSortColumn::Runtime,
+            ListenerSortColumn::Runtime => ListenerSortColumn::Scope,
+            ListenerSortColumn::Scope => ListenerSortColumn::Port,
+        };
+        Self {
+            column,
+            direction: SortDirection::Asc,
+        }
+    }
+    fn prev_column(self) -> Self {
+        let column = match self.column {
+            ListenerSortColumn::Port => ListenerSortColumn::Scope,
+            ListenerSortColumn::Bind => ListenerSortColumn::Port,
+            ListenerSortColumn::Owner => ListenerSortColumn::Bind,
+            ListenerSortColumn::Runtime => ListenerSortColumn::Owner,
+            ListenerSortColumn::Scope => ListenerSortColumn::Runtime,
+        };
+        Self {
+            column,
+            direction: SortDirection::Asc,
+        }
+    }
+    fn toggle_direction(self) -> Self {
+        Self {
+            column: self.column,
+            direction: match self.direction {
+                SortDirection::Asc => SortDirection::Desc,
+                SortDirection::Desc => SortDirection::Asc,
+            },
+        }
+    }
+    fn label(self) -> &'static str {
+        match self.column {
+            ListenerSortColumn::Port => "Port",
+            ListenerSortColumn::Bind => "Bind",
+            ListenerSortColumn::Owner => "Owner",
+            ListenerSortColumn::Runtime => "Runtime",
+            ListenerSortColumn::Scope => "Scope",
+        }
+    }
+    fn indicator(self) -> &'static str {
+        match self.direction {
+            SortDirection::Asc => "▲",
+            SortDirection::Desc => "▼",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pane {
     #[default]
     Groups,
@@ -327,6 +405,9 @@ pub enum Command {
     Help,
     Quit,
     Refresh,
+    SortNext,
+    SortPrev,
+    SortToggle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -877,6 +958,7 @@ pub struct ViewModel {
     pub hidden_system_count: usize,
     pub degraded: Option<String>,
     pub events_dropped: u64,
+    pub listener_sort: ListenerSort,
 }
 
 impl Default for ViewModel {
@@ -901,6 +983,7 @@ impl Default for ViewModel {
             hidden_system_count: 0,
             degraded: None,
             events_dropped: 0,
+            listener_sort: ListenerSort::default(),
         }
     }
 }
@@ -1217,6 +1300,7 @@ pub fn build_view_model(
         None,
         &HashSet::new(),
         DoctorSeverityFilter::All,
+        ListenerSort::default(),
     )
 }
 
@@ -1231,6 +1315,7 @@ pub fn build_view_model_with_state(
     adapter_metrics: Option<Vec<AdapterMetricVm>>,
     doctor_toggled_groups: &HashSet<String>,
     doctor_severity_filter: DoctorSeverityFilter,
+    listener_sort: ListenerSort,
 ) -> ViewModel {
     let layout = match width {
         THREE_PANE_MIN_WIDTH..=u16::MAX => LayoutMode::ThreePane,
@@ -1318,6 +1403,7 @@ pub fn build_view_model_with_state(
         let m = SkimMatcherV2::default();
         rows.retain(|r| m.fuzzy_match(&r.search_text, filter).is_some());
     }
+    sort_listener_rows(&mut rows, listener_sort);
     let inspector = selected_process
         .as_ref()
         .and_then(|key| inspector_for_process(snapshot, key))
@@ -1384,6 +1470,7 @@ pub fn build_view_model_with_state(
             .as_ref()
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
+        listener_sort,
     }
 }
 
@@ -2270,6 +2357,9 @@ fn action_to_command(action: KeybindAction) -> Option<Command> {
         KeybindAction::CopyDiagnostic => Command::CopyDiagnostic,
         KeybindAction::Run => Command::Run,
         KeybindAction::Refresh => Command::Refresh,
+        KeybindAction::SortNext => Command::SortNext,
+        KeybindAction::SortPrev => Command::SortPrev,
+        KeybindAction::SortToggle => Command::SortToggle,
     })
 }
 
@@ -3454,6 +3544,55 @@ fn render_summary_table(
     frame.render_widget(table, area);
 }
 
+fn sort_listener_rows(rows: &mut [RowVm], sort: ListenerSort) {
+    rows.sort_by(|a, b| {
+        let ord = match sort.column {
+            ListenerSortColumn::Port => match (a.port, b.port) {
+                (Some(ap), Some(bp)) => ap.cmp(&bp),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+            ListenerSortColumn::Bind => a.bind.cmp(&b.bind),
+            ListenerSortColumn::Owner => a.owner.cmp(&b.owner),
+            ListenerSortColumn::Runtime => a.runtime.cmp(&b.runtime),
+            ListenerSortColumn::Scope => a.exposure.cmp(&b.exposure),
+        };
+        if sort.direction == SortDirection::Desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+}
+
+fn listener_table_header(theme: &Theme, sort: ListenerSort) -> Row<'static> {
+    let mut headers = vec![
+        "".into(),
+        "Port".into(),
+        "Bind".into(),
+        "Owner".into(),
+        "Runtime".into(),
+        "Scope".into(),
+    ];
+    let idx = match sort.column {
+        ListenerSortColumn::Port => 1usize,
+        ListenerSortColumn::Bind => 2,
+        ListenerSortColumn::Owner => 3,
+        ListenerSortColumn::Runtime => 4,
+        ListenerSortColumn::Scope => 5,
+    };
+    let label = sort.label();
+    let indicator = sort.indicator();
+    headers[idx] = format!("{} {}", label, indicator);
+    Row::new(headers).style(
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_rows_table(
     view_model: &ViewModel,
@@ -3562,14 +3701,7 @@ fn render_rows_table(
             Constraint::Length(10),
         ],
     )
-    .header(
-        Row::new(["", "Port", "Bind", "Owner", "Runtime", "Scope"]).style(
-            Style::default()
-                .fg(theme.accent.color())
-                .bg(theme.base_bg.color())
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
+    .header(listener_table_header(theme, view_model.listener_sort))
     .block(panel_block(title_for_view(view), theme, active))
     .style(
         Style::default()
@@ -4383,6 +4515,7 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
     lines.push(
         "legacy views remain addressable via : public, : conflicts, : view all, or --view".into(),
     );
+    lines.push("sort: [ prev · ] next · > toggle direction".into());
     lines
 }
 
@@ -4646,6 +4779,7 @@ fn rebuild_view_model(app: &mut App, width: u16) {
         Some(app.event_ring.metrics(Instant::now())),
         &app.doctor_toggled_groups,
         app.doctor_severity_filter,
+        app.listener_sort,
     );
     sync_row_selection(app);
 }
@@ -5468,6 +5602,33 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                     app.set_status("edit failed: no selected listener");
                 }
             },
+            Command::SortNext => {
+                app.listener_sort = app.listener_sort.next_column();
+                rebuild_view_model(app, width);
+                app.set_status(format!(
+                    "sorted by {} {}",
+                    app.listener_sort.label(),
+                    app.listener_sort.indicator()
+                ));
+            }
+            Command::SortPrev => {
+                app.listener_sort = app.listener_sort.prev_column();
+                rebuild_view_model(app, width);
+                app.set_status(format!(
+                    "sorted by {} {}",
+                    app.listener_sort.label(),
+                    app.listener_sort.indicator()
+                ));
+            }
+            Command::SortToggle => {
+                app.listener_sort = app.listener_sort.toggle_direction();
+                rebuild_view_model(app, width);
+                app.set_status(format!(
+                    "sorted by {} {}",
+                    app.listener_sort.label(),
+                    app.listener_sort.indicator()
+                ));
+            }
             _ => CommandDispatcher::execute(&cmd),
         }
     }
@@ -6765,6 +6926,7 @@ mod tests {
             None,
             &toggled,
             DoctorSeverityFilter::All,
+            ListenerSort::default(),
         );
         assert_eq!(vm.doctor.rows.len(), 3);
         assert!(vm.doctor.rows[0].expanded);
@@ -6822,6 +6984,7 @@ mod tests {
             None,
             &HashSet::new(),
             DoctorSeverityFilter::Warning,
+            ListenerSort::default(),
         );
         let info_vm = build_view_model_with_state(
             &snap,
@@ -6833,6 +6996,7 @@ mod tests {
             None,
             &HashSet::new(),
             DoctorSeverityFilter::Info,
+            ListenerSort::default(),
         );
         assert_eq!(warning_vm.doctor.rows[0].details, "PUBLIC");
         assert_eq!(info_vm.doctor.rows[0].details, "possible_dual_stack");
@@ -7180,6 +7344,7 @@ mod tests {
                 None,
                 &HashSet::new(),
                 DoctorSeverityFilter::All,
+                ListenerSort::default(),
             ),
             snapshot: snap,
             active_view: ViewKind::ProcessTree,
@@ -7239,6 +7404,7 @@ mod tests {
             None,
             &HashSet::new(),
             DoctorSeverityFilter::All,
+            ListenerSort::default(),
         );
         let plain = vm.inspector.lines.join("\n");
         assert!(
@@ -7264,6 +7430,7 @@ mod tests {
             None,
             &HashSet::new(),
             DoctorSeverityFilter::All,
+            ListenerSort::default(),
         );
         let text = render_inspector_text(&vm, 120, 18);
         assert!(text.contains("[L] logs"), "{text}");
@@ -7735,6 +7902,7 @@ mod tests {
             None,
             &HashSet::new(),
             DoctorSeverityFilter::All,
+            ListenerSort::default(),
         );
         assert_eq!(vm.process_tree.selected, Some(selected));
         assert_eq!(vm.process_tree.rows.len(), 1);
