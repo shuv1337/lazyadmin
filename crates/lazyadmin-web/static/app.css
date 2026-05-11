@@ -356,6 +356,7 @@ body.with-inspector .main {
   user-select: none;
 }
 .table th:hover { color: var(--fg); }
+.table th.sorted { color: var(--accent); }
 .table td {
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.04);

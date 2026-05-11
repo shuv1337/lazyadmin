@@ -23,7 +23,16 @@ const state = {
   showRaw: false,
   route: parseHash(),
   filterText: "",
+  sortCol: "port",
+  sortDir: "asc",
 };
+
+// sync initial sort from URL on boot
+(function initSort() {
+  const sort = parseSortFromParams(state.route.params);
+  state.sortCol = sort.sortCol;
+  state.sortDir = sort.sortDir;
+})();
 
 // ─── routing ───────────────────────────────────────────────────────
 const PAGES = ["overview", "listeners", "workloads", "processes", "doctor", "metrics"];
@@ -34,6 +43,16 @@ function parseHash() {
   const page = PAGES.includes(path) ? path : "overview";
   const params = new URLSearchParams(qs || "");
   return { page, params };
+}
+
+function parseSortFromParams(params) {
+  const col = params.get("sort") || "port";
+  const dir = params.get("dir") || "asc";
+  const validCols = ["port", "bind", "exposure", "owner", "project", "confidence", "warnings"];
+  return {
+    sortCol: validCols.includes(col) ? col : "port",
+    sortDir: dir === "desc" ? "desc" : "asc",
+  };
 }
 
 function navigate(page, params = {}) {
@@ -52,6 +71,9 @@ function setParam(key, value) {
 window.addEventListener("hashchange", () => {
   state.route = parseHash();
   state.filterText = state.route.params.get("q") || "";
+  const sort = parseSortFromParams(state.route.params);
+  state.sortCol = sort.sortCol;
+  state.sortDir = sort.sortDir;
   renderPage();
   renderRail();
 });
@@ -184,6 +206,7 @@ function renderPage() {
   attachRowHandlers();
   attachToolbarHandlers();
   attachDigestHandlers();
+  attachSortHandlers();
 }
 
 function renderBanners() {
@@ -309,6 +332,43 @@ const LISTENER_FILTERS = [
       snap.workloads.some((w) => w.lazyadmin_run_id && (w.listeners || []).includes(l.id)) },
 ];
 
+function sortListeners(listeners) {
+  const col = state.sortCol;
+  const dir = state.sortDir === "asc" ? 1 : -1;
+  return listeners.slice().sort((a, b) => {
+    let ord = 0;
+    if (col === "port") {
+      const ap = a.port ?? Infinity;
+      const bp = b.port ?? Infinity;
+      ord = ap - bp;
+      if (ord === 0) ord = (a.bind_addr || "").localeCompare(b.bind_addr || "");
+    } else if (col === "bind") {
+      const ab = a.path || `${a.bind_addr || "*"}:${a.port ?? "?"}`;
+      const bb = b.path || `${b.bind_addr || "*"}:${b.port ?? "?"}`;
+      ord = ab.localeCompare(bb);
+    } else if (col === "exposure") {
+      ord = (a.exposure || "").localeCompare(b.exposure || "");
+    } else if (col === "owner") {
+      ord = ownerLabel(a).localeCompare(ownerLabel(b));
+    } else if (col === "project") {
+      ord = (projectFor(a) || "").localeCompare(projectFor(b) || "");
+    } else if (col === "confidence") {
+      ord = (a.confidence || "").localeCompare(b.confidence || "");
+    } else if (col === "warnings") {
+      const aw = (state.snapshot.warnings || []).filter((w) => w.entity?.kind === "listener" && w.entity.id === a.id).length;
+      const bw = (state.snapshot.warnings || []).filter((w) => w.entity?.kind === "listener" && w.entity.id === b.id).length;
+      ord = aw - bw;
+    }
+    return ord * dir;
+  });
+}
+
+function thLabel(col, label) {
+  const active = state.sortCol === col;
+  const indicator = active ? (state.sortDir === "asc" ? " ▲" : " ▼") : "";
+  return `<th class="sortable ${active ? "sorted" : ""}" data-sort="${col}">${esc(label + indicator)}</th>`;
+}
+
 function renderListeners() {
   const snap = state.snapshot;
   const filterId = state.route.params.get("filter") || "all";
@@ -316,8 +376,9 @@ function renderListeners() {
   const all = snap.listeners.slice();
   const matched = all.filter((l) => active.match(l, snap));
   const filtered = applyTextFilter(matched, listenerHaystack);
+  const sorted = sortListeners(filtered);
   const total = all.length;
-  const matchCount = filtered.length;
+  const matchCount = sorted.length;
 
   const chips = LISTENER_FILTERS.map(
     (f) => `<button class="chip ${f.id === filterId ? "active" : ""}" data-chip="${f.id}">${f.label}</button>`,
@@ -333,9 +394,14 @@ function renderListeners() {
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
-          <th>Bind</th><th>Exposure</th><th>Owner</th><th>Project</th><th>Confidence</th><th>Warnings</th>
+          ${thLabel("bind", "Bind")}
+          ${thLabel("exposure", "Exposure")}
+          ${thLabel("owner", "Owner")}
+          ${thLabel("project", "Project")}
+          ${thLabel("confidence", "Confidence")}
+          ${thLabel("warnings", "Warnings")}
         </tr></thead>
-        <tbody>${filtered.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet")}</tbody>
+        <tbody>${sorted.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet")}</tbody>
       </table>
     </div>
   `;
@@ -631,6 +697,19 @@ function attachToolbarHandlers() {
   }
   $$(".chip").forEach((c) =>
     c.addEventListener("click", () => setParam("filter", c.dataset.chip)),
+  );
+}
+
+function attachSortHandlers() {
+  $$(".sortable").forEach((th) =>
+    th.addEventListener("click", () => {
+      const col = th.dataset.sort;
+      if (state.sortCol === col) {
+        setParam("dir", state.sortDir === "asc" ? "desc" : "asc");
+      } else {
+        setParam("sort", col);
+      }
+    }),
   );
 }
 
