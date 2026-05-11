@@ -395,6 +395,9 @@ pub mod keybindings {
         CopyDiagnostic,
         Run,
         Refresh,
+        SortNext,
+        SortPrev,
+        SortToggle,
     }
 
     impl KeybindAction {
@@ -422,6 +425,9 @@ pub mod keybindings {
                 Self::CopyDiagnostic => "copy_diag",
                 Self::Run => "run",
                 Self::Refresh => "refresh",
+                Self::SortNext => "sort_next",
+                Self::SortPrev => "sort_prev",
+                Self::SortToggle => "sort_toggle",
             }
         }
         pub fn all() -> &'static [Self] {
@@ -448,6 +454,9 @@ pub mod keybindings {
                 Self::CopyDiagnostic,
                 Self::Run,
                 Self::Refresh,
+                Self::SortNext,
+                Self::SortPrev,
+                Self::SortToggle,
             ]
         }
         pub fn parse(name: &str) -> Option<Self> {
@@ -497,6 +506,9 @@ pub mod keybindings {
                 (CopyDiagnostic, vec!["y".into()]),
                 (Run, vec!["R".into()]),
                 (Refresh, vec!["F5".into()]),
+                (SortNext, vec!["]".into()]),
+                (SortPrev, vec!["[".into()]),
+                (SortToggle, vec![">".into()]),
             ])
         }
         pub fn from_config(cfg: &Config) -> anyhow::Result<Self> {
