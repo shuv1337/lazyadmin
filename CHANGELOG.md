@@ -5,6 +5,7 @@
 - PLAN-14: read-only Web UI observation layer. New `lazyadmin-runtime` crate extracts shared snapshot/event assembly, and the new `lazyadmin-web` crate ships a loopback-only Axum server with an embedded static UI shell.
 - New `lazyadmin web` CLI command: defaults to `127.0.0.1:7749` (or `--port 0` for ephemeral), refuses non-loopback binds, and exposes only read-only `/api/health`, `/api/snapshot`, `/api/doctor`, and `/api/events` routes.
 - Snapshot and doctor data remain projections of `lazyadmin.snapshot.v1`; the web UI does not introduce any mutating runtime actions.
+- Listener table sorting in TUI and Web UI: `[` / `]` cycle sortable columns, `>` toggles ascending/descending, and the active sort is shown in the table header. TUI sort commands preserve selected listener identity. Web sort state is preserved in the URL hash and resets direction to ascending when switching columns. New configurable keybind actions: `sort_next`, `sort_prev`, `sort_toggle`.
 
 ## 0.3.0
 

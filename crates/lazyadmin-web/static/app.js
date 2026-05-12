@@ -68,6 +68,22 @@ function setParam(key, value) {
   navigate(r.page, Object.fromEntries(r.params));
 }
 
+function setParams(values) {
+  const r = state.route;
+  Object.entries(values).forEach(([key, value]) => {
+    if (value == null || value === "") r.params.delete(key);
+    else r.params.set(key, value);
+  });
+  navigate(r.page, Object.fromEntries(r.params));
+}
+
+function nextSortParams(currentSortCol, currentSortDir, clickedColumn) {
+  if (currentSortCol === clickedColumn) {
+    return { sort: clickedColumn, dir: currentSortDir === "asc" ? "desc" : "asc" };
+  }
+  return { sort: clickedColumn, dir: "asc" };
+}
+
 window.addEventListener("hashchange", () => {
   state.route = parseHash();
   state.filterText = state.route.params.get("q") || "";
@@ -366,7 +382,8 @@ function sortListeners(listeners) {
 function thLabel(col, label) {
   const active = state.sortCol === col;
   const indicator = active ? (state.sortDir === "asc" ? " ▲" : " ▼") : "";
-  return `<th class="sortable ${active ? "sorted" : ""}" data-sort="${col}">${esc(label + indicator)}</th>`;
+  const ariaSort = active ? (state.sortDir === "asc" ? "ascending" : "descending") : "none";
+  return `<th class="sortable ${active ? "sorted" : ""}" data-sort="${col}" scope="col" aria-sort="${ariaSort}"><button type="button" class="sort-button">${esc(label + indicator)}</button></th>`;
 }
 
 function renderListeners() {
@@ -394,6 +411,7 @@ function renderListeners() {
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
+          ${thLabel("port", "Port")}
           ${thLabel("bind", "Bind")}
           ${thLabel("exposure", "Exposure")}
           ${thLabel("owner", "Owner")}
@@ -401,7 +419,7 @@ function renderListeners() {
           ${thLabel("confidence", "Confidence")}
           ${thLabel("warnings", "Warnings")}
         </tr></thead>
-        <tbody>${sorted.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet")}</tbody>
+        <tbody>${sorted.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet", 7)}</tbody>
       </table>
     </div>
   `;
@@ -432,6 +450,7 @@ function listenerTableRow(l) {
   const cls = [conflictCls, trackedCls, projectCls, isSelected("listener", l.id) ? "selected" : ""]
     .filter(Boolean).join(" ");
   return `<tr class="row ${cls}" data-row data-kind="listener" data-id="${esc(l.id)}">
+    <td class="mono port-cell">${l.port ?? "—"}</td>
     <td class="bind-cell mono"><span class="exp-glyph ${expClass}">${expGlyph}</span>${esc(bind)}<div class="secondary">${esc(l.protocol)}</div></td>
     <td>${esc(exposure)}</td>
     <td>${esc(owner)}</td>
@@ -484,7 +503,7 @@ function renderWorkloads() {
       <tr class="group-head"><td colspan="4">${esc(head)} · ${items.length}</td></tr>
       ${items.map(workloadRow).join("")}
     `)
-    .join("") || emptyRow("no workloads discovered yet");
+    .join("") || emptyRow("no workloads discovered yet", 4);
   return `
     <section class="page-head"><h1>Workloads</h1>
       <span class="subtle">${filtered.length} matched · ${snap.workloads.length} total</span></section>
@@ -533,7 +552,7 @@ function renderProcesses() {
     <div class="table-wrap">
       <table class="table">
         <thead><tr><th>PID</th><th>User</th><th>Command</th><th>CWD</th></tr></thead>
-        <tbody>${groups || emptyRow("no processes")}</tbody>
+        <tbody>${groups || emptyRow("no processes", 4)}</tbody>
       </table>
     </div>
   `;
@@ -701,14 +720,12 @@ function attachToolbarHandlers() {
 }
 
 function attachSortHandlers() {
-  $$(".sortable").forEach((th) =>
-    th.addEventListener("click", () => {
-      const col = th.dataset.sort;
-      if (state.sortCol === col) {
-        setParam("dir", state.sortDir === "asc" ? "desc" : "asc");
-      } else {
-        setParam("sort", col);
-      }
+  $$(".sortable button").forEach((btn) =>
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const col = btn.closest("[data-sort]").dataset.sort;
+      const next = nextSortParams(state.sortCol, state.sortDir, col);
+      setParams(next);
     }),
   );
 }
@@ -1175,8 +1192,8 @@ $("#rawToggle").addEventListener("change", (e) => {
 });
 
 // ─── empty rows / palette ─────────────────────────────────────────
-function emptyRow(msg) {
-  return `<tr><td colspan="6" class="empty-affirm">${esc(msg)}</td></tr>`;
+function emptyRow(msg, colspan = 6) {
+  return `<tr><td colspan="${colspan}" class="empty-affirm">${esc(msg)}</td></tr>`;
 }
 
 function openPalette() {

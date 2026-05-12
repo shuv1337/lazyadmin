@@ -63,7 +63,7 @@ Run `lazyadmin` with no args to launch the Ratatui TUI, or use `lazyadmin tui --
 - `60–79` columns: single pane with view switching
 - `<60` columns: refuses with CLI hints
 
-Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `m`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, and `q`, and interactive dispatch honors configured overrides. Themes and keybindings are configurable; see [`docs/tui.md`](docs/tui.md), [`docs/themes.md`](docs/themes.md), and [`docs/keybindings.md`](docs/keybindings.md). The TUI includes Process Tree and Metrics views, palette reload/theme commands, guarded local URL opening, and copy-diagnostic clipboard/file fallbacks.
+Keybindings include `/`, `:`, `Tab`, `Enter`, `l`, `p`, `t`, `m`, `r`, `s`, `f`, `k`, `o`, `e`, `y`, `S`, `R`, `?`, `q`, `[`, `]`, and `>`, and interactive dispatch honors configured overrides. Themes and keybindings are configurable; see [`docs/tui.md`](docs/tui.md), [`docs/themes.md`](docs/themes.md), and [`docs/keybindings.md`](docs/keybindings.md). The TUI includes Process Tree and Metrics views, palette reload/theme commands, guarded local URL opening, and copy-diagnostic clipboard/file fallbacks. The listener table supports column sorting in both TUI and Web UI.
 
 ## Agent skill
 

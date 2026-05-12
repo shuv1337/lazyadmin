@@ -4870,6 +4870,37 @@ fn sync_row_selection(app: &mut App) {
     }
 }
 
+fn capture_selected_listener_id(app: &App) -> (Option<String>, usize) {
+    let visible = visible_row_indices(app);
+    let old_index = app.selected_row.min(visible.len().saturating_sub(1));
+    let captured_id = visible
+        .get(old_index)
+        .and_then(|idx| app.vm.rows.get(*idx))
+        .map(|row| row.id.clone());
+    (captured_id, old_index)
+}
+
+fn restore_selected_listener_id(app: &mut App, captured_id: Option<String>, old_index: usize) {
+    let visible = visible_row_indices(app);
+    if visible.is_empty() {
+        app.selected_row = 0;
+        sync_row_selection(app);
+        return;
+    }
+    if let Some(id) = captured_id {
+        if let Some(pos) = visible
+            .iter()
+            .position(|idx| app.vm.rows.get(*idx).map(|row| row.id.as_str()) == Some(id.as_str()))
+        {
+            app.selected_row = pos;
+            sync_row_selection(app);
+            return;
+        }
+    }
+    app.selected_row = old_index.min(visible.len().saturating_sub(1));
+    sync_row_selection(app);
+}
+
 fn digest_target_count() -> usize {
     4
 }
@@ -5603,8 +5634,10 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 }
             },
             Command::SortNext => {
+                let (captured_id, old_index) = capture_selected_listener_id(app);
                 app.listener_sort = app.listener_sort.next_column();
                 rebuild_view_model(app, width);
+                restore_selected_listener_id(app, captured_id, old_index);
                 app.set_status(format!(
                     "sorted by {} {}",
                     app.listener_sort.label(),
@@ -5612,8 +5645,10 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 ));
             }
             Command::SortPrev => {
+                let (captured_id, old_index) = capture_selected_listener_id(app);
                 app.listener_sort = app.listener_sort.prev_column();
                 rebuild_view_model(app, width);
+                restore_selected_listener_id(app, captured_id, old_index);
                 app.set_status(format!(
                     "sorted by {} {}",
                     app.listener_sort.label(),
@@ -5621,8 +5656,10 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 ));
             }
             Command::SortToggle => {
+                let (captured_id, old_index) = capture_selected_listener_id(app);
                 app.listener_sort = app.listener_sort.toggle_direction();
                 rebuild_view_model(app, width);
+                restore_selected_listener_id(app, captured_id, old_index);
                 app.set_status(format!(
                     "sorted by {} {}",
                     app.listener_sort.label(),
@@ -8325,5 +8362,343 @@ accent = "#123456"
         assert_eq!(app.theme.name, "high-contrast");
         assert_eq!(app.keybindings.bindings["quit"], vec!["Q"]);
         assert_eq!(app.status.as_deref(), Some("config reloaded"));
+    }
+
+    #[test]
+    fn listener_sort_column_cycling() {
+        let mut sort = ListenerSort::default();
+        assert_eq!(sort.column, ListenerSortColumn::Port);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.next_column();
+        assert_eq!(sort.column, ListenerSortColumn::Bind);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.next_column();
+        assert_eq!(sort.column, ListenerSortColumn::Owner);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.next_column();
+        assert_eq!(sort.column, ListenerSortColumn::Runtime);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.next_column();
+        assert_eq!(sort.column, ListenerSortColumn::Scope);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.next_column();
+        assert_eq!(sort.column, ListenerSortColumn::Port);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.prev_column();
+        assert_eq!(sort.column, ListenerSortColumn::Scope);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.prev_column();
+        assert_eq!(sort.column, ListenerSortColumn::Runtime);
+        assert_eq!(sort.direction, SortDirection::Asc);
+
+        sort = sort.toggle_direction();
+        assert_eq!(sort.column, ListenerSortColumn::Runtime);
+        assert_eq!(sort.direction, SortDirection::Desc);
+
+        sort = sort.toggle_direction();
+        assert_eq!(sort.direction, SortDirection::Asc);
+    }
+
+    #[test]
+    fn sort_listener_rows_ordering() {
+        let mut rows = vec![
+            RowVm {
+                id: "a".into(),
+                port: Some(8080),
+                bind: "0.0.0.0".into(),
+                owner: "o1".into(),
+                runtime: "docker".into(),
+                exposure: "public".into(),
+                project: "p1".into(),
+                ..Default::default()
+            },
+            RowVm {
+                id: "b".into(),
+                port: None,
+                bind: "/tmp/sock".into(),
+                owner: "o2".into(),
+                runtime: "direct".into(),
+                exposure: "loopback".into(),
+                project: "p2".into(),
+                ..Default::default()
+            },
+            RowVm {
+                id: "c".into(),
+                port: Some(3000),
+                bind: "127.0.0.1".into(),
+                owner: "o3".into(),
+                runtime: "systemd".into(),
+                exposure: "loopback".into(),
+                project: "p3".into(),
+                ..Default::default()
+            },
+        ];
+
+        // Port ascending: 3000, 8080, None
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Port,
+                direction: SortDirection::Asc,
+            },
+        );
+        assert_eq!(rows[0].id, "c");
+        assert_eq!(rows[1].id, "a");
+        assert_eq!(rows[2].id, "b");
+
+        // Port descending: None first, then 8080, then 3000
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Port,
+                direction: SortDirection::Desc,
+            },
+        );
+        assert_eq!(rows[0].id, "b");
+        assert_eq!(rows[1].id, "a");
+        assert_eq!(rows[2].id, "c");
+
+        // Bind ascending: '/' (47) < '0' (48) < '1' (49)
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Bind,
+                direction: SortDirection::Asc,
+            },
+        );
+        assert_eq!(rows[0].id, "b"); // /tmp/sock
+        assert_eq!(rows[1].id, "a"); // 0.0.0.0
+        assert_eq!(rows[2].id, "c"); // 127.0.0.1
+
+        // Owner ascending
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Owner,
+                direction: SortDirection::Asc,
+            },
+        );
+        assert_eq!(rows[0].id, "a");
+        assert_eq!(rows[1].id, "b");
+        assert_eq!(rows[2].id, "c");
+
+        // Runtime ascending
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Runtime,
+                direction: SortDirection::Asc,
+            },
+        );
+        assert_eq!(rows[0].id, "b"); // direct
+        assert_eq!(rows[1].id, "a"); // docker
+        assert_eq!(rows[2].id, "c"); // systemd
+
+        // Scope ascending: loopback < public; stable so b,c keep prior order
+        sort_listener_rows(
+            &mut rows,
+            ListenerSort {
+                column: ListenerSortColumn::Scope,
+                direction: SortDirection::Asc,
+            },
+        );
+        assert_eq!(rows[0].id, "b"); // loopback
+        assert_eq!(rows[1].id, "c"); // loopback
+        assert_eq!(rows[2].id, "a"); // public
+    }
+
+    #[test]
+    fn listener_table_header_indicator() {
+        let theme = Theme::default_dark();
+        let header = listener_table_header(
+            &theme,
+            ListenerSort {
+                column: ListenerSortColumn::Bind,
+                direction: SortDirection::Desc,
+            },
+        );
+        let text = format!("{:?}", header);
+        assert!(
+            text.contains("Bind ▼"),
+            "header missing Bind desc indicator: {text}"
+        );
+        assert!(
+            !text.contains("Port ▲"),
+            "header should not show Port asc: {text}"
+        );
+    }
+
+    #[test]
+    fn sort_preserves_selected_listener_identity() {
+        let mut snap = build_empty_snapshot();
+        for offset in 0..3 {
+            let proc = process(2000 + offset, None, offset as u64 + 1);
+            let key = proc.key.clone();
+            snap.processes.push(proc);
+            snap.listeners
+                .push(listener_for_process(key, 8000 + offset as u16));
+        }
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Listeners,
+            selected_row: 1,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        let before_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(before_id, "tcp:127.0.0.1:8001");
+
+        // Sort by Bind (next from Port)
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+            120,
+        );
+        let after_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(
+            after_id, before_id,
+            "sort next must preserve selected listener identity"
+        );
+        assert_eq!(app.listener_sort.column, ListenerSortColumn::Bind);
+
+        // Sort prev back to Port
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            120,
+        );
+        let prev_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(prev_id, before_id);
+        assert_eq!(app.listener_sort.column, ListenerSortColumn::Port);
+
+        // Sort toggle direction
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+            120,
+        );
+        let toggle_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(toggle_id, before_id);
+        assert_eq!(app.listener_sort.direction, SortDirection::Desc);
+    }
+
+    #[test]
+    fn filter_change_clamps_selected_row_via_sync() {
+        // Regression coverage for `sync_row_selection` — when a filter change
+        // makes the previously selected listener invisible, the selection must
+        // clamp into the new visible set without panicking. Sort commands
+        // themselves preserve the full row set, so the dead-id fallback in
+        // `restore_selected_listener_id` is exercised here through the shared
+        // `sync_row_selection` path that sort commands also call.
+        let mut snap = build_empty_snapshot();
+        let proc1 = process(2001, None, 1);
+        let key1 = proc1.key.clone();
+        snap.processes.push(proc1);
+        let mut l1 = listener_for_process(key1, 8080);
+        l1.exposure = Exposure::Public;
+        l1.bind_addr = Some("0.0.0.0".into());
+        snap.listeners.push(l1);
+
+        // Add a true orphan with no owners
+        let now = chrono::Utc::now();
+        snap.listeners.push(Listener {
+            id: ListenerId::new("tcp:127.0.0.1:8081".to_string()),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(8081),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "default".into(),
+            socket_inode: None,
+            exposure: Exposure::Loopback,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: now,
+            last_seen: now,
+            dual_stack_state: DualStackState::NotApplicable,
+        });
+
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap.clone(),
+            active_view: ViewKind::Listeners,
+            listener_filter: ListenerFilter::All,
+            selected_row: 0,
+            ..Default::default()
+        };
+        sync_row_selection(&mut app);
+        assert_eq!(selected_row(&app).unwrap().port, Some(8080));
+
+        // Switch to Orphans filter: the owned listener is no longer visible.
+        app.listener_filter = ListenerFilter::Orphans;
+        rebuild_view_model(&mut app, 120);
+        sync_row_selection(&mut app);
+        assert_eq!(visible_row_indices(&app).len(), 1); // only orphan remains
+        assert_eq!(app.selected_row, 0);
+        assert_eq!(selected_row(&app).unwrap().port, Some(8081));
+    }
+
+    #[test]
+    fn sort_preserves_selection_under_filter() {
+        // When a related-listener filter is active, sorting must still
+        // preserve the selected listener identity rather than the raw index.
+        let mut snap = build_empty_snapshot();
+        for offset in 0..3 {
+            let proc = process(3000 + offset, None, offset as u64 + 1);
+            let key = proc.key.clone();
+            snap.processes.push(proc);
+            // Use descending ports so Port-asc reorders the rows.
+            snap.listeners
+                .push(listener_for_process(key, 9000 - offset as u16));
+        }
+        let mut app = App {
+            vm: build_view_model(&snap, 120, false, ""),
+            snapshot: snap,
+            active_view: ViewKind::Listeners,
+            // Start sorted by Bind so SortNext moves to Owner without
+            // becoming a no-op, and ports stay in snapshot order.
+            listener_sort: ListenerSort {
+                column: ListenerSortColumn::Bind,
+                direction: SortDirection::Asc,
+            },
+            selected_row: 0,
+            ..Default::default()
+        };
+        rebuild_view_model(&mut app, 120);
+        sync_row_selection(&mut app);
+
+        // Select the middle listener (port 8999).
+        app.selected_row = 1;
+        sync_row_selection(&mut app);
+        let before_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(before_id, "tcp:127.0.0.1:8999");
+
+        // Sort by Port ascending: rows reorder to 8998, 8999, 9000.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.listener_sort.column, ListenerSortColumn::Port);
+        let after_id = selected_row(&app).unwrap().id.clone();
+        assert_eq!(
+            after_id, before_id,
+            "sort must follow listener identity, not row index"
+        );
+        // The same listener is now at index 1 in the reordered set
+        // (8998, 8999, 9000), so identity-tracking changed the visible row.
+        let visible = visible_row_indices(&app);
+        let selected_port = app.vm.rows[visible[app.selected_row]].port;
+        assert_eq!(selected_port, Some(8999));
     }
 }

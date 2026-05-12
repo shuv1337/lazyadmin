@@ -18,3 +18,15 @@ The default TUI presentation favors a high-contrast operations console over raw 
 Use `?` for a help overlay sourced from active keybindings and `:` for the command palette surface. The palette supports Process Tree, Metrics, theme switching, and config reload commands. `y` copies a redacted diagnostic to the clipboard and falls back to `$XDG_STATE_HOME/lazyadmin/copies/<timestamp>.md`; `o` opens only loopback listeners on common HTTP ports unless `actions.open_non_loopback = true`.
 
 Search (`/`) filters rendered rows and process-tree labels. `S` toggles system-service visibility by rebuilding the rendered model from the retained snapshot. In Process Tree, `t` opens the tree and pressing `t` on a node toggles expand/collapse while preserving the selected `ProcessKey` across refreshes.
+
+### Listener sorting
+
+The listener table can be sorted by column in both TUI and Web UI:
+
+- `]` moves to the next sortable listener column.
+- `[` moves to the previous sortable listener column.
+- `>` toggles ascending/descending for the active sort column.
+- Active sort is shown in the table header with `▲`/`▼`.
+- Sort commands preserve selected listener identity where possible.
+
+In the Web UI, click (or keyboard-focus and press Enter/Space on) any listener column header to change sort. The active sort is preserved in the URL hash. Switching to a different column always resets direction to ascending. The Web UI exposes `Port`, `Bind`, `Exposure`, `Owner`, `Project`, `Confidence`, and `Warnings` as sortable columns; the TUI exposes `Port`, `Bind`, `Owner`, `Runtime`, and `Scope`.

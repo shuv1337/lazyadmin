@@ -352,11 +352,35 @@ body.with-inspector .main {
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
-  cursor: pointer;
   user-select: none;
 }
-.table th:hover { color: var(--fg); }
+.table th.sortable {
+  padding: 0;
+}
+.table th .sort-button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  padding: 9px 12px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+.table th .sort-button:hover,
+.table th .sort-button:focus {
+  color: var(--fg);
+  outline: none;
+}
+.table th .sort-button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 .table th.sorted { color: var(--accent); }
+.table th.sorted .sort-button { color: var(--accent); }
+.port-cell { text-align: right; font-family: ui-monospace, monospace; }
 .table td {
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.04);

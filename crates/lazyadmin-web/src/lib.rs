@@ -845,4 +845,152 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["code"], "INVALID_ENTITY_KIND");
     }
+
+    #[test]
+    fn app_js_renders_sortable_port_header() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains(r#"thLabel("port", "Port")"#),
+            "missing Port sortable header"
+        );
+        assert!(
+            js.contains(r#"class="mono port-cell""#),
+            "missing Port data cell"
+        );
+    }
+
+    #[test]
+    fn app_js_parse_sort_columns_match_rendered_headers() {
+        // Lock the two listener-table sort surfaces together: every column
+        // accepted by `parseSortFromParams` must be emitted by a matching
+        // `thLabel("<col>", …)` call, and the rendered header set must not
+        // include any column the parser would reject. This prevents the
+        // accept-list and the rendered headers from drifting apart silently.
+        let js = include_str!("../static/app.js");
+
+        let valid_cols = [
+            "port",
+            "bind",
+            "exposure",
+            "owner",
+            "project",
+            "confidence",
+            "warnings",
+        ];
+
+        // Parser-side: the `validCols` literal in `parseSortFromParams`
+        // must match `valid_cols` exactly, in order.
+        let expected_parser_list = format!(
+            "const validCols = [{}];",
+            valid_cols
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        assert!(
+            js.contains(&expected_parser_list),
+            "parseSortFromParams validCols must be exactly {expected_parser_list:?}"
+        );
+
+        // Rendered headers: scrape every `thLabel("<col>", …)` call and
+        // assert it matches the accepted column set.
+        let mut rendered: Vec<&str> = Vec::new();
+        for (idx, _) in js.match_indices("thLabel(\"") {
+            let rest = &js[idx + "thLabel(\"".len()..];
+            if let Some(end) = rest.find('"') {
+                rendered.push(&rest[..end]);
+            }
+        }
+        assert!(
+            !rendered.is_empty(),
+            "no `thLabel(\"<col>\"\u{2026})` calls found in app.js"
+        );
+        for col in valid_cols {
+            assert!(
+                rendered.contains(&col),
+                "sortable column `{col}` is in validCols but not rendered as a header"
+            );
+        }
+        for col in &rendered {
+            assert!(
+                valid_cols.contains(col),
+                "rendered sort column `{col}` is not in `parseSortFromParams` validCols"
+            );
+        }
+    }
+
+    #[test]
+    fn app_js_direction_reset_on_column_change() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("function nextSortParams(currentSortCol, currentSortDir, clickedColumn)"),
+            "missing nextSortParams helper"
+        );
+        assert!(
+            js.contains("return { sort: clickedColumn, dir: \"asc\" }")
+                || js.contains("return { sort: clickedColumn, dir: 'asc' }"),
+            "nextSortParams must reset to asc when changing columns"
+        );
+    }
+
+    #[test]
+    fn app_js_sort_headers_are_accessible_and_keyboard_operable() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("scope=\"col\""),
+            "missing scope=col on sort headers"
+        );
+        assert!(
+            js.contains("aria-sort=\""),
+            "missing aria-sort on sort headers"
+        );
+        assert!(
+            js.contains(r#"<button type="button" class="sort-button">"#),
+            "missing keyboard-operable sort buttons"
+        );
+    }
+
+    #[test]
+    fn app_js_listener_empty_state_uses_correct_colspan() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("emptyRow(\"no listeners discovered yet\", 7)"),
+            "listener empty state must span 7 columns after adding Port"
+        );
+    }
+
+    #[test]
+    fn app_css_has_port_cell_and_sort_button_styles() {
+        let css = include_str!("../static/app.css");
+        assert!(css.contains(".port-cell"), "missing .port-cell style");
+        assert!(css.contains(".sort-button"), "missing .sort-button style");
+    }
+
+    #[test]
+    fn app_css_preserves_padding_for_non_sortable_headers() {
+        // Regression: when the listener table introduced inline
+        // `<button class="sort-button">` headers, the shared `.table th`
+        // rule briefly dropped padding to `0` so the button could own it.
+        // That broke every plain `<th>` in Workloads, Processes, and
+        // Metrics tables. Plain headers must keep their padding; only
+        // sortable headers delegate padding to the inner button.
+        let css = include_str!("../static/app.css");
+        let th_block_start = css
+            .find(".table th {")
+            .expect("missing `.table th {` block");
+        let th_block = &css[th_block_start..];
+        let th_block_end = th_block
+            .find('}')
+            .expect("unterminated `.table th {` block");
+        let th_block = &th_block[..th_block_end];
+        assert!(
+            th_block.contains("padding: 9px 12px"),
+            "`.table th` must keep `padding: 9px 12px` so plain headers render correctly; got: {th_block:?}"
+        );
+        assert!(
+            css.contains(".table th.sortable") && css.contains(".sort-button"),
+            "sortable header rule must override padding via `.table th.sortable` so the button owns layout"
+        );
+    }
 }

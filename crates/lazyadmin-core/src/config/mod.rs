@@ -710,6 +710,27 @@ help = "esc"
     }
 
     #[test]
+    fn keybindings_sort_override_example_parses() {
+        let mut cfg = Config::default();
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("sort_next".into(), "n".into());
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("sort_prev".into(), "N".into());
+        cfg.ui
+            .keybindings
+            .overrides
+            .insert("sort_toggle".into(), ".".into());
+        let resolved = keybindings::ResolvedKeybindings::from_config(&cfg).unwrap();
+        assert_eq!(resolved.bindings["sort_next"], vec!["n"]);
+        assert_eq!(resolved.bindings["sort_prev"], vec!["N"]);
+        assert_eq!(resolved.bindings["sort_toggle"], vec!["."]);
+    }
+
+    #[test]
     fn partial_nested_adapter_config_merges_with_defaults() {
         let path = std::env::temp_dir().join(format!(
             "lazyadmin-partial-adapter-config-{}.toml",
