@@ -24,6 +24,7 @@ use lazyadmin_core::{
     output::listener_rows,
     selector::{Selector, parse_selector},
 };
+use lazyadmin_runtime::view_model::search::{SearchKinds, SearchOptions, SearchResults};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
@@ -80,6 +81,7 @@ enum Command {
     Events(EventsArgs),
     Export,
     Diff(DiffArgs),
+    Search(SearchArgs),
     Run(RunArgs),
     Runs {
         #[arg(long)]
@@ -167,6 +169,28 @@ struct EventsArgs {
     once: bool,
     #[arg(long)]
     follow: bool,
+}
+
+#[derive(Args, Debug)]
+struct SearchArgs {
+    /// The search query (text, port number, or PID)
+    query: String,
+    /// Filter results to a specific entity kind
+    #[arg(long, value_enum)]
+    kind: Option<SearchEntityKind>,
+    /// Maximum number of results per group
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum SearchEntityKind {
+    Listeners,
+    Processes,
+    Workloads,
+    Projects,
+    Managers,
+    All,
 }
 
 #[derive(Args, Debug)]
@@ -315,6 +339,9 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             run_pause_restart(&selector, cli.json, true).await
         }
         Some(Command::Free(args)) => run_free(args, cli.json).await,
+        Some(Command::Search(args)) => {
+            run_search_command(args, cli.json, cli.config.as_deref()).await
+        }
     }
 }
 
@@ -541,6 +568,221 @@ async fn run_events(
 
 fn unavailable<T>(msg: impl Into<String>) -> std::result::Result<T, AppError> {
     Err(AppError::Unavailable(msg.into()))
+}
+
+async fn run_search_command(
+    args: SearchArgs,
+    json: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let span = info_span!(
+        "cli.search",
+        query_len = args.query.len(),
+        kind_filter = ?args.kind,
+    );
+    let _guard = span.enter();
+
+    let snap = build_snapshot(config_path).await?;
+
+    let kinds = match args.kind {
+        None | Some(SearchEntityKind::All) => SearchKinds::default(),
+        Some(SearchEntityKind::Listeners) => SearchKinds {
+            listeners: true,
+            processes: false,
+            workloads: false,
+            projects: false,
+            managers: false,
+            rail_views: false,
+        },
+        Some(SearchEntityKind::Processes) => SearchKinds {
+            listeners: false,
+            processes: true,
+            workloads: false,
+            projects: false,
+            managers: false,
+            rail_views: false,
+        },
+        Some(SearchEntityKind::Workloads) => SearchKinds {
+            listeners: false,
+            processes: false,
+            workloads: true,
+            projects: false,
+            managers: false,
+            rail_views: false,
+        },
+        Some(SearchEntityKind::Projects) => SearchKinds {
+            listeners: false,
+            processes: false,
+            workloads: false,
+            projects: true,
+            managers: false,
+            rail_views: false,
+        },
+        Some(SearchEntityKind::Managers) => SearchKinds {
+            listeners: false,
+            processes: false,
+            workloads: false,
+            projects: false,
+            managers: true,
+            rail_views: false,
+        },
+    };
+
+    let limit = args
+        .limit
+        .unwrap_or(lazyadmin_runtime::view_model::search::DEFAULT_SEARCH_LIMIT);
+
+    let options = SearchOptions {
+        limit,
+        show_system: true,
+        kinds,
+    };
+
+    let results = lazyadmin_runtime::view_model::search::run(&snap, &args.query, options);
+
+    if json {
+        print_json(&results)?;
+    } else {
+        print_search_human(&results);
+    }
+    Ok(())
+}
+
+fn print_search_human(results: &SearchResults) {
+    if !results.strategy_hint.is_empty() {
+        println!("strategy: {}", results.strategy_hint);
+    }
+
+    let total_hits = results.listeners.total
+        + results.processes.total
+        + results.workloads.total
+        + results.projects.total
+        + results.managers.total
+        + results.rail_views.total;
+
+    if total_hits == 0 {
+        println!("no results");
+        return;
+    }
+
+    // Listeners
+    if !results.listeners.hits.is_empty() {
+        println!(
+            "\nListeners ({}/{})",
+            results.listeners.returned, results.listeners.total
+        );
+        for hit in &results.listeners.hits {
+            let owner = if hit.owner_label.is_empty() {
+                String::new()
+            } else {
+                format!("  owner={}", hit.owner_label)
+            };
+            println!(
+                "  [{:>5}] {:>5} {:6} {:<24} {:?}{}",
+                hit.score,
+                hit.port.map(|p| p.to_string()).unwrap_or_default(),
+                format!("{:?}", hit.protocol).to_lowercase(),
+                hit.bind,
+                hit.exposure,
+                owner,
+            );
+        }
+        if results.listeners.truncated {
+            println!(
+                "  … +{} more",
+                results.listeners.total - results.listeners.returned
+            );
+        }
+    }
+
+    // Processes
+    if !results.processes.hits.is_empty() {
+        println!(
+            "\nProcesses ({}/{})",
+            results.processes.returned, results.processes.total
+        );
+        for hit in &results.processes.hits {
+            let user = hit.user.as_deref().unwrap_or("-");
+            println!(
+                "  [{:>5}] pid={:<6} user={:<12} {}",
+                hit.score, hit.pid, user, hit.exe_or_argv0,
+            );
+        }
+        if results.processes.truncated {
+            println!(
+                "  … +{} more",
+                results.processes.total - results.processes.returned
+            );
+        }
+    }
+
+    // Workloads
+    if !results.workloads.hits.is_empty() {
+        println!(
+            "\nWorkloads ({}/{})",
+            results.workloads.returned, results.workloads.total
+        );
+        for hit in &results.workloads.hits {
+            println!(
+                "  [{:>5}] {:<24} runtime={} listeners={} pids={}",
+                hit.score, hit.display_name, hit.runtime, hit.listener_count, hit.pid_count,
+            );
+        }
+        if results.workloads.truncated {
+            println!(
+                "  … +{} more",
+                results.workloads.total - results.workloads.returned
+            );
+        }
+    }
+
+    // Projects
+    if !results.projects.hits.is_empty() {
+        println!(
+            "\nProjects ({}/{})",
+            results.projects.returned, results.projects.total
+        );
+        for hit in &results.projects.hits {
+            println!(
+                "  [{:>5}] {:<24} {}",
+                hit.score,
+                hit.name,
+                hit.root.display(),
+            );
+        }
+        if results.projects.truncated {
+            println!(
+                "  … +{} more",
+                results.projects.total - results.projects.returned
+            );
+        }
+    }
+
+    // Managers
+    if !results.managers.hits.is_empty() {
+        println!(
+            "\nManagers ({}/{})",
+            results.managers.returned, results.managers.total
+        );
+        for hit in &results.managers.hits {
+            let avail = if hit.available { "up" } else { "down" };
+            println!(
+                "  [{:>5}] {:<24} kind={} scope={} {}",
+                hit.score, hit.name, hit.kind, hit.scope, avail,
+            );
+        }
+        if results.managers.truncated {
+            println!(
+                "  … +{} more",
+                results.managers.total - results.managers.returned
+            );
+        }
+    }
+
+    println!(
+        "\n({total_hits} total matches, {:.1}ms)",
+        results.elapsed_ms
+    );
 }
 
 async fn build_snapshot(
@@ -2459,5 +2701,82 @@ mod tests {
             last_seen: chrono::Utc::now(),
             dual_stack_state: DualStackState::NotApplicable,
         }
+    }
+
+    #[test]
+    fn search_empty_query_returns_empty_groups() {
+        let snap = Snapshot::empty();
+        let results =
+            lazyadmin_runtime::view_model::search::run(&snap, "", SearchOptions::default());
+        assert_eq!(results.schema_version, "lazyadmin.search.v1");
+        assert_eq!(
+            results.query.kind,
+            lazyadmin_runtime::view_model::search::SearchKind::Empty
+        );
+        assert_eq!(results.listeners.total, 0);
+        assert_eq!(results.processes.total, 0);
+        assert!(results.strategy_hint.is_empty());
+    }
+
+    #[test]
+    fn search_port_query_finds_listener() {
+        let mut snap = Snapshot::empty();
+        let pk = process_key(42, 1);
+        snap.processes.push(process(pk.clone(), None, vec!["node"]));
+        snap.listeners.push(listener(
+            ListenerId::new("tcp:127.0.0.1:5432:1"),
+            5432,
+            vec![EntityRef::Process(pk)],
+        ));
+
+        let results =
+            lazyadmin_runtime::view_model::search::run(&snap, "5432", SearchOptions::default());
+        assert_eq!(results.listeners.total, 1);
+        assert_eq!(results.listeners.hits[0].port, Some(5432));
+        assert_eq!(results.strategy_hint, "port :5432");
+        assert!(!results.fell_back_to_prefix);
+    }
+
+    #[test]
+    fn search_text_query_json_roundtrip() {
+        let snap = Snapshot::empty();
+        let results =
+            lazyadmin_runtime::view_model::search::run(&snap, "hermes", SearchOptions::default());
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["schema_version"], "lazyadmin.search.v1");
+        assert_eq!(json["query"]["kind"]["type"], "text");
+        assert_eq!(json["strategy_hint"], "text query");
+    }
+
+    #[test]
+    fn search_kind_filter_restricts_groups() {
+        let mut snap = Snapshot::empty();
+        let pk = process_key(100, 10);
+        snap.processes
+            .push(process(pk.clone(), None, vec!["hermes"]));
+        snap.listeners.push(listener(
+            ListenerId::new("tcp:127.0.0.1:7777:1"),
+            7777,
+            vec![EntityRef::Process(pk)],
+        ));
+
+        // Search with only listeners enabled
+        let results = lazyadmin_runtime::view_model::search::run(
+            &snap,
+            "hermes",
+            SearchOptions {
+                kinds: SearchKinds {
+                    listeners: true,
+                    processes: false,
+                    workloads: false,
+                    projects: false,
+                    managers: false,
+                    rail_views: false,
+                },
+                ..Default::default()
+            },
+        );
+        // Processes group should be empty since we disabled it
+        assert_eq!(results.processes.total, 0);
     }
 }
