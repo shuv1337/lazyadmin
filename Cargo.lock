@@ -1744,6 +1744,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "fuzzy-matcher",
  "lazyadmin-adapter-container",
  "lazyadmin-adapter-portless",
  "lazyadmin-adapter-procfs",

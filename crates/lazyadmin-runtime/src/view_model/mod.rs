@@ -5,6 +5,7 @@ pub mod digest;
 pub mod doctor_groups;
 pub mod header_pip;
 pub mod inspector;
+pub mod search;
 
 pub use digest::{
     ConflictsSection, Digest, DigestViewTarget, ExposedRow, ExposedSection, ProjectRow,
@@ -15,6 +16,11 @@ pub use doctor_groups::{
 };
 pub use header_pip::{AdapterHealth, DropRate, HeaderPip, SnapshotFreshness};
 pub use inspector::InspectorView;
+pub use search::{
+    DEFAULT_SEARCH_LIMIT, ListenerHit, MAX_SEARCH_LIMIT, ManagerHit, ProcessHit, ProjectHit,
+    RailViewHit, SEARCH_SCHEMA_VERSION, SearchGroup, SearchHitRef, SearchKind, SearchKinds,
+    SearchOptions, SearchQuery, SearchResults, WorkloadHit, run, search_hit_at, search_hit_count,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RailEntry {
