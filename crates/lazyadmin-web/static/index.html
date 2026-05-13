@@ -12,16 +12,23 @@
     <span class="brand-name">lazyadmin</span>
     <span class="brand-host" id="hostLabel">localhost</span>
   </div>
+  <div class="global-search-shell">
+    <label for="global-search" class="global-search-icon" aria-hidden="true">🔎</label>
+    <input id="global-search" type="search" autocomplete="off" placeholder="search listeners or processes (try 5432 or hermes)">
+    <span id="global-search-hint" class="global-search-hint"></span>
+  </div>
   <nav class="rail" id="rail" aria-label="primary"></nav>
   <div class="status" id="statusBlock">
     <span class="pip" id="pipDot" data-state="loading" aria-hidden="true"></span>
     <span class="pip-label" id="pipLabel">connecting…</span>
     <span class="pip-meta" id="pipMeta"></span>
-    <button type="button" class="palette-trigger" id="paletteTrigger" title="Search (press /)">
-      <kbd>/</kbd> search
+    <button type="button" class="palette-trigger" id="paletteTrigger" title="Palette (Ctrl+K)">
+      <kbd>⌘K</kbd> palette
     </button>
   </div>
 </header>
+
+<div id="globalSearchResults" class="global-search-results" hidden></div>
 
 <main id="main" class="main">
   <section id="page" class="page" aria-live="polite"></section>

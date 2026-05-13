@@ -21,7 +21,7 @@ use lazyadmin_core::{
     config::Config,
     model::{DiscoveryEvent, Snapshot},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
@@ -160,6 +160,7 @@ fn app(state: AppState) -> Router {
         .route("/rail", get(rail))
         .route("/header_pip", get(header_pip))
         .route("/inspector", get(inspector))
+        .route("/search", get(search))
         .route("/events", get(events))
         .route("/views/overview", get(overview))
         .route("/entities/:kind/:id", get(entity))
@@ -341,6 +342,41 @@ async fn header_pip(State(state): State<AppState>) -> impl IntoResponse {
             None,
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct SearchQueryParams {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchQueryParams>,
+) -> impl IntoResponse {
+    let snapshot = match state.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SNAPSHOT_FAILED",
+                e.to_string(),
+                None,
+            );
+        }
+    };
+    let query = params.q.unwrap_or_default();
+    let limit = params
+        .limit
+        .unwrap_or(lazyadmin_runtime::view_model::DEFAULT_SEARCH_LIMIT)
+        .min(lazyadmin_runtime::view_model::MAX_SEARCH_LIMIT);
+    let options = lazyadmin_runtime::view_model::SearchOptions {
+        limit,
+        show_system: true,
+        ..Default::default()
+    };
+    let results = lazyadmin_runtime::view_model::run(&snapshot, &query, options);
+    Json(results).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -992,5 +1028,94 @@ mod tests {
             css.contains(".table th.sortable") && css.contains(".sort-button"),
             "sortable header rule must override padding via `.table th.sortable` so the button owns layout"
         );
+    }
+
+    #[tokio::test]
+    async fn search_route_returns_expected_schema() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        let response = app
+            .clone()
+            .oneshot(local_request("/api/search?q=5432"))
+            .await
+            .expect("search response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(
+            body["schema_version"], "lazyadmin.search.v1",
+            "search must return schema_version"
+        );
+        assert!(body.get("query").is_some(), "missing query field");
+        assert!(body.get("listeners").is_some(), "missing listeners field");
+        assert!(body.get("processes").is_some(), "missing processes field");
+        assert!(
+            body.get("strategy_hint").is_some(),
+            "missing strategy_hint field"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_route_clamps_limit() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        let response = app
+            .clone()
+            .oneshot(local_request("/api/search?q=test&limit=9999"))
+            .await
+            .expect("search response");
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify the response came back fine (limit clamped internally)
+        let body = json_body(response).await;
+        assert_eq!(body["schema_version"], "lazyadmin.search.v1");
+    }
+
+    #[tokio::test]
+    async fn search_empty_query_returns_empty_groups() {
+        use tower::ServiceExt;
+        let app = build_test_app().await;
+        let response = app
+            .clone()
+            .oneshot(local_request("/api/search?q="))
+            .await
+            .expect("search response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["query"]["kind"]["type"], "empty");
+        assert_eq!(body["listeners"]["total"], 0);
+        assert_eq!(body["processes"]["total"], 0);
+    }
+
+    #[test]
+    fn app_js_references_api_search() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("/api/search"),
+            "app.js must reference /api/search endpoint"
+        );
+    }
+
+    #[test]
+    fn app_js_has_no_inline_js_in_html() {
+        let html = include_str!("../static/index.html");
+        // Ensure global search input exists
+        assert!(
+            html.contains("id=\"global-search\""),
+            "missing global search input"
+        );
+        // Ensure no inline JS
+        assert!(
+            !html.contains("onclick=") && !html.contains("oninput="),
+            "no inline JS event handlers allowed in HTML"
+        );
+    }
+
+    #[test]
+    fn app_css_has_global_search_styles() {
+        let css = include_str!("../static/app.css");
+        assert!(
+            css.contains(".global-search-shell"),
+            "missing .global-search-shell style"
+        );
+        assert!(css.contains(".search-hit"), "missing .search-hit style");
     }
 }

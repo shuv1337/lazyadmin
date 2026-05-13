@@ -1191,6 +1191,223 @@ $("#rawToggle").addEventListener("change", (e) => {
   if (state.selected) openInspector(state.selected.kind, state.selected.id);
 });
 
+// ─── global search ────────────────────────────────────────────────
+const globalSearchState = {
+  query: "",
+  results: null,
+  debounceTimer: null,
+  abortController: null,
+};
+
+function initGlobalSearch() {
+  const input = $("#global-search");
+  if (!input) return;
+  input.addEventListener("input", onGlobalSearchInput);
+  input.addEventListener("keydown", onGlobalSearchKeydown);
+  // Auto-focus on load
+  input.focus();
+}
+
+function onGlobalSearchInput(e) {
+  const query = e.target.value;
+  globalSearchState.query = query;
+  clearTimeout(globalSearchState.debounceTimer);
+  if (globalSearchState.abortController) {
+    globalSearchState.abortController.abort();
+    globalSearchState.abortController = null;
+  }
+  if (!query.trim()) {
+    globalSearchState.results = null;
+    renderGlobalSearchResults();
+    return;
+  }
+  globalSearchState.debounceTimer = setTimeout(() => fetchGlobalSearch(query), 300);
+}
+
+function onGlobalSearchKeydown(e) {
+  if (e.key === "Escape") {
+    e.target.value = "";
+    globalSearchState.query = "";
+    globalSearchState.results = null;
+    renderGlobalSearchResults();
+    e.target.blur();
+  }
+}
+
+async function fetchGlobalSearch(query) {
+  const controller = new AbortController();
+  globalSearchState.abortController = controller;
+  try {
+    const url = `/api/search?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    // Only render if the query hasn't changed while we were fetching
+    if (globalSearchState.query === query) {
+      globalSearchState.results = data;
+      renderGlobalSearchResults();
+    }
+  } catch (err) {
+    if (err.name !== "AbortError") {
+      console.error("search fetch failed:", err);
+    }
+  }
+}
+
+function renderGlobalSearchResults() {
+  const container = $("#globalSearchResults");
+  const hint = $("#global-search-hint");
+  if (!container) return;
+
+  const results = globalSearchState.results;
+  if (!results || !globalSearchState.query.trim()) {
+    container.hidden = true;
+    container.innerHTML = "";
+    if (hint) hint.textContent = "";
+    return;
+  }
+
+  // Update strategy hint
+  if (hint) {
+    const total = (results.listeners?.total || 0) + (results.processes?.total || 0)
+      + (results.workloads?.total || 0) + (results.projects?.total || 0)
+      + (results.managers?.total || 0) + (results.rail_views?.total || 0);
+    const parts = [];
+    if (results.strategy_hint) parts.push(results.strategy_hint);
+    parts.push(`${total} matched`);
+    hint.textContent = parts.join(" · ");
+  }
+
+  const sections = [];
+
+  if (results.listeners?.hits?.length) {
+    sections.push(renderSearchGroup("Listeners", results.listeners, (hit) =>
+      `<div class="search-hit" data-search-kind="listener" data-search-id="${esc(hit.id)}">
+        <span class="kind-badge">:${hit.port ?? "—"}</span>
+        <span class="hit-label">${esc(hit.bind)}<div class="secondary">${esc(hit.owner_label)} · ${esc(String(hit.exposure))}</div></span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (results.processes?.hits?.length) {
+    sections.push(renderSearchGroup("Processes", results.processes, (hit) =>
+      `<div class="search-hit" data-search-kind="process" data-search-id='${esc(JSON.stringify(hit.key))}'>
+        <span class="kind-badge">pid ${hit.pid}</span>
+        <span class="hit-label">${esc(hit.exe_or_argv0)}<div class="secondary">${esc(hit.cmdline_compact?.slice(0, 120) || "")}</div></span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (results.workloads?.hits?.length) {
+    sections.push(renderSearchGroup("Workloads", results.workloads, (hit) =>
+      `<div class="search-hit" data-search-kind="workload" data-search-id="${esc(hit.id)}">
+        <span class="kind-badge">${esc(hit.runtime)}</span>
+        <span class="hit-label">${esc(hit.display_name)}<div class="secondary">${hit.listener_count} listeners · ${hit.pid_count} pids</div></span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (results.projects?.hits?.length) {
+    sections.push(renderSearchGroup("Projects", results.projects, (hit) =>
+      `<div class="search-hit" data-search-kind="project" data-search-id="${esc(hit.id)}">
+        <span class="kind-badge">proj</span>
+        <span class="hit-label">${esc(hit.name)}<div class="secondary">${esc(hit.root)}</div></span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (results.managers?.hits?.length) {
+    sections.push(renderSearchGroup("Managers", results.managers, (hit) =>
+      `<div class="search-hit" data-search-kind="manager" data-search-id="${esc(hit.id)}">
+        <span class="kind-badge">${esc(hit.kind)}</span>
+        <span class="hit-label">${esc(hit.name)}<div class="secondary">${esc(hit.scope)} · ${hit.available ? "available" : "unavailable"}</div></span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (results.rail_views?.hits?.length) {
+    sections.push(renderSearchGroup("Views", results.rail_views, (hit) =>
+      `<div class="search-hit" data-search-kind="rail_view" data-search-id="${esc(hit.id)}">
+        <span class="kind-badge">view</span>
+        <span class="hit-label">${esc(hit.label)}</span>
+        <span class="hit-score">${hit.score}</span>
+      </div>`
+    ));
+  }
+
+  if (sections.length === 0) {
+    container.innerHTML = `<div class="search-results-panel"><div class="search-empty">no results for "${esc(globalSearchState.query)}"</div></div>`;
+  } else {
+    container.innerHTML = `<div class="search-results-panel">${sections.join("")}</div>`;
+  }
+  container.hidden = false;
+  attachSearchResultHandlers();
+}
+
+function renderSearchGroup(title, group, rowFn) {
+  const countLabel = group.truncated
+    ? `${group.returned}/${group.total}`
+    : `${group.total}`;
+  const rows = group.hits.map(rowFn).join("");
+  const truncated = group.truncated
+    ? `<div class="search-truncated">… +${group.total - group.returned} more</div>`
+    : "";
+  return `<div class="search-group">
+    <div class="search-group-head"><span>${esc(title)}</span><span class="count">${countLabel}</span></div>
+    ${rows}
+    ${truncated}
+  </div>`;
+}
+
+function attachSearchResultHandlers() {
+  $$("#globalSearchResults .search-hit").forEach((el) =>
+    el.addEventListener("click", () => {
+      const kind = el.dataset.searchKind;
+      const id = el.dataset.searchId;
+      handleSearchHitClick(kind, id);
+    }),
+  );
+}
+
+function handleSearchHitClick(kind, id) {
+  // Clear search results after navigation
+  globalSearchState.results = null;
+  renderGlobalSearchResults();
+  switch (kind) {
+    case "listener":
+      navigate("listeners", { selected: id });
+      openInspector("listener", id);
+      break;
+    case "process":
+      navigate("processes", {});
+      openInspector("process", id);
+      break;
+    case "workload":
+      navigate("workloads", {});
+      openInspector("workload", id);
+      break;
+    case "project":
+      navigate("workloads", { project: id });
+      break;
+    case "manager":
+      openInspector("manager", id);
+      break;
+    case "rail_view":
+      navigate(id);
+      break;
+  }
+}
+
+initGlobalSearch();
+
 // ─── empty rows / palette ─────────────────────────────────────────
 function emptyRow(msg, colspan = 6) {
   return `<tr><td colspan="${colspan}" class="empty-affirm">${esc(msg)}</td></tr>`;
@@ -1261,7 +1478,11 @@ $("#paletteForm").addEventListener("submit", (e) => {
 });
 $("#paletteInput").addEventListener("input", (e) => renderPaletteResults(e.target.value));
 window.addEventListener("keydown", (e) => {
-  if ((e.key === "/" || (e.key === "k" && (e.metaKey || e.ctrlKey))) && !isTextInput(e.target)) {
+  if (e.key === "/" && !isTextInput(e.target)) {
+    e.preventDefault();
+    const searchInput = $("#global-search");
+    if (searchInput) searchInput.focus();
+  } else if ((e.key === "k" && (e.metaKey || e.ctrlKey)) && !isTextInput(e.target)) {
     e.preventDefault();
     openPalette();
   } else if (e.key === "Escape" && $("#palette").open) {
