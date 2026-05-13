@@ -24,8 +24,12 @@ use lazyadmin_core::{
     snapshot::build_empty_snapshot,
 };
 use lazyadmin_runtime::view_model::{
-    Digest, HeaderPip, InspectorView, RAIL_ENTRIES, build_digest, build_doctor_groups,
+    Digest, HeaderPip, InspectorView, RAIL_ENTRIES, SearchResults, build_digest,
+    build_doctor_groups,
     inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
+    search::{
+        SearchHitRef, SearchOptions as RuntimeSearchOptions, run as run_search, search_hit_at,
+    },
 };
 use ratatui::{
     Terminal,
@@ -85,6 +89,8 @@ pub struct App {
     pub status: Option<String>,
     pub toasts: VecDeque<Toast>,
     pub allow_open_non_loopback: bool,
+    pub return_view_on_clear: Option<ViewKind>,
+    pub search_origin_view: ViewKind,
     selected_row: usize,
     selected_process: Option<ProcessKey>,
     collapsed_processes: HashSet<ProcessKey>,
@@ -186,6 +192,8 @@ impl Default for App {
             status: None,
             toasts: VecDeque::new(),
             allow_open_non_loopback: false,
+            return_view_on_clear: None,
+            search_origin_view: ViewKind::Overview,
             selected_row: 0,
             selected_process: None,
             collapsed_processes: HashSet::new(),
@@ -257,6 +265,7 @@ pub enum ViewKind {
     Doctor,
     ProcessTree,
     Metrics,
+    Search,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ListenerFilter {
@@ -365,11 +374,12 @@ pub enum Pane {
     Rows,
     Inspector,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
     #[default]
     Normal,
     Filter,
+    Search,
     Palette,
     Help,
 }
@@ -385,6 +395,7 @@ pub struct Confirmation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Filter,
+    Search,
     Palette,
     NextPane,
     PrevPane,
@@ -959,6 +970,7 @@ pub struct ViewModel {
     pub degraded: Option<String>,
     pub events_dropped: u64,
     pub listener_sort: ListenerSort,
+    pub search: SearchResults,
 }
 
 impl Default for ViewModel {
@@ -984,6 +996,7 @@ impl Default for ViewModel {
             degraded: None,
             events_dropped: 0,
             listener_sort: ListenerSort::default(),
+            search: SearchResults::default(),
         }
     }
 }
@@ -1471,6 +1484,15 @@ pub fn build_view_model_with_state(
             .and_then(|m| m.events_dropped)
             .unwrap_or(0),
         listener_sort,
+        search: run_search(
+            snapshot,
+            filter,
+            RuntimeSearchOptions {
+                limit: lazyadmin_runtime::view_model::search::DEFAULT_SEARCH_LIMIT,
+                show_system,
+                ..RuntimeSearchOptions::default()
+            },
+        ),
     }
 }
 
@@ -2341,7 +2363,7 @@ fn action_to_command(action: KeybindAction) -> Option<Command> {
         KeybindAction::NextPane => Command::NextPane,
         KeybindAction::PrevPane => Command::PrevPane,
         KeybindAction::OpenPalette => Command::Palette,
-        KeybindAction::Filter | KeybindAction::ToggleFilter => Command::Filter,
+        KeybindAction::Filter | KeybindAction::ToggleFilter => Command::Search,
         KeybindAction::ToggleSystem => Command::ToggleSystem,
         KeybindAction::Inspect => Command::Inspect,
         KeybindAction::Logs => Command::Logs,
@@ -2395,7 +2417,7 @@ fn normalize_key_spec(spec: &str) -> String {
 #[allow(dead_code)]
 fn key_to_command_hardcoded_legacy(key: KeyEvent) -> Option<Command> {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('/'), _) => Some(Command::Filter),
+        (KeyCode::Char('/'), _) => Some(Command::Search),
         (KeyCode::Char(':'), _) => Some(Command::Palette),
         (KeyCode::Tab, _) => Some(Command::NextPane),
         (KeyCode::BackTab, _) => Some(Command::PrevPane),
@@ -2491,6 +2513,9 @@ pub fn render(view_model: &ViewModel, frame: &mut ratatui::Frame<'_>, area: Rect
             listener_filter: ListenerFilter::All,
             listeners_hint_visible: false,
             related_listener_filter: None,
+            query: "",
+            input_mode: InputMode::Normal,
+            search_origin_view: ViewKind::Overview,
         },
     );
 }
@@ -2531,6 +2556,7 @@ pub fn parse_view_kind(value: &str) -> Option<ViewKind> {
         "doctor" | "warnings" => Some(ViewKind::Doctor),
         "process tree" | "tree" => Some(ViewKind::ProcessTree),
         "metrics" => Some(ViewKind::Metrics),
+        "search" => Some(ViewKind::Search),
         _ => None,
     }
 }
@@ -2553,6 +2579,7 @@ fn title_for_view(view: ViewKind) -> &'static str {
         ViewKind::ProcessTree => "Process Tree",
         ViewKind::Metrics => "Metrics",
         ViewKind::Everything => "Everything",
+        ViewKind::Search => "Search",
     }
 }
 
@@ -2566,6 +2593,7 @@ fn canonical_rail_view(view: ViewKind) -> ViewKind {
         | ViewKind::TrackedRuns => ViewKind::Listeners,
         ViewKind::Projects | ViewKind::Managers => ViewKind::Workloads,
         ViewKind::Logs | ViewKind::ProcessTree => ViewKind::Processes,
+        ViewKind::Search => ViewKind::Overview,
         other => other,
     }
 }
@@ -2603,6 +2631,7 @@ fn cli_hints_for_view(view: ViewKind) -> &'static [&'static str] {
         ViewKind::ProcessTree => &["lazyadmin ps --json"],
         ViewKind::Metrics => &["lazyadmin export --json"],
         ViewKind::Managers => &["lazyadmin ps --json"],
+        ViewKind::Search => &["lazyadmin search <query> --json"],
     }
 }
 
@@ -2933,6 +2962,9 @@ struct RenderContext<'a> {
     listener_filter: ListenerFilter,
     listeners_hint_visible: bool,
     related_listener_filter: Option<&'a RelatedListenerFilter>,
+    query: &'a str,
+    input_mode: InputMode,
+    search_origin_view: ViewKind,
 }
 
 fn render_view_kind(
@@ -2973,13 +3005,15 @@ fn render_view_kind(
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
         .split(area);
-    render_header(view_model, frame, vertical[0], theme, ctx.view);
-    let body = vertical[1];
+    render_search_bar(view_model, frame, vertical[0], theme, ctx);
+    render_header(view_model, frame, vertical[1], theme, ctx.view);
+    let body = vertical[2];
     let chunks = match view_model.layout {
         LayoutMode::ThreePane => Layout::default()
             .direction(Direction::Horizontal)
@@ -3057,7 +3091,7 @@ fn render_view_kind(
     } else {
         render_main_pane(view_model, frame, chunks[0], theme, ctx, true);
     }
-    render_footer_hints(view_model, frame, vertical[2], theme, ctx);
+    render_footer_hints(view_model, frame, vertical[3], theme, ctx);
 }
 
 fn footer_hint_line(
@@ -3065,12 +3099,17 @@ fn footer_hint_line(
     ctx: RenderContext<'_>,
     theme: &Theme,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(
+    let hint_text = if ctx.input_mode == InputMode::Search {
+        "[/] focus search   [enter] open result   [esc] clear   [tab] pane   [q] quit"
+    } else {
         match ctx.active_pane {
             Pane::Groups => "[↑↓] views   [enter] open   [tab] pane",
-            Pane::Rows => "[?] help   [:] palette   [/] filter   [enter] inspect   [q] quit",
+            Pane::Rows => "[?] help   [:] palette   [/] search   [enter] inspect   [q] quit",
             Pane::Inspector => "[1-9] jump   [v] view related   [tab] pane   [q] quit",
-        },
+        }
+    };
+    let mut spans = vec![Span::styled(
+        hint_text,
         Style::default()
             .fg(theme.footer.color())
             .bg(theme.base_bg.color()),
@@ -3110,6 +3149,107 @@ fn render_footer_hints(
                 .fg(theme.footer.color())
                 .bg(theme.base_bg.color()),
         ),
+        area,
+    );
+}
+
+fn render_search_bar(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    ctx: RenderContext<'_>,
+) {
+    let is_focused = ctx.input_mode == InputMode::Search;
+    let query = ctx.query;
+    let total_hits = view_model.search.search_hit_count();
+
+    let mut left_spans: Vec<Span<'static>> = Vec::new();
+
+    if is_focused {
+        left_spans.push(Span::styled(
+            "> ",
+            Style::default()
+                .fg(theme.accent.color())
+                .bg(theme.base_bg.color()),
+        ));
+        if query.is_empty() {
+            left_spans.push(Span::styled(
+                "search listeners, processes, workloads…",
+                Style::default()
+                    .fg(theme.footer.color())
+                    .bg(theme.base_bg.color())
+                    .add_modifier(Modifier::DIM),
+            ));
+        } else {
+            left_spans.push(Span::styled(
+                query.to_string(),
+                Style::default()
+                    .fg(theme.base_fg.color())
+                    .bg(theme.base_bg.color()),
+            ));
+            left_spans.push(Span::styled(
+                "█",
+                Style::default()
+                    .fg(theme.accent.color())
+                    .bg(theme.base_bg.color()),
+            ));
+        }
+    } else if query.is_empty() {
+        left_spans.push(Span::styled(
+            "Press / to search listeners + processes",
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::DIM),
+        ));
+    } else {
+        left_spans.push(Span::styled(
+            "> ",
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ));
+        left_spans.push(Span::styled(
+            query.to_string(),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ));
+    }
+
+    // Right-aligned hint: strategy + hit count
+    let mut right_text = String::new();
+    if !query.is_empty() {
+        if !view_model.search.strategy_hint.is_empty() {
+            right_text.push_str(&view_model.search.strategy_hint);
+            right_text.push_str("  ");
+        }
+        right_text.push_str(&format!("{} matched", total_hits));
+    }
+
+    // Calculate how much space the left side uses
+    let left_width: usize = left_spans.iter().map(|s| s.content.len()).sum();
+    let right_width = right_text.len();
+    let available = area.width as usize;
+
+    let mut spans = left_spans;
+    if !right_text.is_empty() && left_width + right_width + 2 <= available {
+        let padding = available.saturating_sub(left_width + right_width);
+        spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().bg(theme.base_bg.color()),
+        ));
+        spans.push(Span::styled(
+            right_text,
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.base_bg.color())),
         area,
     );
 }
@@ -3185,6 +3325,9 @@ fn render_main_pane(
             theme,
             active,
         ),
+        ViewKind::Search => {
+            render_search_view(view_model, frame, area, theme, active, ctx.selected_row)
+        }
         _ => render_rows_table(
             view_model,
             frame,
@@ -4507,6 +4650,14 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
         .map(|(a, b)| format!("{a}: {}", b.join(", ")))
         .collect::<Vec<_>>();
     lines.push("".into());
+    lines.push("Global search:".into());
+    lines.push("  / — focus search input".into());
+    lines.push("  type text or a port number to search".into());
+    lines.push("  Enter — open highlighted result".into());
+    lines.push("  Esc — clear query + blur".into());
+    lines.push("  Tab — move focus to rows/inspector".into());
+    lines.push("  : — open palette".into());
+    lines.push("".into());
     lines.push("views: Overview · Listeners · Workloads · Processes · Doctor · Metrics".into());
     lines.push(
         "listeners chips: A all · P public · C conflicts · O orphans · U unowned · T tracked"
@@ -4703,6 +4854,7 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         config_reload: runtime.config_reload,
         active_view: initial_view,
         overview_hint_visible: initial_view == ViewKind::Overview && !overview_seen_flag_exists(),
+        mode: InputMode::Search,
         ..Default::default()
     };
     sync_row_selection(&mut app);
@@ -4848,6 +5000,12 @@ fn sync_row_selection(app: &mut App) {
         app.vm.inspector = inspector_for_doctor_row(&app.vm.doctor.rows[app.selected_row]);
         return;
     }
+    if app.active_view == ViewKind::Search {
+        let count = app.vm.search.search_hit_count();
+        app.selected_row = app.selected_row.min(count.saturating_sub(1));
+        app.vm.inspector = inspector_for_search_hit(&app.vm.search, app.selected_row);
+        return;
+    }
     let visible = visible_row_indices(app);
     if visible.is_empty() {
         app.selected_row = 0;
@@ -4920,6 +5078,8 @@ fn scroll_rows(app: &mut App, delta: isize) {
         digest_target_count()
     } else if app.active_view == ViewKind::Doctor {
         app.vm.doctor.rows.len()
+    } else if app.active_view == ViewKind::Search {
+        app.vm.search.search_hit_count()
     } else {
         visible_row_indices(app).len()
     };
@@ -5387,6 +5547,63 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
         }
         return;
     }
+    if matches!(app.mode, InputMode::Search) {
+        match key.code {
+            KeyCode::Esc => {
+                app.query.clear();
+                app.mode = InputMode::Normal;
+                let target = app
+                    .return_view_on_clear
+                    .take()
+                    .unwrap_or(app.search_origin_view);
+                if app.active_view == ViewKind::Search {
+                    set_active_view(app, target, width);
+                }
+                app.set_status("search cleared");
+                rebuild_view_model(app, width);
+            }
+            KeyCode::Enter => {
+                app.mode = InputMode::Normal;
+                jump_to_search_result(app, width);
+            }
+            KeyCode::Backspace => {
+                app.query.pop();
+                if app.query.is_empty() && app.active_view == ViewKind::Search {
+                    let target = app
+                        .return_view_on_clear
+                        .unwrap_or(app.search_origin_view);
+                    set_active_view(app, target, width);
+                }
+                rebuild_view_model(app, width);
+            }
+            KeyCode::Char(c) => {
+                if app.query.is_empty() && app.active_view != ViewKind::Search {
+                    if app.return_view_on_clear.is_none() {
+                        app.return_view_on_clear = Some(app.active_view);
+                        app.search_origin_view = app.active_view;
+                    }
+                    set_active_view(app, ViewKind::Search, width);
+                }
+                app.query.push(c);
+                rebuild_view_model(app, width);
+            }
+            KeyCode::Up => scroll_rows(app, -1),
+            KeyCode::Down => scroll_rows(app, 1),
+            KeyCode::PageUp => scroll_rows(app, -10),
+            KeyCode::PageDown => scroll_rows(app, 10),
+            KeyCode::Home => {
+                app.selected_row = 0;
+                sync_row_selection(app);
+            }
+            KeyCode::End => {
+                let count = app.vm.search.search_hit_count();
+                app.selected_row = count.saturating_sub(1);
+                sync_row_selection(app);
+            }
+            _ => {}
+        }
+        return;
+    }
     if matches!(app.mode, InputMode::Palette) {
         match key.code {
             KeyCode::Esc => {
@@ -5542,6 +5759,17 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                     set_active_view(app, ViewKind::Listeners, width);
                 }
                 app.mode = InputMode::Filter;
+            }
+            Command::Search => {
+                // Remember where to return when the user clears the query.
+                if app.active_view != ViewKind::Search {
+                    app.return_view_on_clear = Some(app.active_view);
+                    app.search_origin_view = app.active_view;
+                }
+                if !app.query.is_empty() && app.active_view != ViewKind::Search {
+                    set_active_view(app, ViewKind::Search, width);
+                }
+                app.mode = InputMode::Search;
             }
             Command::Palette => {
                 app.query.clear();
@@ -5770,6 +5998,9 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         listener_filter: app.listener_filter,
         listeners_hint_visible: app.listeners_hint_visible,
         related_listener_filter: app.related_listener_filter.as_ref(),
+        query: &app.query,
+        input_mode: app.mode,
+        search_origin_view: app.search_origin_view,
     };
     render_view_kind(&app.vm, f, area, &app.theme, ctx);
     let footer = Rect {
@@ -6029,6 +6260,256 @@ pub async fn run_default() -> Result<()> {
     run_tui(build_empty_snapshot()).await
 }
 
+fn render_search_view(
+    view_model: &ViewModel,
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    _active: bool,
+    selected_row: usize,
+) {
+    let hits = view_model.search.search_hit_count();
+    if hits == 0 {
+        frame.render_widget(
+            Paragraph::new("Type to search across all entities")
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(theme.footer.color())
+                        .bg(theme.base_bg.color()),
+                ),
+            area,
+        );
+        return;
+    }
+    let mut lines = Vec::new();
+    let max = hits.min(area.height as usize);
+    for i in 0..max {
+        let hit = view_model.search.hit_at(i);
+        let prefix = if i == selected_row { "> " } else { "  " };
+        let text = match hit {
+            Some(SearchHitRef::Listener(h)) => format!(
+                "{}Listener | {} | port {} | score {}",
+                prefix,
+                h.owner_label,
+                h.port.map_or("-".to_string(), |p| p.to_string()),
+                h.score
+            ),
+            Some(SearchHitRef::Process(h)) => format!(
+                "{}Process | {} | pid {} | score {}",
+                prefix, h.exe_or_argv0, h.pid, h.score
+            ),
+            Some(SearchHitRef::Workload(h)) => format!(
+                "{}Workload | {} | runtime {} | score {}",
+                prefix, h.display_name, h.runtime, h.score
+            ),
+            Some(SearchHitRef::Project(h)) => format!(
+                "{}Project | {} | {} | score {}",
+                prefix,
+                h.name,
+                h.root.display(),
+                h.score
+            ),
+            Some(SearchHitRef::Manager(h)) => format!(
+                "{}Manager | {} | {} | score {}",
+                prefix, h.name, h.kind, h.score
+            ),
+            Some(SearchHitRef::RailView(h)) => {
+                format!("{}View | {} | score {}", prefix, h.label, h.score)
+            }
+            None => format!("{}[missing]", prefix),
+        };
+        let style = if i == selected_row {
+            Style::default()
+                .fg(theme.selection.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color())
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Search Results "),
+            )
+            .style(Style::default().bg(theme.base_bg.color())),
+        area,
+    );
+}
+
+fn inspector_for_search_hit(results: &SearchResults, flat_index: usize) -> InspectorVm {
+    match search_hit_at(results, flat_index) {
+        Some(SearchHitRef::Listener(h)) => InspectorVm {
+            title: format!("Listener {}", h.id),
+            lines: vec![
+                format!(
+                    "Port: {}",
+                    h.port.map_or("-".to_string(), |p| p.to_string())
+                ),
+                format!("Bind: {}", h.bind),
+                format!("Protocol: {:?}", h.protocol),
+                format!("Exposure: {:?}", h.exposure),
+                format!("Owner: {}", h.owner_label),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::ListenerHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!(
+                "# Listener {}\n\n- port: {:?}\n- bind: {}\n",
+                h.id, h.port, h.bind
+            ),
+            ..Default::default()
+        },
+        Some(SearchHitRef::Process(h)) => InspectorVm {
+            title: format!("Process {} ({})", h.pid, h.exe_or_argv0),
+            lines: vec![
+                format!("PID: {}", h.pid),
+                format!("User: {}", h.user.as_deref().unwrap_or("-")),
+                format!("Exe/Argv0: {}", h.exe_or_argv0),
+                format!("CWD: {:?}", h.cwd),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::ProcessHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!(
+                "# Process {}\n\n- exe: {}\n- cwd: {:?}\n",
+                h.pid, h.exe_or_argv0, h.cwd
+            ),
+            ..Default::default()
+        },
+        Some(SearchHitRef::Workload(h)) => InspectorVm {
+            title: format!("Workload {}", h.display_name),
+            lines: vec![
+                format!("Id: {}", h.id),
+                format!("Runtime: {}", h.runtime),
+                format!("Listeners: {}", h.listener_count),
+                format!("PIDs: {}", h.pid_count),
+                format!("Project: {}", h.project_label.as_deref().unwrap_or("-")),
+                format!("Manager: {}", h.manager_label.as_deref().unwrap_or("-")),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::WorkloadHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!(
+                "# Workload {}\n\n- id: {}\n- runtime: {}\n",
+                h.display_name, h.id, h.runtime
+            ),
+            ..Default::default()
+        },
+        Some(SearchHitRef::Project(h)) => InspectorVm {
+            title: format!("Project {}", h.name),
+            lines: vec![
+                format!("Id: {}", h.id),
+                format!("Root: {}", h.root.display()),
+                format!(
+                    "Package manager: {}",
+                    h.package_manager.as_deref().unwrap_or("-")
+                ),
+                format!("Git remote: {}", h.git_remote.as_deref().unwrap_or("-")),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::ProjectHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!("# Project {}\n\n- root: {}\n", h.name, h.root.display()),
+            ..Default::default()
+        },
+        Some(SearchHitRef::Manager(h)) => InspectorVm {
+            title: format!("Manager {}", h.name),
+            lines: vec![
+                format!("Id: {}", h.id),
+                format!("Kind: {}", h.kind),
+                format!("Scope: {}", h.scope),
+                format!("Available: {}", h.available),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::ManagerHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!(
+                "# Manager {}\n\n- kind: {}\n- scope: {}\n",
+                h.name, h.kind, h.scope
+            ),
+            ..Default::default()
+        },
+        Some(SearchHitRef::RailView(h)) => InspectorVm {
+            title: format!("View {}", h.label),
+            lines: vec![
+                format!("Id: {}", h.id),
+                format!("Label: {}", h.label),
+                format!("Score: {}", h.score),
+            ],
+            provenance: vec!["lazyadmin-runtime::view_model::search::RailViewHit".into()],
+            provenance_expanded: false,
+            diagnostic_markdown: format!("# View {}\n", h.label),
+            ..Default::default()
+        },
+        None => plain_inspector("No selection", "No search result at this index"),
+    }
+}
+
+fn jump_to_search_result(app: &mut App, width: u16) {
+    let maybe_id = search_hit_at(&app.vm.search, app.selected_row).map(|hit| match hit {
+        SearchHitRef::Listener(h) => ("listener", h.id.to_string(), None::<ProcessKey>),
+        SearchHitRef::Process(h) => ("process", h.pid.to_string(), Some(h.key.clone())),
+        SearchHitRef::Workload(h) => ("workload", h.id.to_string(), None),
+        SearchHitRef::Project(h) => ("project", h.id.to_string(), None),
+        SearchHitRef::Manager(h) => ("manager", h.id.to_string(), None),
+        SearchHitRef::RailView(h) => ("rail", h.id.clone(), None),
+    });
+    match maybe_id {
+        Some(("listener", id, _)) => {
+            app.active_view = ViewKind::Listeners;
+            app.listener_filter = ListenerFilter::All;
+            app.related_listener_filter = None;
+            app.selected_process = None;
+            app.selected_row = 0;
+            rebuild_view_model(app, width);
+            if let Some(pos) = visible_row_indices(app)
+                .iter()
+                .position(|idx| app.vm.rows.get(*idx).is_some_and(|row| row.id == id))
+            {
+                app.selected_row = pos;
+                sync_row_selection(app);
+            }
+            app.set_status(format!("jumped to listener {id}"));
+        }
+        Some(("process", pid_str, Some(key))) => {
+            let pid = pid_str.parse::<i32>().unwrap_or(0);
+            app.active_view = ViewKind::ProcessTree;
+            app.selected_process = Some(key);
+            app.selected_row = 0;
+            rebuild_view_model(app, width);
+            app.set_status(format!("jumped to pid {pid}"));
+        }
+        Some(("workload", id, _)) => {
+            set_active_view(app, ViewKind::Workloads, width);
+            app.set_status(format!("jumped to workload {id}"));
+        }
+        Some(("project", id, _)) => {
+            // Workloads is the closest canonical projection that exposes
+            // projects today; future PLAN may add a dedicated Projects view.
+            set_active_view(app, ViewKind::Workloads, width);
+            app.set_status(format!("jumped to project {id}"));
+        }
+        Some(("manager", id, _)) => {
+            set_active_view(app, ViewKind::Workloads, width);
+            app.set_status(format!("jumped to manager {id}"));
+        }
+        Some(("rail", id, _)) => {
+            if let Some(view) = parse_view_kind(&id) {
+                set_active_view(app, view, width);
+                app.set_status(format!("jumped to view {id}"));
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6042,7 +6523,7 @@ mod tests {
     fn keymap_covers_plan_keys() {
         assert_eq!(
             key_to_command(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
-            Some(Command::Filter)
+            Some(Command::Search)
         );
         assert_eq!(
             key_to_command(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)),
@@ -6152,6 +6633,9 @@ mod tests {
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
                             related_listener_filter: None,
+                            query: "",
+                            input_mode: InputMode::Normal,
+                            search_origin_view: ViewKind::Overview,
                         },
                     )
                 })
@@ -6190,6 +6674,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6241,6 +6728,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6347,6 +6837,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6424,6 +6917,9 @@ mod tests {
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
                             related_listener_filter: None,
+                            query: "",
+                            input_mode: InputMode::Normal,
+                            search_origin_view: ViewKind::Overview,
                         },
                     )
                 })
@@ -6708,6 +7204,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6791,6 +7290,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6823,6 +7325,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -6898,6 +7403,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -7059,6 +7567,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -7762,6 +8273,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -7806,6 +8320,9 @@ mod tests {
                             listener_filter: ListenerFilter::All,
                             listeners_hint_visible: false,
                             related_listener_filter: None,
+                            query: "",
+                            input_mode: InputMode::Normal,
+                            search_origin_view: ViewKind::Overview,
                         },
                     )
                 })
@@ -8185,6 +8702,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -8216,6 +8736,9 @@ mod tests {
                         listener_filter: ListenerFilter::All,
                         listeners_hint_visible: false,
                         related_listener_filter: None,
+                        query: "",
+                        input_mode: InputMode::Normal,
+                        search_origin_view: ViewKind::Overview,
                     },
                 )
             })
@@ -8299,7 +8822,7 @@ accent = "#123456"
                 KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE),
                 &keybindings
             ),
-            Some(Command::Filter)
+            Some(Command::Search)
         );
         assert_eq!(
             key_to_command_with_bindings(
