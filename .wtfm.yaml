@@ -1,0 +1,115 @@
+project:
+  name: lazyadmin
+  type: mixed
+  description: Linux-first local runtime control plane for developers and coding agents.
+  repo: https://github.com/shuv1337/lazyadmin
+
+verify:
+  build: cargo build
+  test: cargo test
+  commands:
+    - id: help
+      run: ./target/debug/lazyadmin --help
+      doc_section: usage
+      max_lines: 40
+    - id: version
+      run: ./target/debug/lazyadmin --version
+      doc_section: install
+      max_lines: 1
+    - id: doctor
+      run: ./target/debug/lazyadmin doctor --json
+      doc_section: usage
+      max_lines: 40
+    - id: export
+      run: ./target/debug/lazyadmin export --json
+      doc_section: usage
+      max_lines: 20
+    - id: overview
+      run: ./target/debug/lazyadmin overview --json
+      doc_section: usage
+      max_lines: 30
+    - id: ps
+      run: ./target/debug/lazyadmin ps --json
+      doc_section: usage
+      max_lines: 15
+    - id: public
+      run: ./target/debug/lazyadmin public --json
+      doc_section: usage
+      max_lines: 15
+    - id: conflicts
+      run: ./target/debug/lazyadmin conflicts --json
+      doc_section: usage
+      max_lines: 15
+    - id: diff
+      run: ./target/debug/lazyadmin diff testdata/snapshots/empty.json testdata/snapshots/empty.json --json
+      doc_section: usage
+      max_lines: 20
+    - id: config-check
+      run: ./target/debug/lazyadmin config check --json
+      doc_section: configuration
+      max_lines: 30
+    - id: events-once
+      run: ./target/debug/lazyadmin events --once --json
+      doc_section: usage
+      max_lines: 5
+    - id: web-help
+      run: ./target/debug/lazyadmin web --help
+      doc_section: usage
+      max_lines: 20
+    - id: run-help
+      run: ./target/debug/lazyadmin run --help
+      doc_section: usage
+      max_lines: 15
+    - id: tui-headless
+      run: ./target/debug/lazyadmin tui --headless --json
+      doc_section: usage
+      max_lines: 20
+
+capture:
+  web:
+    base_url: http://127.0.0.1:17749
+    start: ./target/debug/lazyadmin web --port 17749 --no-open
+    ready:
+      http: /api/health
+      timeout_s: 30
+    pages:
+      - id: web-overview
+        path: /
+        viewport: 1280x800
+        doc_caption: "Web UI overview dashboard with listener counts, conflicts, and triage summary"
+      - id: web-listeners
+        path: /#listeners
+        viewport: 1280x800
+        doc_caption: "Web UI listeners table with sortable columns"
+      - id: web-doctor
+        path: /#doctor
+        viewport: 1280x800
+        doc_caption: "Web UI doctor view with warning groups and actionable items"
+  terminal:
+    - id: doctor-demo
+      script: |
+        ./target/debug/lazyadmin doctor
+      doc_section: usage
+      max_lines: 25
+    - id: export-demo
+      script: |
+        ./target/debug/lazyadmin export --json | head -c 400
+      doc_section: usage
+      max_lines: 8
+    - id: overview-demo
+      script: |
+        ./target/debug/lazyadmin overview --json | head -c 400
+      doc_section: usage
+      max_lines: 8
+    - id: port-explain
+      script: |
+        ./target/debug/lazyadmin :3000 --json 2>/dev/null | head -c 300 || echo "No process on port 3000"
+      doc_section: usage
+      max_lines: 3
+      optional: true
+
+doc:
+  toc: true
+  badges: [version, license]
+  social_card: true
+  output: README.md
