@@ -32,6 +32,29 @@ quit = "Q"
 
 `lazyadmin config check --json` validates duplicate bindings and unknown action names with suggestions.
 
+### Search mode
+
+The TUI starts with global search focused. These bindings apply while the search
+input is active:
+
+| Key | Purpose |
+|-----|---------|
+| `/` | Re-focus global search from normal mode without clearing the query |
+| text / digits | Search across listeners, processes, workloads, projects, managers, and views |
+| `enter` | Open the highlighted result |
+| `esc` | Clear the query, blur to rows, and restore the previous view |
+| `backspace` | Delete the previous query character |
+| `up` / `down` | Move result selection |
+| `pageup` / `pagedown` | Move result selection by a page |
+| `home` / `end` | Jump to first or last result |
+| `tab` / `shift+tab` | Move pane focus |
+
+`filter` and `toggle_filter` remain valid keybinding action names for backward
+compatibility, but both resolve to the global `search` command.
+
+The command palette remains on `:` in the TUI. In the Web UI, `/` focuses global
+search and `Ctrl+K` / `Cmd+K` opens the palette.
+
 ### Sort actions
 
 | Action name | Default | Purpose |

@@ -610,7 +610,7 @@ fn build_manager_hit(manager: &Manager, score: i64, matched_indices: Vec<usize>)
     }
 }
 
-fn rank_listeners(hits: &mut Vec<ListenerHit>) {
+fn rank_listeners(hits: &mut [ListenerHit]) {
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -619,11 +619,11 @@ fn rank_listeners(hits: &mut Vec<ListenerHit>) {
     });
 }
 
-fn rank_processes(hits: &mut Vec<ProcessHit>) {
+fn rank_processes(hits: &mut [ProcessHit]) {
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.pid.cmp(&b.pid)));
 }
 
-fn rank_workloads(hits: &mut Vec<WorkloadHit>) {
+fn rank_workloads(hits: &mut [WorkloadHit]) {
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -631,15 +631,15 @@ fn rank_workloads(hits: &mut Vec<WorkloadHit>) {
     });
 }
 
-fn rank_projects(hits: &mut Vec<ProjectHit>) {
+fn rank_projects(hits: &mut [ProjectHit]) {
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
 }
 
-fn rank_managers(hits: &mut Vec<ManagerHit>) {
+fn rank_managers(hits: &mut [ManagerHit]) {
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
 }
 
-fn rank_rail_views(hits: &mut Vec<RailViewHit>) {
+fn rank_rail_views(hits: &mut [RailViewHit]) {
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.label.cmp(&b.label)));
 }
 

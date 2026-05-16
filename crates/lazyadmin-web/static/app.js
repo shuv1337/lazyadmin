@@ -1221,7 +1221,7 @@ function onGlobalSearchInput(e) {
     renderGlobalSearchResults();
     return;
   }
-  globalSearchState.debounceTimer = setTimeout(() => fetchGlobalSearch(query), 300);
+  globalSearchState.debounceTimer = setTimeout(() => fetchGlobalSearch(query), 120);
 }
 
 function onGlobalSearchKeydown(e) {
@@ -1482,7 +1482,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     const searchInput = $("#global-search");
     if (searchInput) searchInput.focus();
-  } else if ((e.key === "k" && (e.metaKey || e.ctrlKey)) && !isTextInput(e.target)) {
+  } else if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     openPalette();
   } else if (e.key === "Escape" && $("#palette").open) {

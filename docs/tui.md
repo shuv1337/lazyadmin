@@ -9,6 +9,11 @@ lazyadmin
 lazyadmin tui --headless --json
 ```
 
+On launch, `lazyadmin` keeps the Overview digest as the visible body but puts
+keyboard focus in global Search mode. Typing immediately switches to the Search
+view. `Esc` clears the query, blurs to the rows pane, and restores the previous
+view; `/` focuses search again without clearing the stored query.
+
 Layouts switch at 100, 80, 60, and below-60 columns. Below 60 columns the TUI refuses and suggests CLI commands.
 
 Views include Everything, Ports, Public, Conflicts, Projects, Managers, Orphans, Tracked Runs, Logs, Doctor, Process Tree (`t`), and Metrics (`m`). Live procfs, Docker-compatible container, and systemd D-Bus discovery events are treated as refresh hints and periodic snapshot polling remains authoritative.
@@ -17,7 +22,15 @@ The default TUI presentation favors a high-contrast operations console over raw 
 
 Use `?` for a help overlay sourced from active keybindings and `:` for the command palette surface. The palette supports Process Tree, Metrics, theme switching, and config reload commands. `y` copies a redacted diagnostic to the clipboard and falls back to `$XDG_STATE_HOME/lazyadmin/copies/<timestamp>.md`; `o` opens only loopback listeners on common HTTP ports unless `actions.open_non_loopback = true`.
 
-Search (`/`) filters rendered rows and process-tree labels. `S` toggles system-service visibility by rebuilding the rendered model from the retained snapshot. In Process Tree, `t` opens the tree and pressing `t` on a node toggles expand/collapse while preserving the selected `ProcessKey` across refreshes.
+Global search (`/`) searches listeners, processes, workloads, projects,
+managers, and rail views through the shared `lazyadmin.search.v1` projection.
+Existing per-view filters still read the same query for Workloads, Doctor, and
+other local projections as a v1 compatibility escape hatch, so global results
+and page-local filtering can coexist until that older filter surface is cleaned
+up. `S` toggles system-service visibility by rebuilding the rendered model from
+the retained snapshot. In Process Tree, `t` opens the tree and pressing `t` on a
+node toggles expand/collapse while preserving the selected `ProcessKey` across
+refreshes.
 
 ### Listener sorting
 

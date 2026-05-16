@@ -354,6 +354,7 @@ async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchQueryParams>,
 ) -> impl IntoResponse {
+    let started = Instant::now();
     let snapshot = match state.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -376,6 +377,19 @@ async fn search(
         ..Default::default()
     };
     let results = lazyadmin_runtime::view_model::run(&snapshot, &query, options);
+    tracing::info!(
+        query_kind = ?results.query.kind,
+        normalized_len = results.query.normalized.len(),
+        limit,
+        listener_total = results.listeners.total,
+        process_total = results.processes.total,
+        workload_total = results.workloads.total,
+        project_total = results.projects.total,
+        manager_total = results.managers.total,
+        rail_view_total = results.rail_views.total,
+        elapsed_ms = started.elapsed().as_millis(),
+        "web.search"
+    );
     Json(results).into_response()
 }
 

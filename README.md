@@ -250,7 +250,11 @@ $ lazyadmin events --once --json
 **Search across all entities:**
 
 ```bash
+# The TUI starts with search focused, so you can type immediately.
+lazyadmin
+
 lazyadmin search "myapp" --json
+lazyadmin search 5432 --json
 ```
 
 ### Web UI

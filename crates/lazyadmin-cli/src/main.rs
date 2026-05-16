@@ -179,7 +179,7 @@ struct SearchArgs {
     #[arg(long, value_enum)]
     kind: Option<SearchEntityKind>,
     /// Maximum number of results per group
-    #[arg(long)]
+    #[arg(long, value_parser = parse_search_limit)]
     limit: Option<usize>,
 }
 
@@ -191,6 +191,20 @@ enum SearchEntityKind {
     Projects,
     Managers,
     All,
+}
+
+fn parse_search_limit(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid search limit `{value}`"))?;
+    if (1..=lazyadmin_runtime::view_model::search::MAX_SEARCH_LIMIT).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(format!(
+            "search limit must be between 1 and {}",
+            lazyadmin_runtime::view_model::search::MAX_SEARCH_LIMIT
+        ))
+    }
 }
 
 #[derive(Args, Debug)]
@@ -2778,5 +2792,20 @@ mod tests {
         );
         // Processes group should be empty since we disabled it
         assert_eq!(results.processes.total, 0);
+    }
+
+    #[test]
+    fn search_limit_parser_rejects_out_of_range_values() {
+        assert_eq!(parse_search_limit("1").unwrap(), 1);
+        assert_eq!(
+            parse_search_limit(
+                &lazyadmin_runtime::view_model::search::MAX_SEARCH_LIMIT.to_string()
+            )
+            .unwrap(),
+            lazyadmin_runtime::view_model::search::MAX_SEARCH_LIMIT
+        );
+        assert!(parse_search_limit("0").is_err());
+        assert!(parse_search_limit("9999").is_err());
+        assert!(parse_search_limit("not-a-number").is_err());
     }
 }

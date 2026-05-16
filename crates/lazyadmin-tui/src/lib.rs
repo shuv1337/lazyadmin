@@ -28,7 +28,8 @@ use lazyadmin_runtime::view_model::{
     build_doctor_groups,
     inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
     search::{
-        SearchHitRef, SearchOptions as RuntimeSearchOptions, run as run_search, search_hit_at,
+        SearchGroup, SearchHitRef, SearchOptions as RuntimeSearchOptions, run as run_search,
+        search_hit_at,
     },
 };
 use ratatui::{
@@ -378,7 +379,6 @@ pub enum Pane {
 pub enum InputMode {
     #[default]
     Normal,
-    Filter,
     Search,
     Palette,
     Help,
@@ -394,7 +394,6 @@ pub struct Confirmation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    Filter,
     Search,
     Palette,
     NextPane,
@@ -2472,6 +2471,7 @@ pub fn palette_entries(filter: &str) -> Vec<&'static str> {
         "doctor",
         "process-tree",
         "metrics",
+        "search",
         "theme default-dark",
         "theme night-owl",
         "theme night-owl-light",
@@ -3161,6 +3161,7 @@ fn render_search_bar(
     ctx: RenderContext<'_>,
 ) {
     let is_focused = ctx.input_mode == InputMode::Search;
+    let _origin_view = ctx.search_origin_view;
     let query = ctx.query;
     let total_hits = view_model.search.search_hit_count();
 
@@ -3175,7 +3176,7 @@ fn render_search_bar(
         ));
         if query.is_empty() {
             left_spans.push(Span::styled(
-                "search listeners, processes, workloads…",
+                "search all entities…",
                 Style::default()
                     .fg(theme.footer.color())
                     .bg(theme.base_bg.color())
@@ -3197,7 +3198,7 @@ fn render_search_bar(
         }
     } else if query.is_empty() {
         left_spans.push(Span::styled(
-            "Press / to search listeners + processes",
+            "Press / to search all entities",
             Style::default()
                 .fg(theme.footer.color())
                 .bg(theme.base_bg.color())
@@ -4857,6 +4858,11 @@ pub async fn run_tui_with_runtime(mut runtime: TuiRuntime) -> Result<()> {
         mode: InputMode::Search,
         ..Default::default()
     };
+    info!(
+        active_view = ?app.active_view,
+        query_len = 0usize,
+        "tui.search.focus"
+    );
     sync_row_selection(&mut app);
     let mut refresh_state =
         LiveRefreshState::new(runtime.config.event_debounce, runtime.config.max_redraw_hz);
@@ -4959,7 +4965,8 @@ fn visible_row_indices(app: &App) -> Vec<usize> {
             | ViewKind::ProcessTree
             | ViewKind::Metrics
             | ViewKind::Logs
-            | ViewKind::Doctor => false,
+            | ViewKind::Doctor
+            | ViewKind::Search => false,
             _ => true,
         })
         .map(|(idx, _)| idx)
@@ -5121,9 +5128,19 @@ fn inspector_for_doctor_row(row: &DoctorRowVm) -> InspectorVm {
 }
 
 fn selected_row(app: &App) -> Option<&RowVm> {
+    if app.active_view == ViewKind::Search {
+        return None;
+    }
     visible_row_indices(app)
         .get(app.selected_row)
         .and_then(|idx| app.vm.rows.get(*idx))
+}
+
+fn selected_search_hit(app: &App) -> Option<SearchHitRef<'_>> {
+    if app.active_view != ViewKind::Search {
+        return None;
+    }
+    search_hit_at(&app.vm.search, app.selected_row)
 }
 
 fn jump_to_inspector_target(app: &mut App, target: JumpTarget, width: u16) {
@@ -5526,27 +5543,6 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             app.set_status(format!("overview hint flag not saved: {err}"));
         }
     }
-    if matches!(app.mode, InputMode::Filter) {
-        match key.code {
-            KeyCode::Esc => {
-                app.query.clear();
-                app.mode = InputMode::Normal;
-                app.set_status("filter cleared");
-                rebuild_view_model(app, width);
-            }
-            KeyCode::Enter => app.mode = InputMode::Normal,
-            KeyCode::Backspace => {
-                app.query.pop();
-                rebuild_view_model(app, width);
-            }
-            KeyCode::Char(c) => {
-                app.query.push(c);
-                rebuild_view_model(app, width);
-            }
-            _ => {}
-        }
-        return;
-    }
     if matches!(app.mode, InputMode::Search) {
         match key.code {
             KeyCode::Esc => {
@@ -5569,9 +5565,7 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             KeyCode::Backspace => {
                 app.query.pop();
                 if app.query.is_empty() && app.active_view == ViewKind::Search {
-                    let target = app
-                        .return_view_on_clear
-                        .unwrap_or(app.search_origin_view);
+                    let target = app.return_view_on_clear.unwrap_or(app.search_origin_view);
                     set_active_view(app, target, width);
                 }
                 rebuild_view_model(app, width);
@@ -5582,6 +5576,10 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                         app.return_view_on_clear = Some(app.active_view);
                         app.search_origin_view = app.active_view;
                     }
+                    info!(
+                        origin_view = ?app.search_origin_view,
+                        "tui.search.activate"
+                    );
                     set_active_view(app, ViewKind::Search, width);
                 }
                 app.query.push(c);
@@ -5591,6 +5589,14 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             KeyCode::Down => scroll_rows(app, 1),
             KeyCode::PageUp => scroll_rows(app, -10),
             KeyCode::PageDown => scroll_rows(app, 10),
+            KeyCode::Tab => {
+                app.mode = InputMode::Normal;
+                cycle_pane(app, 1, width);
+            }
+            KeyCode::BackTab => {
+                app.mode = InputMode::Normal;
+                cycle_pane(app, -1, width);
+            }
             KeyCode::Home => {
                 app.selected_row = 0;
                 sync_row_selection(app);
@@ -5754,18 +5760,18 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                 app.show_system = !app.show_system;
                 rebuild_view_model(app, width);
             }
-            Command::Filter => {
-                if app.active_view == ViewKind::Overview {
-                    set_active_view(app, ViewKind::Listeners, width);
-                }
-                app.mode = InputMode::Filter;
-            }
             Command::Search => {
                 // Remember where to return when the user clears the query.
                 if app.active_view != ViewKind::Search {
                     app.return_view_on_clear = Some(app.active_view);
                     app.search_origin_view = app.active_view;
                 }
+                info!(
+                    active_view = ?app.active_view,
+                    query_kind = ?app.vm.search.query.kind,
+                    query_len = app.vm.search.query.normalized.len(),
+                    "tui.search.focus"
+                );
                 if !app.query.is_empty() && app.active_view != ViewKind::Search {
                     set_active_view(app, ViewKind::Search, width);
                 }
@@ -5788,6 +5794,13 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
             },
             Command::Inspect if app.active_view == ViewKind::Doctor => {
                 toggle_selected_doctor_group(app, width);
+            }
+            Command::Inspect if app.active_view == ViewKind::Search => {
+                if selected_search_hit(app).is_some() {
+                    jump_to_search_result(app, width);
+                } else {
+                    app.set_status("open failed: no selected search result");
+                }
             }
             Command::NextPane => cycle_pane(app, 1, width),
             Command::PrevPane => cycle_pane(app, -1, width),
@@ -5829,38 +5842,62 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
                     "clipboard unavailable; copy fallback failed, diagnostic remains in inspector",
                 ),
             },
-            Command::Open => match selected_row(app) {
-                Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
-                    Ok(url) => app.set_status(format!("opened {url}")),
-                    Err(err) => app.set_status(format!("open failed: {err}")),
-                },
-                None => app.set_status("open failed: no selected listener"),
-            },
-            Command::Kill => match selected_row(app) {
-                Some(_) => start_confirmation(app, cmd, "kill"),
-                None => app.set_status("kill failed: no selected listener"),
-            },
-            Command::Restart | Command::Stop | Command::Free | Command::Run => {
-                match selected_row(app) {
-                    Some(row) => {
-                        app.set_status(CommandDispatcher::plan(&cmd, Some(row)));
-                    }
-                    None => {
-                        app.set_status(format!("{cmd:?} failed: no selected listener", cmd = cmd));
+            Command::Open => {
+                if app.active_view == ViewKind::Search {
+                    app.set_status("open from search is not wired; press Enter to inspect result");
+                } else {
+                    match selected_row(app) {
+                        Some(row) => match open_row_url(row, app.allow_open_non_loopback) {
+                            Ok(url) => app.set_status(format!("opened {url}")),
+                            Err(err) => app.set_status(format!("open failed: {err}")),
+                        },
+                        None => app.set_status("open failed: no selected listener"),
                     }
                 }
             }
-            Command::Edit => match selected_row(app) {
-                Some(row) => {
+            Command::Kill => {
+                if app.active_view == ViewKind::Search {
+                    app.set_status("kill is disabled from search results");
+                } else {
+                    match selected_row(app) {
+                        Some(_) => start_confirmation(app, cmd, "kill"),
+                        None => app.set_status("kill failed: no selected listener"),
+                    }
+                }
+            }
+            Command::Restart | Command::Stop | Command::Free | Command::Run => {
+                if app.active_view == ViewKind::Search {
                     app.set_status(format!(
-                        "edit not implemented for {}",
-                        action_target(Some(row))
+                        "{cmd:?} is disabled from search results",
+                        cmd = cmd
                     ));
+                } else {
+                    match selected_row(app) {
+                        Some(row) => {
+                            app.set_status(CommandDispatcher::plan(&cmd, Some(row)));
+                        }
+                        None => app
+                            .set_status(format!("{cmd:?} failed: no selected listener", cmd = cmd)),
+                    }
                 }
-                None => {
-                    app.set_status("edit failed: no selected listener");
+            }
+            Command::Edit => {
+                if app.active_view == ViewKind::Search {
+                    app.set_status("edit is disabled from search results");
+                } else {
+                    match selected_row(app) {
+                        Some(row) => {
+                            app.set_status(format!(
+                                "edit not implemented for {}",
+                                action_target(Some(row))
+                            ));
+                        }
+                        None => {
+                            app.set_status("edit failed: no selected listener");
+                        }
+                    }
                 }
-            },
+            }
             Command::SortNext => {
                 let (captured_id, old_index) = capture_selected_listener_id(app);
                 app.listener_sort = app.listener_sort.next_column();
@@ -5956,6 +5993,23 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
                 app.set_status("reload unavailable in this runtime");
             }
         }
+        value if value == "search" || value.starts_with("search ") => {
+            let query = value.strip_prefix("search").unwrap_or_default().trim();
+            if !query.is_empty() {
+                app.query = query.to_string();
+                if app.active_view != ViewKind::Search {
+                    app.return_view_on_clear = Some(app.active_view);
+                    app.search_origin_view = app.active_view;
+                }
+                set_active_view(app, ViewKind::Search, width);
+            }
+            app.mode = InputMode::Search;
+            info!(
+                active_view = ?app.active_view,
+                query_len = app.query.len(),
+                "tui.search.focus"
+            );
+        }
         "overview" | "digest" => set_active_view(app, ViewKind::Overview, width),
         "listeners" => set_active_view(app, ViewKind::Listeners, width),
         "view all" | "everything" | "all" => set_active_view(app, ViewKind::Everything, width),
@@ -6010,7 +6064,6 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
         height: 1,
     };
     let input_footer = match app.mode {
-        InputMode::Filter => Some(format!("Filter: {}  (Enter apply, Esc clear)", app.query)),
         InputMode::Palette => Some(format!("Command: {}  (Enter run, Esc cancel)", app.query)),
         _ => None,
     };
@@ -6113,7 +6166,7 @@ fn render_app(f: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn active_toast_message(app: &App, now: Instant) -> Option<String> {
-    let input_active = matches!(app.mode, InputMode::Filter | InputMode::Palette);
+    let input_active = matches!(app.mode, InputMode::Search | InputMode::Palette);
     app.toasts
         .iter()
         .rev()
@@ -6283,54 +6336,103 @@ fn render_search_view(
         return;
     }
     let mut lines = Vec::new();
-    let max = hits.min(area.height as usize);
-    for i in 0..max {
-        let hit = view_model.search.hit_at(i);
-        let prefix = if i == selected_row { "> " } else { "  " };
-        let text = match hit {
-            Some(SearchHitRef::Listener(h)) => format!(
-                "{}Listener | {} | port {} | score {}",
-                prefix,
-                h.owner_label,
+    let mut cursor = 0usize;
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Listeners",
+        &view_model.search.listeners,
+        |h| {
+            format!(
+                "{:>5}  {:>5}  {:<24}  {:<12}  {:?}",
+                h.score,
                 h.port.map_or("-".to_string(), |p| p.to_string()),
-                h.score
-            ),
-            Some(SearchHitRef::Process(h)) => format!(
-                "{}Process | {} | pid {} | score {}",
-                prefix, h.exe_or_argv0, h.pid, h.score
-            ),
-            Some(SearchHitRef::Workload(h)) => format!(
-                "{}Workload | {} | runtime {} | score {}",
-                prefix, h.display_name, h.runtime, h.score
-            ),
-            Some(SearchHitRef::Project(h)) => format!(
-                "{}Project | {} | {} | score {}",
-                prefix,
-                h.name,
-                h.root.display(),
-                h.score
-            ),
-            Some(SearchHitRef::Manager(h)) => format!(
-                "{}Manager | {} | {} | score {}",
-                prefix, h.name, h.kind, h.score
-            ),
-            Some(SearchHitRef::RailView(h)) => {
-                format!("{}View | {} | score {}", prefix, h.label, h.score)
-            }
-            None => format!("{}[missing]", prefix),
-        };
-        let style = if i == selected_row {
-            Style::default()
-                .fg(theme.selection.color())
-                .bg(theme.base_bg.color())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme.base_fg.color())
-                .bg(theme.base_bg.color())
-        };
-        lines.push(Line::from(Span::styled(text, style)));
-    }
+                compact_text(&h.bind, 24),
+                compact_text(&h.owner_label, 12),
+                h.exposure
+            )
+        },
+    );
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Processes",
+        &view_model.search.processes,
+        |h| {
+            format!(
+                "{:>5}  pid={:<6}  {:<12}  {}",
+                h.score,
+                h.pid,
+                compact_text(h.user.as_deref().unwrap_or("-"), 12),
+                compact_text(&h.exe_or_argv0, 36)
+            )
+        },
+    );
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Workloads",
+        &view_model.search.workloads,
+        |h| {
+            format!(
+                "{:>5}  {:<24}  runtime={:<12}  listeners={} pids={}",
+                h.score,
+                compact_text(&h.display_name, 24),
+                compact_text(&h.runtime, 12),
+                h.listener_count,
+                h.pid_count
+            )
+        },
+    );
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Projects",
+        &view_model.search.projects,
+        |h| {
+            format!(
+                "{:>5}  {:<24}  {}",
+                h.score,
+                compact_text(&h.name, 24),
+                compact_text(&h.root.display().to_string(), 48)
+            )
+        },
+    );
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Managers",
+        &view_model.search.managers,
+        |h| {
+            format!(
+                "{:>5}  {:<24}  kind={} scope={} {}",
+                h.score,
+                compact_text(&h.name, 24),
+                h.kind,
+                h.scope,
+                if h.available { "up" } else { "down" }
+            )
+        },
+    );
+    push_search_section(
+        &mut lines,
+        theme,
+        selected_row,
+        &mut cursor,
+        "Views",
+        &view_model.search.rail_views,
+        |h| format!("{:>5}  {:<12}  {}", h.score, h.id, h.label),
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -6341,6 +6443,58 @@ fn render_search_view(
             .style(Style::default().bg(theme.base_bg.color())),
         area,
     );
+}
+
+fn push_search_section<T, F>(
+    lines: &mut Vec<Line<'static>>,
+    theme: &Theme,
+    selected_row: usize,
+    cursor: &mut usize,
+    title: &'static str,
+    group: &SearchGroup<T>,
+    mut row: F,
+) where
+    F: FnMut(&T) -> String,
+{
+    if group.total == 0 {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("{title} ({}/{})", group.returned, group.total),
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    for hit in &group.hits {
+        let prefix = if *cursor == selected_row { "> " } else { "  " };
+        let style = if *cursor == selected_row {
+            Style::default()
+                .fg(theme.selection.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color())
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{}", row(hit)),
+            style,
+        )));
+        *cursor += 1;
+    }
+    if group.truncated {
+        lines.push(Line::from(Span::styled(
+            format!("  … +{} more", group.total - group.returned),
+            Style::default()
+                .fg(theme.footer.color())
+                .bg(theme.base_bg.color()),
+        )));
+    }
 }
 
 fn inspector_for_search_hit(results: &SearchResults, flat_index: usize) -> InspectorVm {
@@ -6453,16 +6607,27 @@ fn inspector_for_search_hit(results: &SearchResults, flat_index: usize) -> Inspe
 }
 
 fn jump_to_search_result(app: &mut App, width: u16) {
-    let maybe_id = search_hit_at(&app.vm.search, app.selected_row).map(|hit| match hit {
-        SearchHitRef::Listener(h) => ("listener", h.id.to_string(), None::<ProcessKey>),
-        SearchHitRef::Process(h) => ("process", h.pid.to_string(), Some(h.key.clone())),
-        SearchHitRef::Workload(h) => ("workload", h.id.to_string(), None),
-        SearchHitRef::Project(h) => ("project", h.id.to_string(), None),
-        SearchHitRef::Manager(h) => ("manager", h.id.to_string(), None),
-        SearchHitRef::RailView(h) => ("rail", h.id.clone(), None),
+    let maybe_id = selected_search_hit(app).map(|hit| match hit {
+        SearchHitRef::Listener(h) => (
+            "listener",
+            h.id.to_string(),
+            h.owner_label.clone(),
+            None::<ProcessKey>,
+        ),
+        SearchHitRef::Process(h) => (
+            "process",
+            h.pid.to_string(),
+            h.exe_or_argv0.clone(),
+            Some(h.key.clone()),
+        ),
+        SearchHitRef::Workload(h) => ("workload", h.id.to_string(), h.display_name.clone(), None),
+        SearchHitRef::Project(h) => ("project", h.id.to_string(), h.name.clone(), None),
+        SearchHitRef::Manager(h) => ("manager", h.id.to_string(), h.name.clone(), None),
+        SearchHitRef::RailView(h) => ("rail", h.id.clone(), h.label.clone(), None),
     });
     match maybe_id {
-        Some(("listener", id, _)) => {
+        Some(("listener", id, _, _)) => {
+            log_search_open_result(app, "listener", id.len());
             app.active_view = ViewKind::Listeners;
             app.listener_filter = ListenerFilter::All;
             app.related_listener_filter = None;
@@ -6478,7 +6643,8 @@ fn jump_to_search_result(app: &mut App, width: u16) {
             }
             app.set_status(format!("jumped to listener {id}"));
         }
-        Some(("process", pid_str, Some(key))) => {
+        Some(("process", pid_str, _, Some(key))) => {
+            log_search_open_result(app, "process", pid_str.len());
             let pid = pid_str.parse::<i32>().unwrap_or(0);
             app.active_view = ViewKind::ProcessTree;
             app.selected_process = Some(key);
@@ -6486,28 +6652,70 @@ fn jump_to_search_result(app: &mut App, width: u16) {
             rebuild_view_model(app, width);
             app.set_status(format!("jumped to pid {pid}"));
         }
-        Some(("workload", id, _)) => {
+        Some(("workload", id, display_name, _)) => {
+            log_search_open_result(app, "workload", id.len());
             set_active_view(app, ViewKind::Workloads, width);
+            if let Some(pos) = app
+                .vm
+                .workloads
+                .iter()
+                .position(|row| row.name == display_name)
+            {
+                app.selected_row = pos;
+            }
+            if let Some(inspector) =
+                InspectorView::lookup(&app.snapshot, "workload", &id).map(inspector_vm_from_view)
+            {
+                app.vm.inspector = inspector;
+            }
             app.set_status(format!("jumped to workload {id}"));
         }
-        Some(("project", id, _)) => {
-            // Workloads is the closest canonical projection that exposes
-            // projects today; future PLAN may add a dedicated Projects view.
-            set_active_view(app, ViewKind::Workloads, width);
+        Some(("project", id, name, _)) => {
+            log_search_open_result(app, "project", id.len());
+            set_active_view(app, ViewKind::Projects, width);
+            if let Some(pos) = app.vm.projects.iter().position(|row| row.name == name) {
+                app.selected_row = pos;
+            }
+            if let Some(inspector) =
+                InspectorView::lookup(&app.snapshot, "project", &id).map(inspector_vm_from_view)
+            {
+                app.vm.inspector = inspector;
+            }
             app.set_status(format!("jumped to project {id}"));
         }
-        Some(("manager", id, _)) => {
-            set_active_view(app, ViewKind::Workloads, width);
+        Some(("manager", id, _, _)) => {
+            log_search_open_result(app, "manager", id.len());
+            set_active_view(app, ViewKind::Managers, width);
+            if let Some(inspector) =
+                InspectorView::lookup(&app.snapshot, "manager", &id).map(inspector_vm_from_view)
+            {
+                app.vm.inspector = inspector;
+            }
             app.set_status(format!("jumped to manager {id}"));
         }
-        Some(("rail", id, _)) => {
+        Some(("rail", id, _, _)) => {
+            log_search_open_result(app, "rail_view", id.len());
             if let Some(view) = parse_view_kind(&id) {
                 set_active_view(app, view, width);
+                app.query.clear();
+                app.return_view_on_clear = None;
+                rebuild_view_model(app, width);
                 app.set_status(format!("jumped to view {id}"));
             }
         }
         _ => {}
     }
+}
+
+fn log_search_open_result(app: &App, kind: &'static str, identifier_len: usize) {
+    info!(
+        kind,
+        identifier_len,
+        query_kind = ?app.vm.search.query.kind,
+        normalized_len = app.vm.search.query.normalized.len(),
+        elapsed_ms = app.vm.search.elapsed_ms,
+        "tui.search.open_result"
+    );
 }
 
 #[cfg(test)]
@@ -8017,6 +8225,128 @@ mod tests {
     }
 
     #[test]
+    fn search_first_character_switches_overview_to_search() {
+        let mut app = app_with_listener(8080);
+        app.active_view = ViewKind::Overview;
+        app.mode = InputMode::Search;
+        app.query.clear();
+        rebuild_view_model(&mut app, 120);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+            120,
+        );
+
+        assert_eq!(app.active_view, ViewKind::Search);
+        assert_eq!(app.mode, InputMode::Search);
+        assert_eq!(app.query, "8");
+        assert_eq!(app.return_view_on_clear, Some(ViewKind::Overview));
+        assert!(app.vm.search.search_hit_count() > 0);
+    }
+
+    #[test]
+    fn search_esc_restores_origin_and_refocus_preserves_query_after_tab() {
+        let mut app = app_with_listener(8080);
+        app.active_view = ViewKind::Overview;
+        app.mode = InputMode::Search;
+        app.query.clear();
+        rebuild_view_model(&mut app, 120);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+            120,
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.mode, InputMode::Normal);
+        assert_eq!(app.active_view, ViewKind::Search);
+        assert_eq!(app.query, "8");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.mode, InputMode::Search);
+        assert_eq!(app.query, "8");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            120,
+        );
+        assert_eq!(app.active_view, ViewKind::Overview);
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.query.is_empty());
+    }
+
+    #[test]
+    fn search_enter_jumps_to_listener_and_preserves_query() {
+        let mut app = app_with_listener(8080);
+        app.active_view = ViewKind::Overview;
+        app.mode = InputMode::Search;
+        app.query.clear();
+        rebuild_view_model(&mut app, 120);
+        for c in "8080".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                120,
+            );
+        }
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            120,
+        );
+
+        assert_eq!(app.active_view, ViewKind::Listeners);
+        assert_eq!(app.mode, InputMode::Normal);
+        assert_eq!(app.query, "8080");
+        assert_eq!(selected_row(&app).unwrap().port, Some(8080));
+    }
+
+    #[test]
+    fn search_normal_mode_blocks_listener_actions() {
+        let mut app = app_with_listener(8080);
+        app.active_view = ViewKind::Overview;
+        app.mode = InputMode::Search;
+        app.query.clear();
+        rebuild_view_model(&mut app, 120);
+        for c in "8080".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                120,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            120,
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            120,
+        );
+
+        assert_eq!(app.active_view, ViewKind::Search);
+        assert!(app.confirmation.is_none());
+        assert_eq!(
+            app.status.as_deref(),
+            Some("kill is disabled from search results")
+        );
+    }
+
+    #[test]
     fn kill_confirmation_blocks_global_keys_and_renders_target() {
         let mut app = app_with_listener(8080);
         handle_key(
@@ -8634,7 +8964,7 @@ mod tests {
     #[test]
     fn toast_dismissal_paused_during_input() {
         let mut app = App {
-            mode: InputMode::Filter,
+            mode: InputMode::Search,
             ..Default::default()
         };
         app.toasts.push_back(Toast {
