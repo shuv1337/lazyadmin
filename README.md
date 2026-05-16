@@ -49,6 +49,8 @@ lazyadmin has three interfaces: a Ratatui TUI, a CLI, and a read-only Web UI.
 Run `lazyadmin` with no arguments to launch the interactive TUI. For
 automation or debugging without entering raw terminal mode:
 
+![lazyadmin TUI overview](docs/images/tui-overview.png)
+
 ```bash
 lazyadmin tui --headless --json
 ```
