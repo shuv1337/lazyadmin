@@ -28,7 +28,7 @@ use lazyadmin_runtime::view_model::{
     build_doctor_groups,
     inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
     search::{
-        SearchGroup, SearchHitRef, SearchOptions as RuntimeSearchOptions, run as run_search,
+        SearchHitRef, SearchOptions as RuntimeSearchOptions, ranked_search_hits, run as run_search,
         search_hit_at,
     },
 };
@@ -6336,103 +6336,66 @@ fn render_search_view(
         return;
     }
     let mut lines = Vec::new();
-    let mut cursor = 0usize;
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Listeners",
-        &view_model.search.listeners,
-        |h| {
-            format!(
-                "{:>5}  {:>5}  {:<24}  {:<12}  {:?}",
-                h.score,
-                h.port.map_or("-".to_string(), |p| p.to_string()),
-                compact_text(&h.bind, 24),
-                compact_text(&h.owner_label, 12),
-                h.exposure
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Best matches  {} shown  L {}  P {}  W {}  Pr {}  M {}  V {}",
+            hits,
+            search_group_count_label(
+                view_model.search.listeners.returned,
+                view_model.search.listeners.total
+            ),
+            search_group_count_label(
+                view_model.search.processes.returned,
+                view_model.search.processes.total
+            ),
+            search_group_count_label(
+                view_model.search.workloads.returned,
+                view_model.search.workloads.total
+            ),
+            search_group_count_label(
+                view_model.search.projects.returned,
+                view_model.search.projects.total
+            ),
+            search_group_count_label(
+                view_model.search.managers.returned,
+                view_model.search.managers.total
+            ),
+            search_group_count_label(
+                view_model.search.rail_views.returned,
+                view_model.search.rail_views.total
             )
-        },
-    );
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Processes",
-        &view_model.search.processes,
-        |h| {
-            format!(
-                "{:>5}  pid={:<6}  {:<12}  {}",
-                h.score,
-                h.pid,
-                compact_text(h.user.as_deref().unwrap_or("-"), 12),
-                compact_text(&h.exe_or_argv0, 36)
-            )
-        },
-    );
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Workloads",
-        &view_model.search.workloads,
-        |h| {
-            format!(
-                "{:>5}  {:<24}  runtime={:<12}  listeners={} pids={}",
-                h.score,
-                compact_text(&h.display_name, 24),
-                compact_text(&h.runtime, 12),
-                h.listener_count,
-                h.pid_count
-            )
-        },
-    );
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Projects",
-        &view_model.search.projects,
-        |h| {
-            format!(
-                "{:>5}  {:<24}  {}",
-                h.score,
-                compact_text(&h.name, 24),
-                compact_text(&h.root.display().to_string(), 48)
-            )
-        },
-    );
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Managers",
-        &view_model.search.managers,
-        |h| {
-            format!(
-                "{:>5}  {:<24}  kind={} scope={} {}",
-                h.score,
-                compact_text(&h.name, 24),
-                h.kind,
-                h.scope,
-                if h.available { "up" } else { "down" }
-            )
-        },
-    );
-    push_search_section(
-        &mut lines,
-        theme,
-        selected_row,
-        &mut cursor,
-        "Views",
-        &view_model.search.rail_views,
-        |h| format!("{:>5}  {:<12}  {}", h.score, h.id, h.label),
-    );
+        ),
+        Style::default()
+            .fg(theme.accent.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "score  kind       primary                         context",
+        Style::default()
+            .fg(theme.footer.color())
+            .bg(theme.base_bg.color()),
+    )));
+    for (index, hit) in ranked_search_hits(&view_model.search)
+        .into_iter()
+        .enumerate()
+    {
+        let prefix = if index == selected_row { "> " } else { "  " };
+        let style = if index == selected_row {
+            Style::default()
+                .fg(theme.selection.color())
+                .bg(theme.base_bg.color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.base_fg.color())
+                .bg(theme.base_bg.color())
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{}", search_hit_row(hit)),
+            style,
+        )));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -6445,56 +6408,81 @@ fn render_search_view(
     );
 }
 
-fn push_search_section<T, F>(
-    lines: &mut Vec<Line<'static>>,
-    theme: &Theme,
-    selected_row: usize,
-    cursor: &mut usize,
-    title: &'static str,
-    group: &SearchGroup<T>,
-    mut row: F,
-) where
-    F: FnMut(&T) -> String,
-{
-    if group.total == 0 {
-        return;
+fn search_group_count_label(returned: usize, total: usize) -> String {
+    if returned == total {
+        total.to_string()
+    } else {
+        format!("{returned}/{total}")
     }
-    if !lines.is_empty() {
-        lines.push(Line::from(""));
+}
+
+fn search_hit_row(hit: SearchHitRef<'_>) -> String {
+    match hit {
+        SearchHitRef::Project(h) => format!(
+            "{:>5}  {:<9}  {:<30} {}",
+            h.score,
+            "project",
+            compact_text(&h.name, 30),
+            compact_text(&h.root.display().to_string(), 48)
+        ),
+        SearchHitRef::Workload(h) => format!(
+            "{:>5}  {:<9}  {:<30} runtime={} listeners={} pids={}{}",
+            h.score,
+            "workload",
+            compact_text(&h.display_name, 30),
+            compact_text(&h.runtime, 12),
+            h.listener_count,
+            h.pid_count,
+            h.project_label
+                .as_ref()
+                .map(|label| format!(" project={}", compact_text(label, 24)))
+                .unwrap_or_default()
+        ),
+        SearchHitRef::Process(h) => format!(
+            "{:>5}  {:<9}  pid={:<8} {:<30} cwd={}",
+            h.score,
+            "process",
+            h.pid,
+            compact_text(&h.exe_or_argv0, 30),
+            compact_text(
+                &h.cwd
+                    .as_ref()
+                    .map(|cwd| cwd.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                42,
+            )
+        ),
+        SearchHitRef::Listener(h) => format!(
+            "{:>5}  {:<9}  {:<30} owner={} exposure={:?}",
+            h.score,
+            "listener",
+            compact_text(&listener_hit_endpoint(h), 30),
+            compact_text(&h.owner_label, 30),
+            h.exposure
+        ),
+        SearchHitRef::Manager(h) => format!(
+            "{:>5}  {:<9}  {:<30} kind={} scope={} {}",
+            h.score,
+            "manager",
+            compact_text(&h.name, 30),
+            h.kind,
+            h.scope,
+            if h.available { "up" } else { "down" }
+        ),
+        SearchHitRef::RailView(h) => format!(
+            "{:>5}  {:<9}  {:<30} id={}",
+            h.score,
+            "view",
+            compact_text(&h.label, 30),
+            h.id
+        ),
     }
-    lines.push(Line::from(Span::styled(
-        format!("{title} ({}/{})", group.returned, group.total),
-        Style::default()
-            .fg(theme.accent.color())
-            .bg(theme.base_bg.color())
-            .add_modifier(Modifier::BOLD),
-    )));
-    for hit in &group.hits {
-        let prefix = if *cursor == selected_row { "> " } else { "  " };
-        let style = if *cursor == selected_row {
-            Style::default()
-                .fg(theme.selection.color())
-                .bg(theme.base_bg.color())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme.base_fg.color())
-                .bg(theme.base_bg.color())
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{prefix}{}", row(hit)),
-            style,
-        )));
-        *cursor += 1;
-    }
-    if group.truncated {
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more", group.total - group.returned),
-            Style::default()
-                .fg(theme.footer.color())
-                .bg(theme.base_bg.color()),
-        )));
-    }
+}
+
+fn listener_hit_endpoint(hit: &lazyadmin_runtime::view_model::ListenerHit) -> String {
+    hit.port
+        .map(|port| format!("{} ({})", hit.bind, port))
+        .unwrap_or_else(|| hit.bind.clone())
 }
 
 fn inspector_for_search_hit(results: &SearchResults, flat_index: usize) -> InspectorVm {

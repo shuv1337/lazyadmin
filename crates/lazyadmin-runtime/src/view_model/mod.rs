@@ -19,7 +19,8 @@ pub use inspector::InspectorView;
 pub use search::{
     DEFAULT_SEARCH_LIMIT, ListenerHit, MAX_SEARCH_LIMIT, ManagerHit, ProcessHit, ProjectHit,
     RailViewHit, SEARCH_SCHEMA_VERSION, SearchGroup, SearchHitRef, SearchKind, SearchKinds,
-    SearchOptions, SearchQuery, SearchResults, WorkloadHit, run, search_hit_at, search_hit_count,
+    SearchOptions, SearchQuery, SearchResults, WorkloadHit, ranked_search_hits, run, search_hit_at,
+    search_hit_count,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

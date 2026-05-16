@@ -972,6 +972,58 @@ pub enum SearchHitRef<'a> {
     RailView(&'a RailViewHit),
 }
 
+impl SearchHitRef<'_> {
+    pub fn score(&self) -> i64 {
+        match self {
+            SearchHitRef::Listener(hit) => hit.score,
+            SearchHitRef::Process(hit) => hit.score,
+            SearchHitRef::Workload(hit) => hit.score,
+            SearchHitRef::Project(hit) => hit.score,
+            SearchHitRef::Manager(hit) => hit.score,
+            SearchHitRef::RailView(hit) => hit.score,
+        }
+    }
+
+    fn kind_rank(&self) -> usize {
+        match self {
+            SearchHitRef::Project(_) => 0,
+            SearchHitRef::Workload(_) => 1,
+            SearchHitRef::Process(_) => 2,
+            SearchHitRef::Listener(_) => 3,
+            SearchHitRef::Manager(_) => 4,
+            SearchHitRef::RailView(_) => 5,
+        }
+    }
+
+    fn stable_key(&self) -> String {
+        match self {
+            SearchHitRef::Listener(hit) => format!("listener:{}", hit.id),
+            SearchHitRef::Process(hit) => format!("process:{:010}", hit.pid),
+            SearchHitRef::Workload(hit) => format!("workload:{}", hit.display_name),
+            SearchHitRef::Project(hit) => format!("project:{}", hit.name),
+            SearchHitRef::Manager(hit) => format!("manager:{}", hit.name),
+            SearchHitRef::RailView(hit) => format!("rail:{}", hit.label),
+        }
+    }
+}
+
+pub fn ranked_search_hits(results: &SearchResults) -> Vec<SearchHitRef<'_>> {
+    let mut hits = Vec::with_capacity(search_hit_count(results));
+    hits.extend(results.projects.hits.iter().map(SearchHitRef::Project));
+    hits.extend(results.workloads.hits.iter().map(SearchHitRef::Workload));
+    hits.extend(results.processes.hits.iter().map(SearchHitRef::Process));
+    hits.extend(results.listeners.hits.iter().map(SearchHitRef::Listener));
+    hits.extend(results.managers.hits.iter().map(SearchHitRef::Manager));
+    hits.extend(results.rail_views.hits.iter().map(SearchHitRef::RailView));
+    hits.sort_by(|a, b| {
+        b.score()
+            .cmp(&a.score())
+            .then_with(|| a.kind_rank().cmp(&b.kind_rank()))
+            .then_with(|| a.stable_key().cmp(&b.stable_key()))
+    });
+    hits
+}
+
 pub fn search_hit_count(results: &SearchResults) -> usize {
     results.listeners.hits.len()
         + results.processes.hits.len()
@@ -982,43 +1034,7 @@ pub fn search_hit_count(results: &SearchResults) -> usize {
 }
 
 pub fn search_hit_at(results: &SearchResults, flat_index: usize) -> Option<SearchHitRef<'_>> {
-    let mut cursor = flat_index;
-
-    let listener_len = results.listeners.hits.len();
-    if cursor < listener_len {
-        return Some(SearchHitRef::Listener(&results.listeners.hits[cursor]));
-    }
-    cursor -= listener_len;
-
-    let process_len = results.processes.hits.len();
-    if cursor < process_len {
-        return Some(SearchHitRef::Process(&results.processes.hits[cursor]));
-    }
-    cursor -= process_len;
-
-    let workload_len = results.workloads.hits.len();
-    if cursor < workload_len {
-        return Some(SearchHitRef::Workload(&results.workloads.hits[cursor]));
-    }
-    cursor -= workload_len;
-
-    let project_len = results.projects.hits.len();
-    if cursor < project_len {
-        return Some(SearchHitRef::Project(&results.projects.hits[cursor]));
-    }
-    cursor -= project_len;
-
-    let manager_len = results.managers.hits.len();
-    if cursor < manager_len {
-        return Some(SearchHitRef::Manager(&results.managers.hits[cursor]));
-    }
-    cursor -= manager_len;
-
-    results
-        .rail_views
-        .hits
-        .get(cursor)
-        .map(SearchHitRef::RailView)
+    ranked_search_hits(results).into_iter().nth(flat_index)
 }
 
 #[cfg(test)]
@@ -1113,5 +1129,47 @@ mod tests {
         };
         let r = run(&snapshot, "listen", opts);
         assert_eq!(r.rail_views.total, 0);
+    }
+
+    #[test]
+    fn ranked_hits_prioritize_actionable_entities_on_score_ties() {
+        let mut results = SearchResults::default();
+        results.listeners.hits.push(ListenerHit {
+            id: ListenerId::new("unix::0:1"),
+            port: None,
+            bind: "/tmp/codex.sock".into(),
+            protocol: Protocol::Unix,
+            exposure: Exposure::UnixLocal,
+            owner_label: "/opt/codex".into(),
+            workload_labels: Vec::new(),
+            project_label: None,
+            score: 100,
+            matched_indices: Vec::new(),
+            is_system: false,
+        });
+        results.processes.hits.push(ProcessHit {
+            key: ProcessKey {
+                pid: 42,
+                boot_id: "boot".into(),
+                start_time_ticks: 1,
+            },
+            pid: 42,
+            user: Some("shuv".into()),
+            exe_or_argv0: "codex".into(),
+            cmdline_compact: "codex".into(),
+            cwd: Some(PathBuf::from("/home/shuv/repos/lazyadmin")),
+            score: 100,
+            matched_indices: Vec::new(),
+            is_system: false,
+        });
+
+        assert!(matches!(
+            search_hit_at(&results, 0),
+            Some(SearchHitRef::Process(hit)) if hit.pid == 42
+        ));
+        assert!(matches!(
+            search_hit_at(&results, 1),
+            Some(SearchHitRef::Listener(hit)) if hit.id == ListenerId::new("unix::0:1")
+        ));
     }
 }
