@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use lazyadmin_core::model::{PermissionState, Snapshot};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterHealth {
     pub active: usize,

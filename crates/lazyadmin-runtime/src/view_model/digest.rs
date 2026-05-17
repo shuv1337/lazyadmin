@@ -573,6 +573,123 @@ mod tests {
     }
 
     #[test]
+    fn risk_rank_orders_worst_case_first() {
+        // Lower number = higher priority. Unowned+public is worst.
+        assert_eq!(risk_rank(true, true, false), 0);
+        assert_eq!(risk_rank(true, false, false), 1);
+        assert_eq!(risk_rank(false, true, true), 2);
+        assert_eq!(risk_rank(false, true, false), 3);
+        assert_eq!(risk_rank(false, false, true), 4);
+        assert_eq!(risk_rank(false, false, false), 5);
+        // Ordering is monotonic: each subsequent case is >= the previous.
+        let ranks = [
+            risk_rank(true, true, true),
+            risk_rank(true, false, true),
+            risk_rank(false, true, true),
+            risk_rank(false, true, false),
+            risk_rank(false, false, true),
+            risk_rank(false, false, false),
+        ];
+        for w in ranks.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn severity_rank_puts_errors_first() {
+        assert!(severity_rank(&WarningSeverity::Error) < severity_rank(&WarningSeverity::Warning));
+        assert!(severity_rank(&WarningSeverity::Warning) < severity_rank(&WarningSeverity::Info));
+    }
+
+    #[test]
+    fn max_time_returns_later_or_only_available_value() {
+        let earlier = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(max_time(Some(earlier), Some(later)), Some(later));
+        assert_eq!(max_time(Some(later), Some(earlier)), Some(later));
+        assert_eq!(max_time(Some(later), None), Some(later));
+        assert_eq!(max_time(None, Some(later)), Some(later));
+        assert_eq!(max_time(None, None), None);
+    }
+
+    #[test]
+    fn listener_bind_uses_unix_path_when_present() {
+        let mut l = listener(
+            "unix:/tmp/x.sock",
+            "127.0.0.1",
+            0,
+            Exposure::UnixLocal,
+            vec![],
+        );
+        l.path = Some(std::path::PathBuf::from("/tmp/x.sock"));
+        assert_eq!(listener_bind(&l), "/tmp/x.sock");
+    }
+
+    #[test]
+    fn listener_bind_formats_host_and_port() {
+        let l = listener("tcp:1.2.3.4:80", "1.2.3.4", 80, Exposure::Public, vec![]);
+        assert_eq!(listener_bind(&l), "1.2.3.4:80");
+    }
+
+    #[test]
+    fn listener_bind_falls_back_to_star_when_no_addr() {
+        let mut l = listener("tcp:*:80", "1.2.3.4", 80, Exposure::Public, vec![]);
+        l.bind_addr = None;
+        assert_eq!(listener_bind(&l), "*:80");
+    }
+
+    #[test]
+    fn owner_label_no_owner_renders_em_dash() {
+        let snapshot = Snapshot::empty();
+        let l = listener("tcp:0:0", "0.0.0.0", 0, Exposure::Public, vec![]);
+        assert_eq!(owner_label(&l, &snapshot), "\u{2014}");
+    }
+
+    #[test]
+    fn owner_label_uses_process_pid() {
+        let snapshot = Snapshot::empty();
+        let l = listener(
+            "tcp:0:0",
+            "0.0.0.0",
+            0,
+            Exposure::Public,
+            vec![EntityRef::Process(process_key(7))],
+        );
+        assert_eq!(owner_label(&l, &snapshot), "pid 7");
+    }
+
+    #[test]
+    fn owner_pid_resolves_through_workload_pids() {
+        let mut snapshot = Snapshot::empty();
+        let wid = WorkloadId::new("w-a");
+        snapshot.workloads.push(Workload {
+            id: wid.clone(),
+            display_name: "w".into(),
+            runtime: lazyadmin_core::model::RuntimeKind::Direct,
+            state: WorkloadState::Running,
+            pids: vec![process_key(42)],
+            listeners: vec![],
+            project: None,
+            manager: None,
+            source: None,
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        let l = listener(
+            "tcp:0:0",
+            "0.0.0.0",
+            0,
+            Exposure::Public,
+            vec![EntityRef::Workload(wid)],
+        );
+        assert_eq!(owner_pid(&l, &snapshot), Some(42));
+    }
+
+    #[test]
     fn digest_caps_each_section_at_limits() {
         let mut snapshot = Snapshot::empty();
         for port in 10_000..10_012 {

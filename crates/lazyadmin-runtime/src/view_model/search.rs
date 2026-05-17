@@ -984,6 +984,18 @@ impl SearchHitRef<'_> {
         }
     }
 
+    fn priority_rank(&self) -> usize {
+        match self {
+            SearchHitRef::Listener(hit)
+                if hit.port.is_some()
+                    && matches!(hit.exposure, Exposure::LanOrPublic | Exposure::Public) =>
+            {
+                0
+            }
+            _ => 1,
+        }
+    }
+
     fn kind_rank(&self) -> usize {
         match self {
             SearchHitRef::Project(_) => 0,
@@ -1016,8 +1028,9 @@ pub fn ranked_search_hits(results: &SearchResults) -> Vec<SearchHitRef<'_>> {
     hits.extend(results.managers.hits.iter().map(SearchHitRef::Manager));
     hits.extend(results.rail_views.hits.iter().map(SearchHitRef::RailView));
     hits.sort_by(|a, b| {
-        b.score()
-            .cmp(&a.score())
+        a.priority_rank()
+            .cmp(&b.priority_rank())
+            .then_with(|| b.score().cmp(&a.score()))
             .then_with(|| a.kind_rank().cmp(&b.kind_rank()))
             .then_with(|| a.stable_key().cmp(&b.stable_key()))
     });
@@ -1170,6 +1183,66 @@ mod tests {
         assert!(matches!(
             search_hit_at(&results, 1),
             Some(SearchHitRef::Listener(hit)) if hit.id == ListenerId::new("unix::0:1")
+        ));
+    }
+
+    #[test]
+    fn ranked_hits_put_exposed_port_listeners_before_all_other_hits() {
+        let mut results = SearchResults::default();
+        results.projects.hits.push(ProjectHit {
+            id: ProjectId::new("project:codex"),
+            name: "codex".into(),
+            root: PathBuf::from("/home/shuv/repos/codex"),
+            package_manager: Some("cargo".into()),
+            git_remote: None,
+            score: 10_000,
+            matched_indices: Vec::new(),
+        });
+        results.processes.hits.push(ProcessHit {
+            key: ProcessKey {
+                pid: 42,
+                boot_id: "boot".into(),
+                start_time_ticks: 1,
+            },
+            pid: 42,
+            user: Some("shuv".into()),
+            exe_or_argv0: "codex".into(),
+            cmdline_compact: "codex".into(),
+            cwd: Some(PathBuf::from("/home/shuv/repos/codex")),
+            score: 9_000,
+            matched_indices: Vec::new(),
+            is_system: false,
+        });
+        results.listeners.hits.push(ListenerHit {
+            id: ListenerId::new("tcp:127.0.0.1:3000"),
+            port: Some(3000),
+            bind: "127.0.0.1:3000".into(),
+            protocol: Protocol::Tcp,
+            exposure: Exposure::Loopback,
+            owner_label: "local-dev".into(),
+            workload_labels: Vec::new(),
+            project_label: None,
+            score: 20_000,
+            matched_indices: Vec::new(),
+            is_system: false,
+        });
+        results.listeners.hits.push(ListenerHit {
+            id: ListenerId::new("tcp:0.0.0.0:8080"),
+            port: Some(8080),
+            bind: "0.0.0.0:8080".into(),
+            protocol: Protocol::Tcp,
+            exposure: Exposure::Public,
+            owner_label: "public-api".into(),
+            workload_labels: Vec::new(),
+            project_label: None,
+            score: 100,
+            matched_indices: Vec::new(),
+            is_system: false,
+        });
+
+        assert!(matches!(
+            search_hit_at(&results, 0),
+            Some(SearchHitRef::Listener(hit)) if hit.id == ListenerId::new("tcp:0.0.0.0:8080")
         ));
     }
 }
