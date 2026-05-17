@@ -60,6 +60,14 @@ This repository now contains the v0.4 Rust workspace for `lazyadmin` after PLAN-
 - JSON output is a public contract for scripts and agents. Add schema/golden tests before changing it.
 - Keep human output and TUI view models as projections of the core graph; do not duplicate ownership/correlation logic in UI crates.
 
+## Test coverage standard
+
+- `cargo test --workspace` currently runs **411 tests across all crates**, all passing.
+- Per-crate inline-test density floor: **≥5 tests/kLOC** before adding new surface area. Crates currently above this floor: core (29.7), web (22.0), procfs/portless/systemd/project (~10–20), runtime (10.3), tracked (28.6), container (20.9), tui (8.8).
+- `crates/lazyadmin-cli/tests/cli_smoke.rs` pins the public CLI JSON contract (export, doctor, overview, search, diff, ps, public, conflicts, projects, events, tui --headless, config check). **Do not change those JSON shapes without also updating the test**.
+- When adding/changing a public model, snapshot/diff/doctor/search/digest schema, or an adapter parser, add a test in the same change. Schema constants are pinned by name in `lazyadmin-core` test modules.
+- The `testdata/snapshots/{busy,portless,empty}.json` fixtures are referenced from `lazyadmin-core` snapshot tests via `include_str!` — keep them deserialisable when bumping the snapshot schema.
+
 ## Validation commands
 
 Run these before handing off foundation changes:
@@ -67,6 +75,7 @@ Run these before handing off foundation changes:
 ```bash
 cargo metadata --format-version=1
 cargo test -p lazyadmin-adapter-portless
+cargo test -p lazyadmin-cli --test cli_smoke
 cargo test -p lazyadmin-cli --features integration-portless free_portless_app
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
