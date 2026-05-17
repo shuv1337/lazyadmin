@@ -174,4 +174,114 @@ mod tests {
         };
         serde_json::to_string(&p).unwrap();
     }
+
+    #[test]
+    fn confirmation_none_yes_no_and_bypass_render_distinct_prompts() {
+        let none = ConfirmationPolicy::None.render_prompt();
+        let yn = ConfirmationPolicy::YesNo.render_prompt();
+        let bypass = ConfirmationPolicy::TestOnlyBypass.render_prompt();
+        assert_ne!(none, yn);
+        assert_ne!(yn, bypass);
+        assert!(none.contains("no confirmation"));
+        assert!(yn.contains("[y/N]"));
+        assert!(bypass.contains("TEST-ONLY"));
+    }
+
+    #[test]
+    fn typed_phrase_prompt_quotes_the_phrase() {
+        let p = ConfirmationPolicy::TypedPhrase {
+            phrase: "DELETE".into(),
+        };
+        let s = p.render_prompt();
+        assert!(s.contains("\"DELETE\""));
+    }
+
+    #[test]
+    fn render_dry_run_handles_lines_without_detail() {
+        let out = render_dry_run(&[
+            DryRunLine {
+                summary: "plan a".into(),
+                detail: None,
+            },
+            DryRunLine {
+                summary: "plan b".into(),
+                detail: Some("SIGKILL".into()),
+            },
+        ]);
+        assert_eq!(out, "- plan a\n- plan b (SIGKILL)");
+    }
+
+    #[test]
+    fn render_dry_run_empty_returns_empty_string() {
+        assert_eq!(render_dry_run(&[]), "");
+    }
+
+    #[test]
+    fn action_kind_round_trips_via_json_snake_case() {
+        let cases = [
+            (ActionKind::Stop, "stop"),
+            (ActionKind::Restart, "restart"),
+            (ActionKind::Kill, "kill"),
+            (ActionKind::FreePort, "free_port"),
+            (ActionKind::PortlessStop, "portless_stop"),
+            (ActionKind::PauseRestart, "pause_restart"),
+            (ActionKind::ResumeRestart, "resume_restart"),
+            (ActionKind::Logs, "logs"),
+            (ActionKind::Forget, "forget"),
+            (ActionKind::SignalProcessGroup, "signal_process_group"),
+            (ActionKind::SignalPid, "signal_pid"),
+            (ActionKind::Unsupported, "unsupported"),
+        ];
+        for (kind, expected) in cases {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+            let back: ActionKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn action_status_round_trips_via_json_snake_case() {
+        for s in [
+            ActionStatus::Success,
+            ActionStatus::Failed,
+            ActionStatus::TimedOut,
+            ActionStatus::Skipped,
+            ActionStatus::Unsupported,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: ActionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    #[test]
+    fn requirement_serializes_with_kind_and_detail() {
+        let r = Requirement::Permission {
+            detail: "need CAP_SYS_PTRACE".into(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Requirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn action_plan_telemetry_default_is_zero() {
+        let t = ActionPlanTelemetry::default();
+        assert_eq!(t.action_count, 0);
+    }
+
+    #[test]
+    fn action_result_round_trips_with_error_class() {
+        let r = ActionResult {
+            action_id: ActionId::new("a-1"),
+            status: ActionStatus::Failed,
+            message: "timed out".into(),
+            duration_ms: 1500,
+            error_class: Some("io::ErrorKind::TimedOut".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ActionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
 }

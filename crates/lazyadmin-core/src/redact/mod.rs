@@ -128,4 +128,120 @@ mod tests {
         assert!(!is_sensitive_key("attempt"));
         assert!(!is_sensitive_key("port"));
     }
+
+    #[test]
+    fn substring_matches_sensitive_key_in_compound_names() {
+        // "token" is in PATTERNS — any key that contains it should match.
+        assert!(is_sensitive_key("GITHUB_TOKEN"));
+        assert!(is_sensitive_key("slack_session_cookie"));
+        assert!(is_sensitive_key("my_API_KEY"));
+    }
+
+    #[test]
+    fn empty_string_key_is_not_sensitive() {
+        assert!(!is_sensitive_key(""));
+    }
+
+    #[test]
+    fn redact_kv_passes_through_non_sensitive() {
+        // Non-sensitive key + value with no scheme:// userinfo -> identity.
+        assert_eq!(redact_kv("HOST", "localhost"), "localhost");
+        assert_eq!(redact_kv("COUNT", "42"), "42");
+    }
+
+    #[test]
+    fn redact_kv_redacts_url_userinfo_even_for_safe_keys() {
+        // DATABASE_URL is not a sensitive *key* but its value carries credentials.
+        let result = redact_kv("DATABASE_URL", "postgres://u:p@h:5432/db");
+        assert_eq!(result, "postgres://u:<redacted>@h:5432/db");
+    }
+
+    #[test]
+    fn redact_url_userinfo_handles_url_without_password() {
+        // Only username, no password — should not change because there is no colon.
+        let raw = "https://user@github.com/repo";
+        assert_eq!(redact_url_userinfo(raw), raw);
+    }
+
+    #[test]
+    fn redact_url_userinfo_returns_input_when_no_at_sign() {
+        assert_eq!(
+            redact_url_userinfo("https://example.com/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_returns_input_when_no_scheme() {
+        // No "://" — not a URL we recognise.
+        assert_eq!(redact_url_userinfo("not a url"), "not a url");
+    }
+
+    #[test]
+    fn redact_cmdline_handles_empty_input() {
+        assert!(redact_cmdline(&[]).is_empty());
+    }
+
+    #[test]
+    fn redact_cmdline_passes_through_plain_args() {
+        let v = redact_cmdline(&[
+            "server".into(),
+            "--port".into(),
+            "8080".into(),
+            "--verbose".into(),
+        ]);
+        assert_eq!(
+            v,
+            vec![
+                "server".to_string(),
+                "--port".to_string(),
+                "8080".to_string(),
+                "--verbose".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn redact_cmdline_redacts_short_and_long_secret_flags() {
+        let v = redact_cmdline(&["--secret".into(), "hunter2".into(), "--apikey=abc".into()]);
+        assert_eq!(v[0], "--secret");
+        assert_eq!(v[1], "<redacted>");
+        assert_eq!(v[2], "--apikey=<redacted>");
+    }
+
+    #[test]
+    fn redact_cmdline_redacts_url_userinfo_in_positional_args() {
+        let v = redact_cmdline(&["db".into(), "postgres://u:p@h/db".into()]);
+        assert_eq!(v[1], "postgres://u:<redacted>@h/db");
+    }
+
+    #[test]
+    fn redact_env_returns_pairs_with_values_redacted() {
+        let pairs = redact_env([
+            ("PORT", "3000"),
+            ("API_TOKEN", "abc"),
+            ("DATABASE_URL", "postgres://u:p@h/db"),
+        ]);
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], ("PORT".to_string(), "3000".to_string()));
+        assert_eq!(pairs[1].1, "<redacted>");
+        assert_eq!(pairs[2].1, "postgres://u:<redacted>@h/db");
+    }
+
+    #[test]
+    fn redacted_wrapper_obscures_debug_and_display() {
+        let r = Redacted("my-secret".to_string());
+        assert_eq!(format!("{:?}", r), "<redacted>");
+        assert_eq!(format!("{}", r), "<redacted>");
+    }
+
+    #[test]
+    fn reveal_wrapper_keeps_inner_visible_for_debug() {
+        let r = Reveal("plain".to_string());
+        let dbg = format!("{:?}", r);
+        assert!(
+            dbg.contains("plain"),
+            "Reveal Debug should not redact: {dbg}"
+        );
+    }
 }

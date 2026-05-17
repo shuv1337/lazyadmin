@@ -731,6 +731,54 @@ help = "esc"
     }
 
     #[test]
+    fn config_default_validates_clean() {
+        let cfg = Config::default();
+        cfg.validate().expect("default config must validate");
+    }
+
+    #[test]
+    fn config_load_with_no_path_uses_defaults() {
+        let cfg = Config::load(None).expect("load with None path falls back to defaults");
+        // Behaviour: returns a Config without panicking; default sockets adapter enabled.
+        assert!(cfg.adapters.sockets.enabled);
+    }
+
+    #[test]
+    fn config_load_returns_err_for_invalid_toml() {
+        let path = std::env::temp_dir().join(format!(
+            "lazyadmin-bad-config-{}.toml",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&path, "not = valid = toml").unwrap();
+        let err = Config::load(Some(&path)).err();
+        assert!(err.is_some(), "expected error loading malformed config");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn socket_discovery_preference_round_trips_via_toml() {
+        // Smoke: the Both variant parses via toml.
+        let path = std::env::temp_dir().join(format!(
+            "lazyadmin-cfg-sockdiag-{}.toml",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[adapters.sockets]
+preferred = "sock_diag"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.adapters.sockets.preferred,
+            SocketDiscoveryPreference::SockDiag
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn partial_nested_adapter_config_merges_with_defaults() {
         let path = std::env::temp_dir().join(format!(
             "lazyadmin-partial-adapter-config-{}.toml",

@@ -166,4 +166,156 @@ mod tests {
         };
         assert_eq!(s.protocol, Protocol::Any);
     }
+
+    #[test]
+    fn tcp_prefix_selects_tcp() {
+        let Selector::Socket(s) = parse_selector("tcp/:3000").unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.protocol, Protocol::Tcp);
+        assert_eq!(s.port, 3000);
+        assert!(s.host.is_none());
+    }
+
+    #[test]
+    fn udp_prefix_selects_udp_with_host() {
+        let Selector::Socket(s) = parse_selector("udp/127.0.0.1:5353").unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.protocol, Protocol::Udp);
+        assert_eq!(s.port, 5353);
+        assert_eq!(s.host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn pid_selector_carries_integer() {
+        let Selector::Pid(pid) = parse_selector("pid:42420").unwrap() else {
+            panic!()
+        };
+        assert_eq!(pid, 42420);
+    }
+
+    #[test]
+    fn pid_selector_rejects_non_numeric() {
+        let err = parse_selector("pid:abc").unwrap_err();
+        assert!(err.message.contains("invalid PID"));
+        assert!(err.hint.contains("pid:42420"));
+    }
+
+    #[test]
+    fn port_above_u16_rejected() {
+        let err = parse_selector(":70000").unwrap_err();
+        assert!(err.message.contains("invalid port"));
+    }
+
+    #[test]
+    fn unix_selector_carries_path() {
+        let Selector::Unix(p) = parse_selector("unix:///tmp/app.sock").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.to_string_lossy(), "/tmp/app.sock");
+    }
+
+    #[test]
+    fn unit_run_tag_container_project_extract_rest() {
+        match parse_selector("unit:dev.service").unwrap() {
+            Selector::Unit(u) => assert_eq!(u, "dev.service"),
+            _ => panic!("expected Unit"),
+        }
+        match parse_selector("run:r-1").unwrap() {
+            Selector::Run(r) => assert_eq!(r, "r-1"),
+            _ => panic!("expected Run"),
+        }
+        match parse_selector("tag:my-tag").unwrap() {
+            Selector::Tag(t) => assert_eq!(t, "my-tag"),
+            _ => panic!("expected Tag"),
+        }
+        match parse_selector("container:db-1").unwrap() {
+            Selector::Container(c) => assert_eq!(c, "db-1"),
+            _ => panic!("expected Container"),
+        }
+        match parse_selector("project:web").unwrap() {
+            Selector::Project(p) => assert_eq!(p, "web"),
+            _ => panic!("expected Project"),
+        }
+    }
+
+    #[test]
+    fn compose_selector_requires_slash() {
+        // Valid case.
+        let Selector::Compose { project, service } = parse_selector("compose:acme/web").unwrap()
+        else {
+            panic!("expected Compose")
+        };
+        assert_eq!(project, "acme");
+        assert_eq!(service, "web");
+
+        // Missing slash -> error with hint.
+        let err = parse_selector("compose:acme-web").unwrap_err();
+        assert!(err.message.contains("invalid compose"));
+        assert!(err.hint.contains("compose:project/service"));
+    }
+
+    #[test]
+    fn unbracketed_ipv6_with_host_returns_bracket_hint() {
+        // "fe80::1:3000" has more than one colon and no leading `:`, no `[` —
+        // selector should explicitly point the user at bracket notation.
+        let err = parse_selector("fe80::1:3000").unwrap_err();
+        let msg_lc = err.message.to_lowercase();
+        assert!(
+            msg_lc.contains("ipv6") || msg_lc.contains("unbracketed"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(err.hint.to_lowercase().contains("bracket"));
+    }
+
+    #[test]
+    fn unbracketed_ipv6_starting_with_colon_falls_through_to_port_parse() {
+        // "::1:3000" lexically starts with `:`, so the parser strips the leading
+        // colon and tries to parse ":1:3000" as a port. This is still an error,
+        // just a different one — pin the current behaviour.
+        let err = parse_selector("::1:3000").unwrap_err();
+        assert!(err.message.contains("invalid port"));
+    }
+
+    #[test]
+    fn ipv6_bracket_without_port_rejected() {
+        let err = parse_selector("[::1]").unwrap_err();
+        assert!(err.message.contains("missing port"));
+    }
+
+    #[test]
+    fn ipv6_unclosed_bracket_rejected() {
+        let err = parse_selector("[::1:3000").unwrap_err();
+        assert!(err.message.contains("unclosed"));
+    }
+
+    #[test]
+    fn ipv6_with_invalid_address_rejected() {
+        let err = parse_selector("[zz::]:3000").unwrap_err();
+        assert!(err.message.contains("invalid IPv6"));
+    }
+
+    #[test]
+    fn selector_error_display_includes_message_and_hint() {
+        let err = parse_selector(":notaport").unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("invalid port"));
+        assert!(s.contains("Hint:"));
+    }
+
+    #[test]
+    fn fully_garbled_input_returns_unknown_selector_hint() {
+        let err = parse_selector("not-a-selector").unwrap_err();
+        assert!(err.message.contains("unknown selector"));
+    }
+
+    #[test]
+    fn selector_round_trips_through_json() {
+        let s = parse_selector("tcp/[::1]:3000").unwrap();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Selector = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
 }

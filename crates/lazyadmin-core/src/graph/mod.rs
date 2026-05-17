@@ -61,6 +61,9 @@ pub trait DiscoveryAdapter: Send + Sync {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 impl Graph {
     #[tracing::instrument(name = "graph.merge", skip_all, fields(entity_counts))]
     pub fn merge_outputs(outputs: Vec<DiscoveryOutput>) -> Self {

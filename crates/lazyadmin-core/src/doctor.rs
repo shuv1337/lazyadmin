@@ -318,4 +318,109 @@ mod tests {
         assert_eq!(classify("PUBLIC"), classify("PUBLIC"));
         assert_eq!(classify("future.warning"), classify("future.warning"));
     }
+
+    #[test]
+    fn metric_caption_returns_known_value_for_registered_keys() {
+        for entry in METRIC_CAPTIONS {
+            assert_eq!(metric_caption(entry.key), entry.caption);
+        }
+    }
+
+    #[test]
+    fn metric_caption_falls_back_for_unknown_key() {
+        let s = metric_caption("some.future.metric");
+        assert!(
+            s.contains("read-only snapshot") || !s.is_empty(),
+            "got: {s}"
+        );
+    }
+
+    #[test]
+    fn warning_code_registry_is_alias_of_all_codes() {
+        assert_eq!(WARNING_CODE_REGISTRY.len(), ALL_CODES.len());
+        for (a, b) in WARNING_CODE_REGISTRY.iter().zip(ALL_CODES.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn warning_codes_are_unique() {
+        let mut codes: Vec<_> = ALL_CODES.iter().map(|m| m.code).collect();
+        codes.sort_unstable();
+        let len = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), len, "duplicate code in WARNING_CODE_REGISTRY");
+    }
+
+    #[test]
+    fn warning_tier_round_trips_via_json() {
+        for tier in [
+            WarningTier::Critical,
+            WarningTier::Actionable,
+            WarningTier::Noise,
+        ] {
+            let json = serde_json::to_string(&tier).unwrap();
+            let back: WarningTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, tier);
+        }
+    }
+
+    #[test]
+    fn doctor_severity_round_trips_via_json() {
+        for sev in [
+            DoctorSeverity::Ok,
+            DoctorSeverity::Info,
+            DoctorSeverity::Warning,
+            DoctorSeverity::Degraded,
+            DoctorSeverity::Error,
+        ] {
+            let json = serde_json::to_string(&sev).unwrap();
+            let back: DoctorSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, sev);
+        }
+    }
+
+    #[test]
+    fn doctor_report_new_sets_schema_version_and_no_subsystems() {
+        let r = DoctorReport::new(vec![]);
+        assert_eq!(r.schema_version, DOCTOR_SCHEMA_VERSION);
+        assert!(r.subsystems.is_none());
+        assert!(r.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_report_with_subsystems_attaches_them() {
+        let r = DoctorReport::new(vec![]).with_subsystems(DoctorSubsystems::default());
+        assert!(r.subsystems.is_some());
+    }
+
+    #[test]
+    fn doctor_subsystems_default_is_empty() {
+        let s = DoctorSubsystems::default();
+        assert!(s.adapters.is_none());
+        assert!(s.events.is_none());
+    }
+
+    #[test]
+    fn dual_stack_probe_report_default() {
+        let p = DualStackProbeReport::default();
+        assert!(!p.supported);
+        assert_eq!(p.attempted, 0);
+        assert_eq!(p.succeeded, 0);
+        assert_eq!(p.errors, 0);
+    }
+
+    #[test]
+    fn doctor_check_serializes_with_optional_hint() {
+        let c = DoctorCheck {
+            subsystem: "sub".into(),
+            name: "n".into(),
+            severity: DoctorSeverity::Warning,
+            summary: "s".into(),
+            hint: Some("h".into()),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
 }

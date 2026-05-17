@@ -122,6 +122,57 @@ mod tests {
     }
 
     #[test]
+    fn metadata_omitted_when_no_drops() {
+        let snap = SnapshotBuilder::from_graph_with_event_drops(Graph::default(), 0);
+        assert!(snap.metadata.is_none());
+        assert!(snap.warnings.iter().all(|w| w.code != "EVENTS_DROPPED"));
+    }
+
+    #[test]
+    fn from_graph_emits_canonical_schema_version() {
+        let snap = SnapshotBuilder::from_graph(Graph::default());
+        assert_eq!(snap.schema_version, SNAPSHOT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn build_empty_snapshot_helper_matches_builder_empty() {
+        let a = build_empty_snapshot();
+        let b = SnapshotBuilder::empty();
+        assert_eq!(a.schema_version, b.schema_version);
+        assert_eq!(a.listeners, b.listeners);
+        assert_eq!(a.warnings, b.warnings);
+    }
+
+    #[test]
+    fn busy_fixture_deserializes_with_expected_shape() {
+        let text = include_str!("../../../../testdata/snapshots/busy.json");
+        let snap: Snapshot = serde_json::from_str(text).unwrap();
+        assert_eq!(snap.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        // From the fixture: 4 listeners, 1 process, 1 workload, 1 project, 2 warnings.
+        assert_eq!(snap.listeners.len(), 4);
+        assert_eq!(snap.processes.len(), 1);
+        assert_eq!(snap.workloads.len(), 1);
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.warnings.len(), 2);
+        // Conflict warning targets the loopback listener.
+        let conflict = snap.warnings.iter().find(|w| w.code == "CONFLICT").unwrap();
+        assert_eq!(
+            conflict.entity,
+            Some(EntityRef::Listener(ListenerId::new("tcp:127.0.0.1:8080")))
+        );
+    }
+
+    #[test]
+    fn empty_fixture_deserializes_to_empty_snapshot() {
+        let text = include_str!("../../../../testdata/snapshots/empty.json");
+        let snap: Snapshot = serde_json::from_str(text).unwrap();
+        assert_eq!(snap.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        assert!(snap.listeners.is_empty());
+        assert!(snap.workloads.is_empty());
+        assert!(snap.warnings.is_empty());
+    }
+
+    #[test]
     fn portless_snapshot_fixture_roundtrips() {
         let text = include_str!("../../../../testdata/snapshots/portless.json");
         let snap: Snapshot = serde_json::from_str(text).unwrap();

@@ -138,4 +138,136 @@ mod tests {
             Some("portless: demo.localhost cli pid 42")
         );
     }
+
+    #[test]
+    fn listener_rows_empty_when_snapshot_has_no_listeners() {
+        let snapshot = Snapshot::empty();
+        assert!(listener_rows(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn listener_row_has_no_manager_when_no_workload_edge() {
+        let mut snapshot = Snapshot::empty();
+        snapshot.listeners.push(Listener {
+            id: ListenerId::new("tcp:0.0.0.0:80"),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("0.0.0.0".into()),
+            port: Some(80),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "host".into(),
+            socket_inode: None,
+            exposure: Exposure::Public,
+            owners: vec![],
+            confidence: Confidence::Medium,
+            provenance: vec![],
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        });
+        let row = listener_rows(&snapshot).pop().unwrap();
+        assert!(row.manager_label.is_none());
+        assert!(row.manager_detail.is_none());
+        assert_eq!(row.port, Some(80));
+        assert_eq!(row.owners_count, 0);
+    }
+
+    #[test]
+    fn listener_row_owners_count_reflects_owners_length() {
+        let mut snapshot = Snapshot::empty();
+        snapshot.listeners.push(Listener {
+            id: ListenerId::new("tcp:0.0.0.0:443"),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("0.0.0.0".into()),
+            port: Some(443),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "host".into(),
+            socket_inode: None,
+            exposure: Exposure::Public,
+            owners: vec![
+                EntityRef::Process(ProcessKey {
+                    pid: 1,
+                    boot_id: "b".into(),
+                    start_time_ticks: 0,
+                }),
+                EntityRef::Process(ProcessKey {
+                    pid: 2,
+                    boot_id: "b".into(),
+                    start_time_ticks: 0,
+                }),
+            ],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        });
+        let row = listener_rows(&snapshot).pop().unwrap();
+        assert_eq!(row.owners_count, 2);
+    }
+
+    #[test]
+    fn portless_manager_detail_omits_cli_pid_when_source_absent() {
+        let mut snapshot = Snapshot::empty();
+        let listener_id = ListenerId::new("tcp:127.0.0.1:3000:1");
+        let workload_id = WorkloadId::new("portless:nosrc");
+        snapshot.listeners.push(Listener {
+            id: listener_id.clone(),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(3000),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "host".into(),
+            socket_inode: Some(1),
+            exposure: Exposure::Loopback,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        });
+        snapshot.workloads.push(Workload {
+            id: workload_id.clone(),
+            display_name: "orphan.localhost".into(),
+            runtime: RuntimeKind::Portless,
+            state: WorkloadState::Running,
+            pids: vec![],
+            listeners: vec![],
+            project: None,
+            manager: None,
+            source: None,
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        });
+        snapshot.edges.push(Edge {
+            kind: EdgeKind::WorkloadOwnsListener,
+            from: EntityRef::Workload(workload_id),
+            to: EntityRef::Listener(listener_id),
+            provenance: vec![],
+        });
+        let row = listener_rows(&snapshot).pop().unwrap();
+        assert_eq!(row.manager_label.as_deref(), Some("portless"));
+        let detail = row.manager_detail.unwrap();
+        assert!(detail.contains("orphan.localhost"));
+        assert!(!detail.contains("cli pid"));
+    }
+
+    #[test]
+    fn message_output_round_trips_through_json() {
+        let m = MessageOutput {
+            message: "hi".into(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, "{\"message\":\"hi\"}");
+    }
 }

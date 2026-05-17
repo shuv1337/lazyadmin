@@ -485,6 +485,166 @@ mod tests {
     }
 
     #[test]
+    fn discovery_event_added_helper_carries_entity_and_no_changes() {
+        let entity = EntityRef::Listener(ListenerId::new("l"));
+        let event = DiscoveryEvent::added(entity.clone());
+        assert!(matches!(event.kind, DiscoveryEventKind::Added));
+        assert_eq!(event.entity, Some(entity));
+        assert!(event.changes.is_none());
+        assert!(event.adapter.is_none());
+        assert!(event.reason.is_none());
+    }
+
+    #[test]
+    fn discovery_event_changed_helper_carries_changes() {
+        let entity = EntityRef::Workload(WorkloadId::new("w"));
+        let event = DiscoveryEvent::changed(
+            entity.clone(),
+            vec![FieldChange {
+                field: "state".into(),
+                old: "running".into(),
+                new: "stopped".into(),
+            }],
+        );
+        assert!(matches!(event.kind, DiscoveryEventKind::Changed));
+        let changes = event.changes.as_ref().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "state");
+    }
+
+    #[test]
+    fn discovery_event_removed_helper_no_changes_or_adapter() {
+        let entity = EntityRef::Listener(ListenerId::new("l"));
+        let event = DiscoveryEvent::removed(entity);
+        assert!(matches!(event.kind, DiscoveryEventKind::Removed));
+        assert!(event.changes.is_none());
+    }
+
+    #[test]
+    fn discovery_event_degraded_carries_adapter_and_reason() {
+        let event = DiscoveryEvent::degraded("procfs", "socket open failed");
+        assert!(matches!(event.kind, DiscoveryEventKind::Degraded));
+        assert_eq!(event.adapter.as_deref(), Some("procfs"));
+        assert_eq!(event.reason.as_deref(), Some("socket open failed"));
+    }
+
+    #[test]
+    fn snapshot_empty_has_canonical_schema_version_and_no_entities() {
+        let s = Snapshot::empty();
+        assert_eq!(s.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        assert!(s.listeners.is_empty());
+        assert!(s.workloads.is_empty());
+        assert!(s.processes.is_empty());
+        assert!(s.managers.is_empty());
+        assert!(s.projects.is_empty());
+        assert!(s.tracked_runs.is_empty());
+        assert!(s.edges.is_empty());
+        assert!(s.warnings.is_empty());
+        assert!(s.metadata.is_none());
+    }
+
+    #[test]
+    fn id_types_display_uses_inner_string() {
+        let id = ListenerId::new("tcp:0:0");
+        assert_eq!(format!("{id}"), "tcp:0:0");
+        assert_eq!(format!("{:?}", id), "ListenerId(\"tcp:0:0\")");
+    }
+
+    #[test]
+    fn id_types_uuid_v7_is_unique_per_call() {
+        let a = WorkloadId::uuid_v7();
+        let b = WorkloadId::uuid_v7();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn entity_ref_round_trips_as_tagged_json() {
+        let r = EntityRef::Listener(ListenerId::new("x"));
+        let json = serde_json::to_string(&r).unwrap();
+        // serde tag = "kind", content = "id"
+        assert!(json.contains("\"kind\":\"listener\""));
+        assert!(json.contains("\"id\":\"x\""));
+        let back: EntityRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn confidence_orders_high_above_low() {
+        assert!(Confidence::High > Confidence::Medium);
+        assert!(Confidence::Medium > Confidence::Low);
+    }
+
+    #[test]
+    fn runtime_kind_round_trips_in_snake_case() {
+        for kind in [
+            RuntimeKind::Direct,
+            RuntimeKind::Docker,
+            RuntimeKind::DockerCompose,
+            RuntimeKind::Portless,
+            RuntimeKind::SystemdUser,
+            RuntimeKind::Unknown,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: RuntimeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn exposure_round_trips_in_snake_case() {
+        for ex in [
+            Exposure::Public,
+            Exposure::LanOrPublic,
+            Exposure::Loopback,
+            Exposure::ContainerOnly,
+            Exposure::UnixLocal,
+            Exposure::Unknown,
+        ] {
+            let json = serde_json::to_string(&ex).unwrap();
+            let back: Exposure = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, ex);
+        }
+    }
+
+    #[test]
+    fn warning_severity_round_trips() {
+        for s in [
+            WarningSeverity::Info,
+            WarningSeverity::Warning,
+            WarningSeverity::Error,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: WarningSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    #[test]
+    fn process_key_hash_eq_uses_all_fields() {
+        use std::collections::HashSet;
+        let a = ProcessKey {
+            pid: 1,
+            boot_id: "b".into(),
+            start_time_ticks: 7,
+        };
+        let b = ProcessKey {
+            pid: 1,
+            boot_id: "b".into(),
+            start_time_ticks: 7,
+        };
+        let c = ProcessKey {
+            pid: 1,
+            boot_id: "b".into(),
+            start_time_ticks: 8,
+        };
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
+    }
+
+    #[test]
     fn listener_defaults_dual_stack_unknown_for_old_json() {
         let json = serde_json::json!({
             "id": "listener:test",
