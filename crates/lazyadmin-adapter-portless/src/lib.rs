@@ -503,4 +503,108 @@ mod tests {
         assert!(out.workloads.is_empty());
         assert!(out.warnings.is_empty());
     }
+
+    #[test]
+    fn parse_routes_drops_entries_with_missing_or_empty_hostname() {
+        let mut warnings = Vec::new();
+        let json = r#"[
+            {"hostname":"","port":3000,"pid":1},
+            {"port":3001,"pid":1},
+            {"hostname":"ok","port":3002,"pid":1}
+        ]"#;
+        let routes = parse_routes(json.as_bytes(), Path::new("/state"), &mut warnings);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].hostname, "ok");
+        assert!(
+            warnings.iter().any(|w| w.code == "portless.routes_invalid"),
+            "expected routes_invalid warning for dropped entries"
+        );
+    }
+
+    #[test]
+    fn parse_routes_drops_negative_pid() {
+        let mut warnings = Vec::new();
+        let json = r#"[{"hostname":"x","port":3000,"pid":-1}]"#;
+        let routes = parse_routes(json.as_bytes(), Path::new("/state"), &mut warnings);
+        assert!(routes.is_empty());
+        assert!(warnings.iter().any(|w| w.code == "portless.routes_invalid"));
+    }
+
+    #[test]
+    fn parse_routes_accepts_empty_array() {
+        let mut warnings = Vec::new();
+        let routes = parse_routes(b"[]", Path::new("/state"), &mut warnings);
+        assert!(routes.is_empty());
+        // No invalid entries -> no "routes_invalid" warning either.
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_routes_warns_once_for_pluralized_messages() {
+        let mut warnings = Vec::new();
+        // Two bad entries -> singular vs plural "entries".
+        let json = r#"[
+            {"hostname":"","port":1,"pid":1},
+            {"hostname":"","port":1,"pid":1}
+        ]"#;
+        let routes = parse_routes(json.as_bytes(), Path::new("/state"), &mut warnings);
+        assert!(routes.is_empty());
+        let msg = &warnings[0].message;
+        assert!(msg.contains("entries"), "expected plural in: {msg}");
+        assert!(!msg.contains(" entry "), "unexpected singular in: {msg}");
+    }
+
+    #[test]
+    fn portless_route_equality_and_clone() {
+        let r = PortlessRoute {
+            hostname: "h".into(),
+            port: 3000,
+            pid: 1,
+        };
+        assert_eq!(r.clone(), r);
+    }
+
+    #[test]
+    fn proc_pid_exists_for_self_and_not_for_huge() {
+        assert!(proc_pid_exists(std::process::id() as i32));
+        assert!(!proc_pid_exists(2_147_483_640));
+    }
+
+    #[test]
+    fn adapter_name_and_capabilities() {
+        let a = PortlessAdapter::with_state_dirs_for_test(vec![], None);
+        assert_eq!(a.name(), "portless");
+        let caps = a.capabilities();
+        assert!(caps.polling);
+        assert!(!caps.watching);
+    }
+
+    #[tokio::test]
+    async fn discover_emits_unreadable_when_routes_json_unreadable() {
+        let temp = tempfile::tempdir().unwrap();
+        // Create routes.json as a directory so reading it fails.
+        std::fs::create_dir(temp.path().join("routes.json")).unwrap();
+        let adapter =
+            PortlessAdapter::with_state_dirs_for_test(vec![temp.path().to_path_buf()], None);
+        let out = adapter.discover(DiscoveryContext::default()).await.unwrap();
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.code == "portless.routes_unreadable"),
+            "expected unreadable warning, got {:?}",
+            out.warnings.iter().map(|w| &w.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_empty_routes_emits_only_manager() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("routes.json"), b"[]").unwrap();
+        let adapter =
+            PortlessAdapter::with_state_dirs_for_test(vec![temp.path().to_path_buf()], None);
+        let out = adapter.discover(DiscoveryContext::default()).await.unwrap();
+        assert_eq!(out.managers.len(), 1);
+        assert!(out.workloads.is_empty());
+        assert!(out.warnings.is_empty());
+    }
 }

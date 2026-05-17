@@ -22,3 +22,6 @@ tracing.workspace = true
 [features]
 default = []
 sock_diag = []
+
+[dev-dependencies]
+tempfile.workspace = true

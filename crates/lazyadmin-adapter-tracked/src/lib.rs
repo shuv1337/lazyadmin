@@ -298,9 +298,158 @@ pub fn forget(sel: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn sample_entry(id: &str) -> RunEntry {
+        RunEntry {
+            id: id.into(),
+            tag: Some("tag-a".into()),
+            cmd: vec!["echo".into(), "hi".into()],
+            cwd: Some(PathBuf::from("/tmp")),
+            env_hash: None,
+            started_at: Utc::now(),
+            creator: "u".into(),
+            scope_or_unit_name: None,
+            state: WorkloadState::Running,
+            log_source: "file".into(),
+            spawn_method: "direct_detached_file_log".into(),
+            pid: Some(2_147_483_640), // unlikely to exist; reconcile -> exited
+            log_file: None,
+        }
+    }
+
     #[test]
     fn registry_path() {
         let r = Registry::new(PathBuf::from("/tmp/lazyadmin-test-runs"));
         assert!(r.path().ends_with("lazyadmin-test-runs"));
+    }
+
+    #[test]
+    fn registry_ensure_creates_directory_with_0700_permissions() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("runs");
+        let reg = Registry::new(root.clone());
+        reg.ensure().unwrap();
+        assert!(root.exists());
+        let meta = fs::metadata(&root).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700, got {mode:o}");
+    }
+
+    #[test]
+    fn save_then_list_round_trips_entry() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        let entry = sample_entry("r1");
+        reg.save(&entry).unwrap();
+        let listed = reg.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "r1");
+        assert_eq!(listed[0].tag.as_deref(), Some("tag-a"));
+    }
+
+    #[test]
+    fn list_reconciles_running_state_to_exited_when_pid_is_dead() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        reg.save(&sample_entry("r1")).unwrap();
+        // PID 2_147_483_640 almost certainly doesn't exist; reconcile flips to Exited.
+        let listed = reg.list().unwrap();
+        assert_eq!(listed[0].state, WorkloadState::Exited);
+    }
+
+    #[test]
+    fn reconcile_keeps_running_for_existing_pid() {
+        let mut entry = sample_entry("r-self");
+        entry.pid = Some(std::process::id());
+        reconcile_entry(&mut entry);
+        assert_eq!(entry.state, WorkloadState::Running);
+    }
+
+    #[test]
+    fn reconcile_leaves_non_running_states_unchanged() {
+        let mut entry = sample_entry("r1");
+        entry.state = WorkloadState::Exited;
+        entry.pid = Some(std::process::id()); // even if PID is alive
+        reconcile_entry(&mut entry);
+        assert_eq!(entry.state, WorkloadState::Exited);
+    }
+
+    #[test]
+    fn corrupt_json_file_is_renamed_to_dot_bad_and_skipped() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("runs");
+        let reg = Registry::new(root.clone());
+        reg.ensure().unwrap();
+        let bad = root.join("oops.json");
+        fs::write(&bad, "{not valid json").unwrap();
+        let listed = reg.list().unwrap();
+        assert!(listed.is_empty());
+        assert!(!bad.exists(), "corrupt file should have been renamed");
+        assert!(root.join("oops.json.bad").exists());
+    }
+
+    #[test]
+    fn resolve_finds_entry_by_id() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        reg.save(&sample_entry("r-id")).unwrap();
+        let found = reg.resolve("r-id").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "r-id");
+    }
+
+    #[test]
+    fn resolve_finds_entry_by_tag_prefix_and_bare_tag() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        let mut e = sample_entry("r-tag");
+        e.tag = Some("my-app".into());
+        reg.save(&e).unwrap();
+        // tag: prefix
+        assert_eq!(
+            reg.resolve("tag:my-app").unwrap().unwrap().tag.as_deref(),
+            Some("my-app")
+        );
+        // Bare tag also resolved.
+        assert_eq!(
+            reg.resolve("my-app").unwrap().unwrap().tag.as_deref(),
+            Some("my-app")
+        );
+    }
+
+    #[test]
+    fn resolve_returns_none_for_missing_selector() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        reg.ensure().unwrap();
+        assert!(reg.resolve("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_returns_true_when_entry_removed_and_false_when_missing() {
+        let tmp = tempdir().unwrap();
+        let reg = Registry::new(tmp.path().join("runs"));
+        reg.save(&sample_entry("r-forget")).unwrap();
+        assert!(reg.forget("r-forget").unwrap());
+        assert!(!reg.forget("r-forget").unwrap(), "second forget is no-op");
+    }
+
+    #[test]
+    fn run_entry_round_trips_through_json() {
+        let entry = sample_entry("r-json");
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: RunEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, entry.id);
+        assert_eq!(back.cmd, entry.cmd);
+        assert_eq!(back.state, entry.state);
+    }
+
+    #[test]
+    fn tracked_adapter_name_is_tracked() {
+        let a = TrackedAdapter::default();
+        assert_eq!(a.name(), "tracked");
+        assert!(a.capabilities().polling);
+        assert!(!a.capabilities().watching);
     }
 }

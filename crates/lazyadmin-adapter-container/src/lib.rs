@@ -700,6 +700,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exposure_for_loopback_aliases() {
+        assert_eq!(exposure_for("127.0.0.1"), Exposure::Loopback);
+        assert_eq!(exposure_for("::1"), Exposure::Loopback);
+        assert_eq!(exposure_for("localhost"), Exposure::Loopback);
+    }
+
+    #[test]
+    fn exposure_for_empty_is_unknown() {
+        assert_eq!(exposure_for(""), Exposure::Unknown);
+    }
+
+    #[test]
+    fn exposure_for_routable_ip_is_lan_or_public() {
+        assert_eq!(exposure_for("0.0.0.0"), Exposure::LanOrPublic);
+        assert_eq!(exposure_for("10.1.2.3"), Exposure::LanOrPublic);
+        assert_eq!(exposure_for("8.8.8.8"), Exposure::LanOrPublic);
+    }
+
+    #[test]
+    fn workload_ref_from_event_uses_compose_labels_when_available() {
+        let mut attrs = HashMap::new();
+        attrs.insert("com.docker.compose.project".into(), "acme".into());
+        attrs.insert("com.docker.compose.service".into(), "db".into());
+        let wid = workload_ref_from_event("abcdef1234567890", Some(&attrs));
+        assert_eq!(wid.0, "compose:acme/db");
+    }
+
+    #[test]
+    fn workload_ref_from_event_uses_podman_compose_labels() {
+        let mut attrs = HashMap::new();
+        attrs.insert("io.podman.compose.project".into(), "acme".into());
+        attrs.insert("io.podman.compose.service".into(), "db".into());
+        let wid = workload_ref_from_event("abcdef1234567890", Some(&attrs));
+        assert_eq!(wid.0, "compose:acme/db");
+    }
+
+    #[test]
+    fn workload_ref_from_event_falls_back_to_truncated_container_id() {
+        let wid = workload_ref_from_event("abcdef1234567890", None);
+        assert_eq!(wid.0, "container:abcdef123456");
+    }
+
+    #[test]
+    fn workload_ref_from_event_does_not_panic_on_short_id() {
+        let wid = workload_ref_from_event("abc", None);
+        assert_eq!(wid.0, "container:abc");
+    }
+
+    #[test]
+    fn docker_event_skips_non_container_messages() {
+        let m = EventMessage {
+            typ: Some(EventMessageTypeEnum::IMAGE),
+            action: Some("pull".into()),
+            actor: Some(EventActor {
+                id: Some("sha256:abc".into()),
+                attributes: None,
+            }),
+            ..Default::default()
+        };
+        assert!(docker_event_to_discovery(&m).is_none());
+    }
+
+    #[test]
+    fn docker_event_skips_exec_actions() {
+        let m = EventMessage {
+            typ: Some(EventMessageTypeEnum::CONTAINER),
+            action: Some("exec_create".into()),
+            actor: Some(EventActor {
+                id: Some("abc".into()),
+                attributes: None,
+            }),
+            ..Default::default()
+        };
+        assert!(docker_event_to_discovery(&m).is_none());
+    }
+
+    #[test]
+    fn docker_event_returns_none_without_action_or_actor() {
+        let m = EventMessage {
+            typ: Some(EventMessageTypeEnum::CONTAINER),
+            action: None,
+            actor: None,
+            ..Default::default()
+        };
+        assert!(docker_event_to_discovery(&m).is_none());
+    }
+
+    #[test]
+    fn container_adapter_name_is_container() {
+        let a = ContainerAdapter::new();
+        assert_eq!(a.name(), "container");
+        assert!(a.capabilities().polling);
+    }
+
     #[tokio::test]
     async fn events_watch_stream_is_native_when_endpoint_exists() {
         use lazyadmin_core::graph::DiscoveryAdapter;

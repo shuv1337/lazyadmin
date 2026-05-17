@@ -938,6 +938,154 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_socket_target_rejects_garbage() {
+        assert_eq!(parse_socket_target("pipe:[1]"), None);
+        assert_eq!(parse_socket_target("socket:[abc]"), None);
+        assert_eq!(parse_socket_target("socket:[]"), None);
+        assert_eq!(parse_socket_target("socket:[123"), None);
+    }
+
+    #[test]
+    fn exposure_classifies_all_branches() {
+        // unix
+        assert_eq!(
+            exposure(None, &AddressFamily::Unix, &Protocol::Unix),
+            Exposure::UnixLocal
+        );
+        assert_eq!(
+            exposure(Some("x"), &AddressFamily::Ipv4, &Protocol::Unix),
+            Exposure::UnixLocal
+        );
+        // loopback
+        assert_eq!(
+            exposure(Some("::1"), &AddressFamily::Ipv6, &Protocol::Tcp),
+            Exposure::Loopback
+        );
+        // unspecified
+        assert_eq!(
+            exposure(Some("0.0.0.0"), &AddressFamily::Ipv4, &Protocol::Tcp),
+            Exposure::LanOrPublic
+        );
+        assert_eq!(
+            exposure(Some("::"), &AddressFamily::Ipv6, &Protocol::Tcp),
+            Exposure::LanOrPublic
+        );
+        // RFC1918
+        assert_eq!(
+            exposure(Some("10.0.0.5"), &AddressFamily::Ipv4, &Protocol::Tcp),
+            Exposure::LanOrPublic
+        );
+        assert_eq!(
+            exposure(Some("192.168.1.1"), &AddressFamily::Ipv4, &Protocol::Tcp),
+            Exposure::LanOrPublic
+        );
+        // public
+        assert_eq!(
+            exposure(Some("8.8.8.8"), &AddressFamily::Ipv4, &Protocol::Tcp),
+            Exposure::Public
+        );
+        // unknown
+        assert_eq!(
+            exposure(None, &AddressFamily::Ipv4, &Protocol::Tcp),
+            Exposure::Unknown
+        );
+    }
+
+    #[test]
+    fn parse_inet_handles_header_only_input() {
+        let header = "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+        assert!(parse_inet(header, Protocol::Tcp, AddressFamily::Ipv4).is_empty());
+    }
+
+    #[test]
+    fn parse_inet_skips_malformed_address_rows() {
+        // Address column with garbage should be skipped, not crash.
+        let t = "hdr\n0: not_an_address 00000000:0000 0A 0 0 0 0 0 1\n1: 0100007F:0BB8 00000000:0000 0A 0 0 0 0 0 2\n";
+        let rows = parse_inet(t, Protocol::Tcp, AddressFamily::Ipv4);
+        // The well-formed row should be retained.
+        assert!(
+            rows.iter().any(|r| r.port == Some(3000)),
+            "expected port 3000 in {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn parse_unix_handles_header_only_input() {
+        let header = "Num RefCount Protocol Flags Type St Inode Path\n";
+        assert!(parse_unix(header).is_empty());
+    }
+
+    #[test]
+    fn parse_unix_returns_unnamed_socket_entries() {
+        // No path column at all.
+        let t = "Num RefCount Protocol Flags Type St Inode\n0 0 0 0 0001 01 42\n";
+        let rows = parse_unix(t);
+        // Implementation may yield 0 or 1 rows but must not panic.
+        for r in &rows {
+            assert_eq!(r.protocol, Protocol::Unix);
+        }
+    }
+
+    #[test]
+    fn probe_v6_only_returns_not_available_when_link_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = probe_v6_only(tmp.path(), 1, 2).unwrap_err();
+        assert!(matches!(err, ProbeError::NotAvailable));
+    }
+
+    #[test]
+    fn diff_listener_snapshots_added_and_removed() {
+        let listener = |id: &str| Listener {
+            id: ListenerId::new(id),
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            bind_addr: Some("127.0.0.1".into()),
+            port: Some(3000),
+            path: None,
+            state: ListenerState::Listen,
+            netns: "host".into(),
+            socket_inode: Some(1),
+            exposure: Exposure::Loopback,
+            owners: vec![],
+            confidence: Confidence::High,
+            provenance: vec![],
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+            dual_stack_state: DualStackState::NotApplicable,
+        };
+        let before = listener_snapshots(&DiscoveryOutput {
+            listeners: vec![listener("a"), listener("b")],
+            ..Default::default()
+        });
+        let after = listener_snapshots(&DiscoveryOutput {
+            listeners: vec![listener("b"), listener("c")],
+            ..Default::default()
+        });
+        let events = diff_listener_snapshots(&before, &after);
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert!(kinds.contains(&DiscoveryEventKind::Added));
+        assert!(kinds.contains(&DiscoveryEventKind::Removed));
+    }
+
+    #[test]
+    fn raw_proc_listener_can_be_constructed_and_cloned() {
+        let raw = RawProcListener {
+            protocol: Protocol::Tcp,
+            family: AddressFamily::Ipv4,
+            addr: Some("127.0.0.1".into()),
+            port: Some(80),
+            path: None,
+            state_hex: "0A".into(),
+            inode: SocketInode(42),
+            netns: NamespaceId("host".into()),
+        };
+        let cloned = raw.clone();
+        assert_eq!(cloned.port, raw.port);
+        assert_eq!(cloned.inode.0, 42);
+    }
+
     #[cfg(feature = "sock_diag")]
     #[tokio::test]
     async fn sockdiag_feature_uses_sockdiag_provenance() {

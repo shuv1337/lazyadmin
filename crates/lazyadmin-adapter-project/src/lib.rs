@@ -194,4 +194,88 @@ mod tests {
         assert!(a.detect_path(&d, Confidence::High).is_none());
         let _ = fs::remove_dir_all(&d);
     }
+
+    #[test]
+    fn markers_list_contains_expected_files() {
+        let m = ProjectAdapter::markers();
+        assert!(m.contains(&"Cargo.toml"));
+        assert!(m.contains(&"package.json"));
+        assert!(m.contains(&"go.mod"));
+        assert!(m.contains(&"pyproject.toml"));
+        assert!(m.contains(&".git"));
+    }
+
+    #[test]
+    fn pnpm_marker_overrides_npm_when_both_present() {
+        let d = std::env::temp_dir().join(format!("lazyadmin-pnpm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("package.json"), "{}").unwrap();
+        fs::write(d.join("pnpm-lock.yaml"), "").unwrap();
+        let mut a = ProjectAdapter::new(Config::default());
+        let p = a.detect_path(&d, Confidence::High).unwrap();
+        assert_eq!(p.package_manager.as_deref(), Some("pnpm"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bun_marker_detected() {
+        let d = std::env::temp_dir().join(format!("lazyadmin-bun-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("bun.lock"), "").unwrap();
+        let mut a = ProjectAdapter::new(Config::default());
+        let p = a.detect_path(&d, Confidence::High).unwrap();
+        assert_eq!(p.package_manager.as_deref(), Some("bun"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn upward_scan_finds_marker_from_subdirectory() {
+        let d = std::env::temp_dir().join(format!("lazyadmin-up-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let sub = d.join("a/b/c");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(d.join("go.mod"), "").unwrap();
+        let mut a = ProjectAdapter::new(Config::default());
+        let p = a.detect_path(&sub, Confidence::High).unwrap();
+        assert_eq!(p.root, d);
+        assert!(p.markers.iter().any(|m| m.kind == "go.mod"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cache_returns_same_project_for_subsequent_call() {
+        let d = std::env::temp_dir().join(format!("lazyadmin-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("Cargo.toml"), "").unwrap();
+        let mut a = ProjectAdapter::new(Config::default());
+        let p1 = a.detect_path(&d.join("sub"), Confidence::High).unwrap();
+        let p2 = a.detect_path(&d.join("sub"), Confidence::High).unwrap();
+        assert_eq!(p1.id, p2.id);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn detect_path_from_file_uses_parent_directory() {
+        let d = std::env::temp_dir().join(format!("lazyadmin-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("Cargo.toml"), "").unwrap();
+        let file = d.join("some.txt");
+        fs::write(&file, "").unwrap();
+        let mut a = ProjectAdapter::new(Config::default());
+        let p = a.detect_path(&file, Confidence::High).unwrap();
+        assert_eq!(p.root, d);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn adapter_name_and_capabilities() {
+        let a = ProjectAdapter::new(Config::default());
+        assert_eq!(a.name(), "project");
+        assert!(a.capabilities().polling);
+        assert!(!a.capabilities().watching);
+    }
 }

@@ -361,4 +361,68 @@ mod tests {
         assert!(adapter.watch().await.is_none());
         assert!(!adapter.capabilities().watching);
     }
+
+    #[test]
+    fn unit_from_cgroup_recognises_scope_and_socket_units() {
+        let (kind, unit) = unit_from_cgroup("0::/system.slice/dev-foo.scope").unwrap();
+        assert!(matches!(kind, RuntimeKind::SystemdSystem));
+        assert_eq!(unit, "dev-foo.scope");
+
+        let (kind, unit) = unit_from_cgroup("0::/user.slice/dev.socket").unwrap();
+        assert!(matches!(kind, RuntimeKind::SystemdUser));
+        assert_eq!(unit, "dev.socket");
+    }
+
+    #[test]
+    fn unit_from_cgroup_returns_none_when_no_unit_segment() {
+        assert!(unit_from_cgroup("0::/init.scope-without-suffix/abc").is_none());
+        assert!(unit_from_cgroup("").is_none());
+    }
+
+    #[test]
+    fn unit_from_cgroup_decodes_x2d_escapes() {
+        let (_, unit) = unit_from_cgroup("0::/system.slice/dev\\x2dapi.service").unwrap();
+        assert_eq!(unit, "dev-api.service");
+    }
+
+    #[test]
+    fn unit_from_systemd_object_path_decodes_hex_escapes() {
+        assert_eq!(
+            unit_from_systemd_object_path("/org/freedesktop/systemd1/unit/foo_2dbar_2eservice"),
+            Some("foo-bar.service".into())
+        );
+    }
+
+    #[test]
+    fn unit_from_systemd_object_path_returns_none_when_prefix_missing() {
+        assert!(unit_from_systemd_object_path("/unrelated/path").is_none());
+    }
+
+    #[test]
+    fn systemd_signal_to_discovery_returns_none_for_unknown_signals() {
+        assert!(
+            systemd_signal_to_discovery(
+                "system",
+                "NotARealSignal",
+                "/org/freedesktop/systemd1/unit/ssh_2eservice",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_restart_policy_trims_and_records_raw() {
+        let r = parse_restart_policy("  on-failure\n");
+        assert_eq!(r.policy, "on-failure");
+        assert_eq!(r.raw, "  on-failure\n");
+        assert!(matches!(r.source, RestartPolicySource::SystemdRestart));
+    }
+
+    #[test]
+    fn adapter_name_and_default_polling() {
+        let a = SystemdAdapter::default();
+        assert_eq!(a.name(), "systemd");
+        assert!(a.capabilities().polling);
+        assert!(a.capabilities().watching, "default events_enabled is true");
+    }
 }
