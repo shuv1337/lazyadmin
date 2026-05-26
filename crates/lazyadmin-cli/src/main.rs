@@ -946,7 +946,7 @@ async fn run_overview(
 fn exposure_word(exposure: &lazyadmin_core::model::Exposure) -> &'static str {
     match exposure {
         lazyadmin_core::model::Exposure::Public => "public",
-        lazyadmin_core::model::Exposure::LanOrPublic => "lan/public",
+        lazyadmin_core::model::Exposure::LanOrPublic => "lan",
         lazyadmin_core::model::Exposure::Loopback => "loopback",
         lazyadmin_core::model::Exposure::ContainerOnly => "container",
         lazyadmin_core::model::Exposure::UnixLocal => "unix",

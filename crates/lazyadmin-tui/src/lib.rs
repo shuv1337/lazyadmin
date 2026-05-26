@@ -534,6 +534,18 @@ impl ColorSpec {
 }
 
 impl Theme {
+    pub fn builtin_names() -> &'static [&'static str] {
+        &[
+            "default-dark",
+            "night-owl",
+            "night-owl-light",
+            "high-contrast",
+            "colorblind-safe",
+            "solarized-dark",
+            "default-light",
+        ]
+    }
+
     pub fn default_dark() -> Self {
         Self::builtin("default-dark").unwrap()
     }
@@ -2165,7 +2177,7 @@ fn runtime_kind_label(kind: &lazyadmin_core::model::RuntimeKind) -> String {
 fn exposure_label(exposure: &Exposure) -> String {
     match exposure {
         Exposure::Loopback => "loopback",
-        Exposure::LanOrPublic => "lan/public",
+        Exposure::LanOrPublic => "lan",
         Exposure::Public => "public",
         Exposure::ContainerOnly => "container",
         Exposure::UnixLocal => "unix",
@@ -2666,7 +2678,7 @@ enum ExposureSignal {
 fn row_exposure_signal(row: &RowVm) -> ExposureSignal {
     match row.exposure.as_str() {
         "public" => ExposureSignal::Public,
-        "lan/public" => ExposureSignal::Lan,
+        "lan" | "lan/public" => ExposureSignal::Lan,
         _ => ExposureSignal::Loopback,
     }
 }
@@ -2895,15 +2907,15 @@ fn render_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  {}  ", title_for_view(view)),
+            format!(" · {}", title_for_view(view)),
             Style::default()
                 .fg(theme.base_fg.color())
                 .bg(theme.base_bg.color())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{total} listeners"), inactive),
+        Span::styled(format!(" · {total} listeners"), inactive),
         Span::styled(
-            format!("  {public} public"),
+            format!(" · {public} public"),
             Style::default()
                 .fg(if public > 0 {
                     signal_color(theme, theme.risk_public.color())
@@ -2918,7 +2930,7 @@ fn render_header(
                 }),
         ),
         Span::styled(
-            format!("  {lan} LAN"),
+            format!(" · {lan} LAN"),
             Style::default()
                 .fg(if lan > 0 {
                     signal_color(theme, theme.risk_lan.color())
@@ -2928,7 +2940,7 @@ fn render_header(
                 .bg(theme.base_bg.color()),
         ),
         Span::styled(
-            format!("  {loopback} loopback"),
+            format!(" · {loopback} loopback"),
             Style::default()
                 .fg(if loopback > 0 {
                     signal_color(theme, theme.risk_loopback.color())
@@ -4658,6 +4670,7 @@ pub fn help_lines(keybindings: &ResolvedKeybindings) -> Vec<String> {
     lines.push("  Esc — clear query + blur".into());
     lines.push("  Tab — move focus to rows/inspector".into());
     lines.push("  : — open palette".into());
+    lines.push("Inspector actions: [L] logs for selection; [l] keeps the global Logs view.".into());
     lines.push("".into());
     lines.push("views: Overview · Listeners · Workloads · Processes · Doctor · Metrics".into());
     lines.push(
@@ -6037,6 +6050,10 @@ fn run_palette_command(app: &mut App, command: &str, width: u16) {
                 Err(err) => app.set_status(format!("theme failed: {err}")),
             }
         }
+        "theme" => app.set_status(format!(
+            "theme: missing argument. usage: theme <name>. available: {}",
+            Theme::builtin_names().join(", ")
+        )),
         "" => {}
         other => app.set_status(format!("unknown command: {other}")),
     }
@@ -7445,6 +7462,14 @@ mod tests {
         snap.listeners.push(listener_for_process(tracked_key, 8083));
 
         let vm = build_view_model(&snap, 120, false, "");
+        assert_eq!(
+            vm.rows
+                .iter()
+                .find(|row| row.port == Some(8081))
+                .unwrap()
+                .exposure,
+            "lan"
+        );
         let mut theme = Theme::default_dark();
         theme.fallback_palette = PaletteMode::Monochrome;
         let backend = TestBackend::new(120, 20);
@@ -7943,6 +7968,11 @@ mod tests {
         assert!(lines.contains(&"quit: q".into()));
         assert!(!lines.iter().any(|line| line.contains("toggle_filter")));
         assert!(lines.iter().any(|line| line.contains("listeners chips")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[L] logs for selection"))
+        );
     }
 
     #[test]
@@ -9358,6 +9388,19 @@ accent = "#123456"
         assert_eq!(app.theme.name, "high-contrast");
         assert_eq!(app.keybindings.bindings["quit"], vec!["Q"]);
         assert_eq!(app.status.as_deref(), Some("config reloaded"));
+    }
+
+    #[test]
+    fn palette_theme_without_argument_reports_usage_and_names() {
+        let mut app = App::default();
+        run_palette_command(&mut app, "theme", 120);
+        let status = app.status.as_deref().unwrap_or_default();
+        assert!(
+            status.contains("theme: missing argument. usage: theme <name>"),
+            "{status}"
+        );
+        assert!(status.contains("default-dark"), "{status}");
+        assert!(status.contains("solarized-dark"), "{status}");
     }
 
     #[test]
