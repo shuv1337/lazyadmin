@@ -1254,6 +1254,17 @@ mod tests {
     }
 
     #[test]
+    fn app_js_declares_pages_before_initial_route_parse() {
+        let js = include_str!("../static/app.js");
+        let pages = js.find("const PAGES").expect("PAGES constant");
+        let state = js.find("const state =").expect("state initializer");
+        assert!(
+            pages < state,
+            "parseHash() is called while initializing state.route, so PAGES must be initialized first"
+        );
+    }
+
+    #[test]
     fn app_js_has_no_inline_js_in_html() {
         let html = include_str!("../static/index.html");
         // Ensure global search input exists

@@ -252,6 +252,13 @@ Each checkbox is a small mechanical PR or a polish-bundle PR.
 
 ## Phase 5 — Tracking close
 
+Closeout note (2026-05-26): the follow-up architecture-deepening issues
+#27, #28, #30, #31, #29, and #32 moved shared relation, listener-table,
+live-feed, interaction, and action-planning ownership into their final
+modules. Treat `docs/architecture.md` and `AGENTS.md` as the current
+source of truth for those ownership boundaries; the task lists above remain
+historical implementation notes for #13 through #22.
+
 - [ ] Fresh dogfood TUI run on the same host as the v0.4 baseline:
   - [x] Default screen is the digest (#14).
   - [ ] Rail shows ≤8 entries (#19).
