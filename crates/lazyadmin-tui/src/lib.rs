@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod interaction;
+
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     io, panic,
@@ -5482,6 +5484,10 @@ fn cycle_pane(app: &mut App, delta: isize, width: u16) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
+    interaction::InteractionCore::new(app, width).handle_key(key);
+}
+
+fn handle_key_impl(app: &mut App, key: KeyEvent, width: u16) {
     if handle_confirmation_key(app, key) {
         return;
     }
@@ -6732,6 +6738,11 @@ mod tests {
         ProjectId, Protocol, RunId, TrackedRun, WarningSeverity, WorkloadState,
     };
     use ratatui::backend::TestBackend;
+
+    fn interact(app: &mut App, key: KeyEvent, width: u16) -> interaction::InteractionResult {
+        interaction::InteractionCore::new(app, width).handle_key(key)
+    }
+
     #[test]
     fn keymap_covers_plan_keys() {
         assert_eq!(
@@ -8250,10 +8261,13 @@ mod tests {
         app.query.clear();
         rebuild_view_model(&mut app, 120);
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
 
         assert_eq!(app.active_view, ViewKind::Search);
@@ -8271,32 +8285,44 @@ mod tests {
         app.query.clear();
         rebuild_view_model(&mut app, 120);
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert_eq!(app.mode, InputMode::Normal);
         assert_eq!(app.active_view, ViewKind::Search);
         assert_eq!(app.query, "8");
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert_eq!(app.mode, InputMode::Search);
         assert_eq!(app.query, "8");
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert_eq!(app.active_view, ViewKind::Overview);
         assert_eq!(app.mode, InputMode::Normal);
@@ -8311,17 +8337,23 @@ mod tests {
         app.query.clear();
         rebuild_view_model(&mut app, 120);
         for c in "8080".chars() {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                120,
+            assert_eq!(
+                interact(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    120,
+                ),
+                interaction::InteractionResult::Consumed
             );
         }
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
 
         assert_eq!(app.active_view, ViewKind::Listeners);
@@ -8457,17 +8489,23 @@ mod tests {
     #[test]
     fn kill_confirmation_blocks_global_keys_and_renders_target() {
         let mut app = app_with_listener(8080);
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(app.confirmation.as_ref().unwrap().target.contains("8080"));
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(!app.should_quit, "q must be suppressed while confirming");
         assert_eq!(app.confirmation.as_ref().unwrap().typed, "q");
@@ -8489,35 +8527,50 @@ mod tests {
     #[test]
     fn kill_confirmation_esc_cancels_and_correct_text_dry_runs() {
         let mut app = app_with_listener(8080);
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(app.confirmation.is_none());
         assert!(app.status.as_deref().unwrap().contains("cancelled"));
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         for c in "kill".chars() {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                120,
+            assert_eq!(
+                interact(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    120,
+                ),
+                interaction::InteractionResult::Consumed
             );
         }
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(app.confirmation.is_none());
         let status = app.status.as_deref().unwrap();
@@ -8531,16 +8584,22 @@ mod tests {
     #[test]
     fn ctrl_c_cancels_confirmation_instead_of_appending_c() {
         let mut app = app_with_listener(8080);
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(app.confirmation.is_some());
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         assert!(
             app.confirmation.is_none(),
@@ -9531,10 +9590,13 @@ accent = "#123456"
         assert_eq!(before_id, "tcp:127.0.0.1:8001");
 
         // Sort by Bind (next from Port)
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         let after_id = selected_row(&app).unwrap().id.clone();
         assert_eq!(
@@ -9544,20 +9606,26 @@ accent = "#123456"
         assert_eq!(app.listener_sort.column, ListenerSortColumn::Bind);
 
         // Sort prev back to Port
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         let prev_id = selected_row(&app).unwrap().id.clone();
         assert_eq!(prev_id, before_id);
         assert_eq!(app.listener_sort.column, ListenerSortColumn::Port);
 
         // Sort toggle direction
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
-            120,
+        assert_eq!(
+            interact(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+                120,
+            ),
+            interaction::InteractionResult::Consumed
         );
         let toggle_id = selected_row(&app).unwrap().id.clone();
         assert_eq!(toggle_id, before_id);
