@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use lazyadmin_core::model::{
-    EntityRef, Exposure, Listener, ListenerId, ProcessKey, ProjectId, Snapshot, WarningSeverity,
-    Workload,
+    EntityRef, Exposure, Listener, ListenerId, Snapshot, WarningSeverity, Workload,
 };
 use serde::{Deserialize, Serialize};
 
-use super::doctor_groups::{TriageSummary, build_doctor_groups};
+use super::{
+    doctor_groups::{TriageSummary, build_doctor_groups},
+    relations::SnapshotRelations,
+};
 
 pub const EMPTY_EXPOSED: &str = "Nothing exposed beyond loopback. ✓";
 pub const EMPTY_CONFLICTS: &str = "Nothing contended.";
@@ -171,6 +173,7 @@ pub enum DigestViewTarget {
 }
 
 fn build_exposed_section(snapshot: &Snapshot) -> ExposedSection {
+    let relations = SnapshotRelations::new(snapshot);
     let mut public = 0;
     let mut lan = 0;
     let mut unowned_count = 0;
@@ -189,7 +192,7 @@ fn build_exposed_section(snapshot: &Snapshot) -> ExposedSection {
         if listener.owners.is_empty() {
             unowned_count += 1;
         }
-        candidates.push(exposed_row(listener, snapshot));
+        candidates.push(exposed_row(listener, &relations));
     }
 
     candidates.sort_by_key(|row| {
@@ -228,18 +231,18 @@ fn build_exposed_section(snapshot: &Snapshot) -> ExposedSection {
     }
 }
 
-fn exposed_row(listener: &Listener, snapshot: &Snapshot) -> ExposedRow {
-    let owner_pid = owner_pid(listener, snapshot);
-    let project = listener_project_name(listener, snapshot);
+fn exposed_row(listener: &Listener, relations: &SnapshotRelations<'_>) -> ExposedRow {
+    let owner_pid = relations.listener_owner_pid(listener);
+    let project = relations.listener_project_label(listener);
     let unowned = listener.owners.is_empty();
     let public = matches!(listener.exposure, Exposure::Public);
     let project_known = project.is_some();
     ExposedRow {
         listener_id: listener.id.to_string(),
         port: listener.port,
-        bind: listener_bind(listener),
+        bind: relations.listener_bind_label(listener),
         exposure: listener.exposure.clone(),
-        owner_label: owner_label(listener, snapshot),
+        owner_label: relations.listener_owner_label(listener, "—"),
         owner_pid,
         project,
         extra_ports: 0,
@@ -249,6 +252,7 @@ fn exposed_row(listener: &Listener, snapshot: &Snapshot) -> ExposedRow {
 }
 
 fn build_conflicts_section(snapshot: &Snapshot) -> ConflictsSection {
+    let relations = SnapshotRelations::new(snapshot);
     let mut warning_by_listener: BTreeMap<ListenerId, WarningSeverity> = BTreeMap::new();
     for warning in &snapshot.warnings {
         if warning.code != "CONFLICT" {
@@ -278,7 +282,7 @@ fn build_conflicts_section(snapshot: &Snapshot) -> ConflictsSection {
         rows.push(ConflictRow {
             listener_id: listener.id.to_string(),
             port: listener.port,
-            bind: listener_bind(listener),
+            bind: relations.listener_bind_label(listener),
             owner_count: listener.owners.len(),
             severity,
             reason: if warning_severity.is_some() {
@@ -359,85 +363,6 @@ fn build_projects_section(snapshot: &Snapshot) -> ProjectsSection {
     }
 }
 
-fn listener_bind(listener: &Listener) -> String {
-    if let Some(path) = &listener.path {
-        return path.display().to_string();
-    }
-    let addr = listener.bind_addr.as_deref().unwrap_or("*");
-    match listener.port {
-        Some(port) => format!("{addr}:{port}"),
-        None => addr.to_string(),
-    }
-}
-
-fn owner_label(listener: &Listener, snapshot: &Snapshot) -> String {
-    match listener.owners.first() {
-        Some(EntityRef::Process(process_key)) => format!("pid {}", process_key.pid),
-        Some(EntityRef::Workload(id)) => snapshot
-            .workloads
-            .iter()
-            .find(|workload| &workload.id == id)
-            .map(|workload| workload.display_name.clone())
-            .unwrap_or_else(|| format!("workload {id}")),
-        Some(EntityRef::Manager(id)) => snapshot
-            .managers
-            .iter()
-            .find(|manager| &manager.id == id)
-            .map(|manager| manager.name.clone())
-            .unwrap_or_else(|| format!("manager {id}")),
-        Some(other) => format!("{other:?}"),
-        None => "—".to_string(),
-    }
-}
-
-fn owner_pid(listener: &Listener, snapshot: &Snapshot) -> Option<i32> {
-    for owner in &listener.owners {
-        match owner {
-            EntityRef::Process(process_key) => return Some(process_key.pid),
-            EntityRef::Workload(id) => {
-                if let Some(pid) = snapshot
-                    .workloads
-                    .iter()
-                    .find(|workload| &workload.id == id)
-                    .and_then(|workload| workload.pids.first())
-                    .map(ProcessKey::pid)
-                {
-                    return Some(pid);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn listener_project_name(listener: &Listener, snapshot: &Snapshot) -> Option<String> {
-    for owner in &listener.owners {
-        let project_id: Option<&ProjectId> = match owner {
-            EntityRef::Workload(id) => snapshot
-                .workloads
-                .iter()
-                .find(|workload| &workload.id == id)
-                .and_then(|workload| workload.project.as_ref()),
-            EntityRef::Process(key) => snapshot
-                .workloads
-                .iter()
-                .find(|workload| workload.pids.iter().any(|pid| pid == key))
-                .and_then(|workload| workload.project.as_ref()),
-            _ => None,
-        };
-        if let Some(project_id) = project_id {
-            return snapshot
-                .projects
-                .iter()
-                .find(|project| &project.id == project_id)
-                .map(|project| project.name.clone())
-                .or_else(|| Some(project_id.to_string()));
-        }
-    }
-    None
-}
-
 fn risk_rank(unowned: bool, public: bool, project_known: bool) -> u8 {
     match (unowned, public, project_known) {
         (true, true, _) => 0,
@@ -469,23 +394,13 @@ fn max_time(
     }
 }
 
-trait ProcessKeyExt {
-    fn pid(&self) -> i32;
-}
-
-impl ProcessKeyExt for ProcessKey {
-    fn pid(&self) -> i32 {
-        self.pid
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
     use lazyadmin_core::model::{
-        AddressFamily, Confidence, ListenerState, ProcessKey, Project, Protocol, Workload,
-        WorkloadId, WorkloadState,
+        AddressFamily, Confidence, ListenerState, ProcessKey, Project, ProjectId, Protocol,
+        Workload, WorkloadId, WorkloadState,
     };
 
     #[test]
@@ -622,32 +537,40 @@ mod tests {
             vec![],
         );
         l.path = Some(std::path::PathBuf::from("/tmp/x.sock"));
-        assert_eq!(listener_bind(&l), "/tmp/x.sock");
+        let snapshot = Snapshot::empty();
+        let relations = SnapshotRelations::new(&snapshot);
+        assert_eq!(relations.listener_bind_label(&l), "/tmp/x.sock");
     }
 
     #[test]
     fn listener_bind_formats_host_and_port() {
         let l = listener("tcp:1.2.3.4:80", "1.2.3.4", 80, Exposure::Public, vec![]);
-        assert_eq!(listener_bind(&l), "1.2.3.4:80");
+        let snapshot = Snapshot::empty();
+        let relations = SnapshotRelations::new(&snapshot);
+        assert_eq!(relations.listener_bind_label(&l), "1.2.3.4:80");
     }
 
     #[test]
     fn listener_bind_falls_back_to_star_when_no_addr() {
         let mut l = listener("tcp:*:80", "1.2.3.4", 80, Exposure::Public, vec![]);
         l.bind_addr = None;
-        assert_eq!(listener_bind(&l), "*:80");
+        let snapshot = Snapshot::empty();
+        let relations = SnapshotRelations::new(&snapshot);
+        assert_eq!(relations.listener_bind_label(&l), "*:80");
     }
 
     #[test]
     fn owner_label_no_owner_renders_em_dash() {
         let snapshot = Snapshot::empty();
+        let relations = SnapshotRelations::new(&snapshot);
         let l = listener("tcp:0:0", "0.0.0.0", 0, Exposure::Public, vec![]);
-        assert_eq!(owner_label(&l, &snapshot), "\u{2014}");
+        assert_eq!(relations.listener_owner_label(&l, "\u{2014}"), "\u{2014}");
     }
 
     #[test]
     fn owner_label_uses_process_pid() {
         let snapshot = Snapshot::empty();
+        let relations = SnapshotRelations::new(&snapshot);
         let l = listener(
             "tcp:0:0",
             "0.0.0.0",
@@ -655,7 +578,7 @@ mod tests {
             Exposure::Public,
             vec![EntityRef::Process(process_key(7))],
         );
-        assert_eq!(owner_label(&l, &snapshot), "pid 7");
+        assert_eq!(relations.listener_owner_label(&l, "\u{2014}"), "pid 7");
     }
 
     #[test]
@@ -686,7 +609,8 @@ mod tests {
             Exposure::Public,
             vec![EntityRef::Workload(wid)],
         );
-        assert_eq!(owner_pid(&l, &snapshot), Some(42));
+        let relations = SnapshotRelations::new(&snapshot);
+        assert_eq!(relations.listener_owner_pid(&l), Some(42));
     }
 
     #[test]

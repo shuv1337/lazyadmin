@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use lazyadmin_core::model::*;
 use serde::{Deserialize, Serialize};
 
+use super::relations::SnapshotRelations;
+
 /// Top-level dispatch. Each variant is the typed view-model for one
 /// entity kind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -518,32 +520,40 @@ impl InspectorView {
 // ─── builders (per-kind) ───────────────────────────────────────────
 
 fn build_listener_inspector(listener: &Listener, snapshot: &Snapshot) -> ListenerInspector {
-    let owner_pid = first_owner_pid(listener, snapshot);
+    let relations = SnapshotRelations::new(snapshot);
+    let owner_pid = relations.listener_owner_pid(listener);
     let process_fragment = owner_pid
         .and_then(|pid| snapshot.processes.iter().find(|p| p.pid == pid))
         .map(|p| process_fragment(p, snapshot));
     let related_listeners = owner_pid
-        .map(|pid| listeners_for_pid(snapshot, pid, &listener.id))
+        .map(|pid| listeners_for_pid(snapshot, &relations, pid, &listener.id))
         .unwrap_or_default();
-    let project = listener_project(listener, snapshot);
+    let project = relations
+        .listener_project(listener)
+        .map(|project| ProjectRefBlock {
+            project_id: project.id.clone(),
+            name: project.name.clone(),
+            root: project.root.display().to_string(),
+        });
     let warnings = warnings_for(
         snapshot,
         |w| matches!(&w.entity, Some(EntityRef::Listener(id)) if id == &listener.id),
     );
-    let actions = listener_actions(listener);
+    let bind = relations.listener_bind_label(listener);
+    let actions = listener_actions(listener, &bind);
     let confidence = build_confidence(listener.confidence, &listener.provenance);
     ListenerInspector {
         id: listener.id.clone(),
         title: listener_label(listener),
         identity: ListenerIdentity {
             listener_id: listener.id.to_string(),
-            bind: listener_bind(listener),
+            bind,
             protocol: listener.protocol.clone(),
             family: listener.family.clone(),
             exposure: listener.exposure.clone(),
             state: listener.state.clone(),
             netns: listener.netns.clone(),
-            owner_label: owner_label(listener, snapshot),
+            owner_label: relations.listener_owner_label(listener, "unowned"),
             user: process_fragment.as_ref().and_then(|p| p.user.clone()),
         },
         process: process_fragment,
@@ -556,6 +566,7 @@ fn build_listener_inspector(listener: &Listener, snapshot: &Snapshot) -> Listene
 }
 
 fn build_workload_inspector(workload: &Workload, snapshot: &Snapshot) -> WorkloadInspector {
+    let relations = SnapshotRelations::new(snapshot);
     let listeners = workload
         .listeners
         .iter()
@@ -567,7 +578,7 @@ fn build_workload_inspector(workload: &Workload, snapshot: &Snapshot) -> Workloa
         })
         .map(|listener| RelatedListener {
             listener_id: listener.id.clone(),
-            bind: listener_bind(listener),
+            bind: relations.listener_bind_label(listener),
             exposure: listener.exposure.clone(),
         })
         .collect();
@@ -628,8 +639,9 @@ fn build_workload_inspector(workload: &Workload, snapshot: &Snapshot) -> Workloa
 }
 
 fn build_process_inspector(process: &Process, snapshot: &Snapshot) -> ProcessInspector {
+    let relations = SnapshotRelations::new(snapshot);
     let identity = process_fragment(process, snapshot);
-    let listeners = listeners_for_pid(snapshot, process.pid, &ListenerId::new(""));
+    let listeners = listeners_for_pid(snapshot, &relations, process.pid, &ListenerId::new(""));
     let workload = snapshot
         .workloads
         .iter()
@@ -675,6 +687,7 @@ fn build_process_inspector(process: &Process, snapshot: &Snapshot) -> ProcessIns
 }
 
 fn build_project_inspector(project: &Project, snapshot: &Snapshot) -> ProjectInspector {
+    let relations = SnapshotRelations::new(snapshot);
     let workloads: Vec<WorkloadRefBlock> = snapshot
         .workloads
         .iter()
@@ -700,7 +713,7 @@ fn build_project_inspector(project: &Project, snapshot: &Snapshot) -> ProjectIns
         .filter_map(|id| snapshot.listeners.iter().find(|l| l.id == id))
         .map(|l| RelatedListener {
             listener_id: l.id.clone(),
-            bind: listener_bind(l),
+            bind: relations.listener_bind_label(l),
             exposure: l.exposure.clone(),
         })
         .collect();
@@ -837,111 +850,26 @@ fn listener_label(listener: &Listener) -> String {
     }
 }
 
-fn listener_bind(listener: &Listener) -> String {
-    if let Some(path) = &listener.path {
-        return path.display().to_string();
-    }
-    let addr = listener.bind_addr.as_deref().unwrap_or("*");
-    match listener.port {
-        Some(port) => format!("{addr}:{port}"),
-        None => addr.to_string(),
-    }
-}
-
-fn first_owner_pid(listener: &Listener, snapshot: &Snapshot) -> Option<i32> {
-    for owner in &listener.owners {
-        match owner {
-            EntityRef::Process(key) => return Some(key.pid),
-            EntityRef::Workload(id) => {
-                if let Some(pid) = snapshot
-                    .workloads
-                    .iter()
-                    .find(|workload| &workload.id == id)
-                    .and_then(|workload| workload.pids.first())
-                    .map(|key| key.pid)
-                {
-                    return Some(pid);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn owner_label(listener: &Listener, snapshot: &Snapshot) -> String {
-    match listener.owners.first() {
-        Some(EntityRef::Process(key)) => format!("pid {}", key.pid),
-        Some(EntityRef::Workload(id)) => snapshot
-            .workloads
-            .iter()
-            .find(|workload| &workload.id == id)
-            .map(|workload| workload.display_name.clone())
-            .unwrap_or_else(|| format!("workload {id}")),
-        Some(EntityRef::Manager(id)) => snapshot
-            .managers
-            .iter()
-            .find(|manager| &manager.id == id)
-            .map(|manager| manager.name.clone())
-            .unwrap_or_else(|| format!("manager {id}")),
-        Some(EntityRef::Run(id)) => format!("tracked run {id}"),
-        Some(other) => format!("{other:?}"),
-        None => "unowned".to_string(),
-    }
-}
-
-fn listeners_for_pid(snapshot: &Snapshot, pid: i32, exclude: &ListenerId) -> Vec<RelatedListener> {
+fn listeners_for_pid(
+    snapshot: &Snapshot,
+    relations: &SnapshotRelations<'_>,
+    pid: i32,
+    exclude: &ListenerId,
+) -> Vec<RelatedListener> {
     let mut out = Vec::new();
     for listener in &snapshot.listeners {
         if &listener.id == exclude {
             continue;
         }
-        let owns_pid = listener.owners.iter().any(|owner| match owner {
-            EntityRef::Process(key) => key.pid == pid,
-            EntityRef::Workload(id) => snapshot
-                .workloads
-                .iter()
-                .find(|workload| &workload.id == id)
-                .is_some_and(|workload| workload.pids.iter().any(|key| key.pid == pid)),
-            _ => false,
-        });
-        if owns_pid {
+        if relations.listener_owner_pid(listener) == Some(pid) {
             out.push(RelatedListener {
                 listener_id: listener.id.clone(),
-                bind: listener_bind(listener),
+                bind: relations.listener_bind_label(listener),
                 exposure: listener.exposure.clone(),
             });
         }
     }
     out
-}
-
-fn listener_project(listener: &Listener, snapshot: &Snapshot) -> Option<ProjectRefBlock> {
-    for owner in &listener.owners {
-        let project_id: Option<&ProjectId> = match owner {
-            EntityRef::Workload(id) => snapshot
-                .workloads
-                .iter()
-                .find(|workload| &workload.id == id)
-                .and_then(|workload| workload.project.as_ref()),
-            EntityRef::Process(key) => snapshot
-                .workloads
-                .iter()
-                .find(|workload| workload.pids.iter().any(|k| k == key))
-                .and_then(|workload| workload.project.as_ref()),
-            _ => None,
-        };
-        if let Some(project_id) = project_id
-            && let Some(project) = snapshot.projects.iter().find(|p| &p.id == project_id)
-        {
-            return Some(ProjectRefBlock {
-                project_id: project.id.clone(),
-                name: project.name.clone(),
-                root: project.root.display().to_string(),
-            });
-        }
-    }
-    None
 }
 
 fn process_fragment(process: &Process, snapshot: &Snapshot) -> ProcessFragment {
@@ -1007,8 +935,7 @@ fn build_confidence(value: Confidence, provenance: &[Provenance]) -> ConfidenceB
 
 // ── action previews ─────────────────────────────────────────────────
 
-fn listener_actions(listener: &Listener) -> Vec<ActionPreview> {
-    let bind = listener_bind(listener);
+fn listener_actions(listener: &Listener, bind: &str) -> Vec<ActionPreview> {
     let port = listener.port;
     let mut actions = Vec::new();
     if let Some(port) = port {

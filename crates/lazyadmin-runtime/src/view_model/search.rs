@@ -2,13 +2,13 @@ use std::{path::PathBuf, time::Instant};
 
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use lazyadmin_core::model::{
-    EntityRef, Exposure, Listener, ListenerId, Manager, ManagerId, ManagerScope, Process,
-    ProcessKey, Project, ProjectId, Protocol, Snapshot, Workload, WorkloadId,
+    Exposure, Listener, ListenerId, Manager, ManagerId, ManagerScope, Process, ProcessKey, Project,
+    ProjectId, Protocol, Snapshot, Workload, WorkloadId,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::RAIL_ENTRIES;
+use super::{RAIL_ENTRIES, relations::SnapshotRelations};
 
 pub const SEARCH_SCHEMA_VERSION: &str = "lazyadmin.search.v1";
 pub const DEFAULT_SEARCH_LIMIT: usize = 200;
@@ -242,20 +242,7 @@ fn classify(raw: &str) -> SearchKind {
     }
 }
 
-fn listener_bind_str(listener: &Listener) -> String {
-    match (listener.bind_addr.as_ref(), listener.port) {
-        (Some(addr), Some(port)) => format!("{}:{}", addr, port),
-        (Some(addr), None) => addr.clone(),
-        (None, Some(port)) => format!(":{}", port),
-        (None, None) => listener
-            .path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-    }
-}
-
-fn listener_search_text(listener: &Listener, snapshot: &Snapshot) -> String {
+fn listener_search_text(listener: &Listener, relations: &SnapshotRelations<'_>) -> String {
     let mut parts = Vec::new();
     if let Some(port) = listener.port {
         parts.push(port.to_string());
@@ -270,45 +257,14 @@ fn listener_search_text(listener: &Listener, snapshot: &Snapshot) -> String {
     parts.push(format!("{:?}", listener.exposure).to_lowercase());
 
     for owner in &listener.owners {
-        let label = match owner {
-            EntityRef::Process(pk) => snapshot
-                .processes
-                .iter()
-                .find(|p| &p.key == pk)
-                .and_then(|p| p.exe.as_ref().map(|e| e.display().to_string()))
-                .unwrap_or_else(|| pk.pid.to_string()),
-            EntityRef::Workload(wid) => snapshot
-                .workloads
-                .iter()
-                .find(|w| &w.id == wid)
-                .map(|w| w.display_name.clone())
-                .unwrap_or_else(|| wid.to_string()),
-            EntityRef::Manager(mid) => snapshot
-                .managers
-                .iter()
-                .find(|m| &m.id == mid)
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| mid.to_string()),
-            EntityRef::Project(pid) => snapshot
-                .projects
-                .iter()
-                .find(|p| &p.id == pid)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| pid.to_string()),
-            _ => continue,
-        };
-        parts.push(label);
+        parts.push(relations.entity_search_label(owner));
     }
 
-    for workload in &snapshot.workloads {
-        if workload.listeners.iter().any(|lid| lid == &listener.id) {
-            parts.push(workload.display_name.clone());
-            if let Some(ref pid) = workload.project {
-                if let Some(project) = snapshot.projects.iter().find(|p| &p.id == pid) {
-                    parts.push(project.name.clone());
-                }
-            }
-        }
+    for label in relations.listener_attached_workload_labels(listener) {
+        parts.push(label);
+    }
+    if let Some(project) = relations.listener_attached_project_label(listener) {
+        parts.push(project);
     }
 
     parts.join(" ")
@@ -386,34 +342,6 @@ fn manager_search_text(manager: &Manager) -> String {
     parts.join(" ")
 }
 
-fn is_system_listener(listener: &Listener, snapshot: &Snapshot) -> bool {
-    for owner in &listener.owners {
-        match owner {
-            EntityRef::Manager(mid) => {
-                if let Some(m) = snapshot.managers.iter().find(|m| &m.id == mid) {
-                    if m.scope == ManagerScope::System {
-                        return true;
-                    }
-                }
-            }
-            EntityRef::Process(pk) => {
-                if let Some(p) = snapshot.processes.iter().find(|p| &p.key == pk) {
-                    if p.user.as_deref() == Some("root")
-                        && p.systemd_unit
-                            .as_deref()
-                            .map(|u| !u.contains("user"))
-                            .unwrap_or(true)
-                    {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 fn is_system_process(process: &Process) -> bool {
     if process.user.as_deref() == Some("root") {
         if let Some(ref unit) = process.systemd_unit {
@@ -426,9 +354,9 @@ fn is_system_process(process: &Process) -> bool {
     false
 }
 
-fn is_system_workload(workload: &Workload, snapshot: &Snapshot) -> bool {
+fn is_system_workload(workload: &Workload, relations: &SnapshotRelations<'_>) -> bool {
     if let Some(ref mid) = workload.manager {
-        if let Some(m) = snapshot.managers.iter().find(|m| &m.id == mid) {
+        if let Some(m) = relations.manager(mid) {
             if m.scope == ManagerScope::System {
                 return true;
             }
@@ -441,84 +369,9 @@ fn is_system_manager(manager: &Manager) -> bool {
     manager.scope == ManagerScope::System
 }
 
-fn entity_ref_label(entity: &EntityRef, snapshot: &Snapshot) -> String {
-    match entity {
-        EntityRef::Process(pk) => snapshot
-            .processes
-            .iter()
-            .find(|p| &p.key == pk)
-            .and_then(|p| p.exe.as_ref().map(|e| e.display().to_string()))
-            .unwrap_or_else(|| pk.pid.to_string()),
-        EntityRef::Workload(wid) => snapshot
-            .workloads
-            .iter()
-            .find(|w| &w.id == wid)
-            .map(|w| w.display_name.clone())
-            .unwrap_or_else(|| wid.to_string()),
-        EntityRef::Manager(mid) => snapshot
-            .managers
-            .iter()
-            .find(|m| &m.id == mid)
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| mid.to_string()),
-        EntityRef::Project(pid) => snapshot
-            .projects
-            .iter()
-            .find(|p| &p.id == pid)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| pid.to_string()),
-        EntityRef::Listener(lid) => lid.to_string(),
-        EntityRef::Run(rid) => rid.to_string(),
-        EntityRef::Action(aid) => aid.to_string(),
-    }
-}
-
-fn workload_labels_for_listener(listener: &Listener, snapshot: &Snapshot) -> Vec<String> {
-    let mut labels = Vec::new();
-    for workload in &snapshot.workloads {
-        if workload.listeners.iter().any(|lid| lid == &listener.id) {
-            labels.push(workload.display_name.clone());
-        }
-    }
-    labels
-}
-
-fn project_label_for_listener(listener: &Listener, snapshot: &Snapshot) -> Option<String> {
-    for workload in &snapshot.workloads {
-        if workload.listeners.iter().any(|lid| lid == &listener.id) {
-            if let Some(ref pid) = workload.project {
-                if let Some(project) = snapshot.projects.iter().find(|p| &p.id == pid) {
-                    return Some(project.name.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn project_label_for_workload(workload: &Workload, snapshot: &Snapshot) -> Option<String> {
-    workload.project.as_ref().and_then(|pid| {
-        snapshot
-            .projects
-            .iter()
-            .find(|p| &p.id == pid)
-            .map(|p| p.name.clone())
-    })
-}
-
-fn manager_label_for_workload(workload: &Workload, snapshot: &Snapshot) -> Option<String> {
-    workload.manager.as_ref().and_then(|mid| {
-        snapshot
-            .managers
-            .iter()
-            .find(|m| &m.id == mid)
-            .map(|m| m.name.clone())
-    })
-}
-
 fn build_listener_hit(
     listener: &Listener,
-    snapshot: &Snapshot,
+    relations: &SnapshotRelations<'_>,
     score: i64,
     matched_indices: Vec<usize>,
     is_sys: bool,
@@ -526,16 +379,12 @@ fn build_listener_hit(
     ListenerHit {
         id: listener.id.clone(),
         port: listener.port,
-        bind: listener_bind_str(listener),
+        bind: relations.listener_bind_label(listener),
         protocol: listener.protocol.clone(),
         exposure: listener.exposure.clone(),
-        owner_label: listener
-            .owners
-            .first()
-            .map(|o| entity_ref_label(o, snapshot))
-            .unwrap_or_default(),
-        workload_labels: workload_labels_for_listener(listener, snapshot),
-        project_label: project_label_for_listener(listener, snapshot),
+        owner_label: relations.listener_search_owner_label(listener),
+        workload_labels: relations.listener_attached_workload_labels(listener),
+        project_label: relations.listener_attached_project_label(listener),
         score,
         matched_indices,
         is_system: is_sys,
@@ -569,7 +418,7 @@ fn build_process_hit(process: &Process, score: i64, matched_indices: Vec<usize>)
 
 fn build_workload_hit(
     workload: &Workload,
-    snapshot: &Snapshot,
+    relations: &SnapshotRelations<'_>,
     score: i64,
     matched_indices: Vec<usize>,
 ) -> WorkloadHit {
@@ -577,8 +426,8 @@ fn build_workload_hit(
         id: workload.id.clone(),
         display_name: workload.display_name.clone(),
         runtime: format!("{:?}", workload.runtime).to_lowercase(),
-        project_label: project_label_for_workload(workload, snapshot),
-        manager_label: manager_label_for_workload(workload, snapshot),
+        project_label: relations.workload_project_label(workload),
+        manager_label: relations.workload_manager_label(workload),
         listener_count: workload.listeners.len(),
         pid_count: workload.pids.len(),
         score,
@@ -660,6 +509,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
     let normalized = query.trim().to_string();
     let kind = classify(&normalized);
     let limit = options.limit.clamp(1, MAX_SEARCH_LIMIT);
+    let relations = SnapshotRelations::new(snapshot);
 
     let mut results = SearchResults {
         schema_version: SEARCH_SCHEMA_VERSION.to_string(),
@@ -684,7 +534,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
 
             if options.kinds.listeners {
                 for listener in &snapshot.listeners {
-                    let is_sys = is_system_listener(listener, snapshot);
+                    let is_sys = relations.is_system_listener(listener);
                     if is_sys && !options.show_system {
                         continue;
                     }
@@ -693,7 +543,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
                         let matched_indices = (0..normalized.len()).collect();
                         listener_hits.push(build_listener_hit(
                             listener,
-                            snapshot,
+                            &relations,
                             10_000,
                             matched_indices,
                             is_sys,
@@ -707,7 +557,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
                         {
                             continue;
                         }
-                        let is_sys = is_system_listener(listener, snapshot);
+                        let is_sys = relations.is_system_listener(listener);
                         if is_sys && !options.show_system {
                             continue;
                         }
@@ -717,7 +567,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
                                 let matched_indices = (0..prefix.len()).collect();
                                 listener_hits.push(build_listener_hit(
                                     listener,
-                                    snapshot,
+                                    &relations,
                                     5_000,
                                     matched_indices,
                                     is_sys,
@@ -786,14 +636,14 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
 
             if options.kinds.listeners {
                 for listener in &snapshot.listeners {
-                    let is_sys = is_system_listener(listener, snapshot);
+                    let is_sys = relations.is_system_listener(listener);
                     if is_sys && !options.show_system {
                         continue;
                     }
-                    let text = listener_search_text(listener, snapshot);
+                    let text = listener_search_text(listener, &relations);
                     if let Some((score, indices)) = matcher.fuzzy_indices(&text, &normalized) {
                         listener_hits.push(build_listener_hit(
-                            listener, snapshot, score, indices, is_sys,
+                            listener, &relations, score, indices, is_sys,
                         ));
                     }
                 }
@@ -809,6 +659,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
             // surfaces.
             run_secondary_fuzzy(
                 snapshot,
+                &relations,
                 &matcher,
                 &normalized,
                 &options,
@@ -824,14 +675,14 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
 
             if options.kinds.listeners {
                 for listener in &snapshot.listeners {
-                    let is_sys = is_system_listener(listener, snapshot);
+                    let is_sys = relations.is_system_listener(listener);
                     if is_sys && !options.show_system {
                         continue;
                     }
-                    let haystack = listener_search_text(listener, snapshot);
+                    let haystack = listener_search_text(listener, &relations);
                     if let Some((score, indices)) = matcher.fuzzy_indices(&haystack, text) {
                         listener_hits.push(build_listener_hit(
-                            listener, snapshot, score, indices, is_sys,
+                            listener, &relations, score, indices, is_sys,
                         ));
                     }
                 }
@@ -858,7 +709,15 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
             results.listeners = finalize_group(listener_hits, limit);
             results.processes = finalize_group(process_hits, limit);
 
-            run_secondary_fuzzy(snapshot, &matcher, text, &options, limit, &mut results);
+            run_secondary_fuzzy(
+                snapshot,
+                &relations,
+                &matcher,
+                text,
+                &options,
+                limit,
+                &mut results,
+            );
         }
     }
 
@@ -885,6 +744,7 @@ pub fn run(snapshot: &Snapshot, query: &str, options: SearchOptions) -> SearchRe
 
 fn run_secondary_fuzzy(
     snapshot: &Snapshot,
+    relations: &SnapshotRelations<'_>,
     matcher: &SkimMatcherV2,
     needle: &str,
     options: &SearchOptions,
@@ -898,13 +758,13 @@ fn run_secondary_fuzzy(
     if options.kinds.workloads {
         let mut hits: Vec<WorkloadHit> = Vec::new();
         for workload in &snapshot.workloads {
-            let is_sys = is_system_workload(workload, snapshot);
+            let is_sys = is_system_workload(workload, relations);
             if is_sys && !options.show_system {
                 continue;
             }
             let haystack = workload_search_text(workload, snapshot);
             if let Some((score, indices)) = matcher.fuzzy_indices(&haystack, needle) {
-                hits.push(build_workload_hit(workload, snapshot, score, indices));
+                hits.push(build_workload_hit(workload, relations, score, indices));
             }
         }
         rank_workloads(&mut hits);
