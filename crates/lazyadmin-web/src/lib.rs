@@ -238,16 +238,30 @@ impl AppState {
         let state = self.clone();
         tokio::spawn(async move {
             let cfg = Config::load(state.config_path.as_deref()).unwrap_or_default();
-            let streams = lazyadmin_runtime::event_streams_for_config(&cfg).await;
-            let mut events = futures::stream::select_all(streams);
-            let mut interval = tokio::time::interval(refresh_interval);
+            let mut live_feed = lazyadmin_runtime::spawn_live_snapshot_feed(
+                cfg.clone(),
+                state.config_path.clone(),
+                lazyadmin_runtime::LiveSnapshotFeedSettings::from_config(&cfg)
+                    .with_refresh_interval(refresh_interval),
+            );
             loop {
                 tokio::select! {
-                    _ = interval.tick() => { let _ = state.refresh_snapshot().await; }
-                    event = events.next(), if !events.is_empty() => {
+                    snapshot = live_feed.snapshots.recv() => {
+                        match snapshot {
+                            Some(snapshot) => {
+                                *state.last_snapshot.write().await = Some(CachedSnapshot {
+                                    snapshot,
+                                    refreshed_at: Instant::now(),
+                                });
+                            }
+                            None => break,
+                        }
+                    }
+                    event = live_feed.events.recv() => {
                         if let Some(event) = event {
                             let _ = state.events.send(event);
-                            let _ = state.refresh_snapshot().await;
+                        } else {
+                            break;
                         }
                     }
                 }

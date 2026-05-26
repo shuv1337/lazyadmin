@@ -1,17 +1,19 @@
 #![forbid(unsafe_code)]
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
-use futures::StreamExt;
 use lazyadmin_core::{
     config::Config,
-    correlate::{EventDropCounter, EventFanIn},
+    correlate::EventDropCounter,
     graph::{DiscoveryAdapter, DiscoveryContext},
     model::{DiscoveryEvent, RunId, Snapshot},
     snapshot::SnapshotBuilder,
 };
 
+pub mod live;
 pub mod view_model;
+
+pub use live::{LiveSnapshotFeed, LiveSnapshotFeedSettings, spawn_live_snapshot_feed};
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -95,67 +97,6 @@ pub async fn event_streams_for_config(
         }
     }
     streams
-}
-
-pub fn spawn_snapshot_refresh_task(
-    cfg: Config,
-    config_path: Option<std::path::PathBuf>,
-    snapshot_tx: tokio::sync::mpsc::Sender<Snapshot>,
-    event_tx: tokio::sync::mpsc::Sender<DiscoveryEvent>,
-) {
-    tokio::spawn(async move {
-        let streams = event_streams_for_config(&cfg).await;
-        let has_events = !streams.is_empty();
-        let (mut events, fanin_drops) = EventFanIn::new(
-            streams,
-            cfg.adapters.events.channel_capacity,
-            Duration::from_millis(cfg.ui.refresh.event_debounce_ms),
-        );
-        let mut interval = tokio::time::interval(Duration::from_millis(cfg.ui.refresh.tick_ms));
-        if !has_events {
-            loop {
-                interval.tick().await;
-                match build_snapshot_with_event_drops(config_path.as_deref(), Some(&fanin_drops))
-                    .await
-                {
-                    Ok(snapshot) => {
-                        if snapshot_tx.send(snapshot).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => tracing::debug!(error = %err, "snapshot refresh failed"),
-                }
-            }
-            return;
-        }
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    match build_snapshot_with_event_drops(config_path.as_deref(), Some(&fanin_drops)).await {
-                        Ok(snapshot) => {
-                            if snapshot_tx.send(snapshot).await.is_err() { break; }
-                        }
-                        Err(err) => tracing::debug!(error = %err, "snapshot refresh failed"),
-                    }
-                }
-                event = events.next() => {
-                    match event {
-                        Some(event) => {
-                            let _ = event_tx.send(event).await;
-                            tokio::time::sleep(Duration::from_millis(cfg.ui.refresh.event_debounce_ms)).await;
-                            match build_snapshot_with_event_drops(config_path.as_deref(), Some(&fanin_drops)).await {
-                                Ok(snapshot) => {
-                                    if snapshot_tx.send(snapshot).await.is_err() { break; }
-                                }
-                                Err(err) => tracing::debug!(error = %err, "event snapshot refresh failed"),
-                            }
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-    });
 }
 
 #[cfg(test)]
