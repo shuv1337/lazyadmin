@@ -31,11 +31,11 @@ graph TD
 
 | Crate | Responsibility |
 |-------|--------------|
-| `lazyadmin-core` | Normalized graph models, correlation, config loader, redaction, selectors, snapshot/diff/event JSON contracts, telemetry primitives |
-| `lazyadmin-cli` | Clap command skeleton, human/JSON output formatting, action dispatch |
+| `lazyadmin-core` | Normalized graph models, correlation, action plans/dry-run rendering, config loader, redaction, selectors, snapshot/diff/event JSON contracts, telemetry primitives |
+| `lazyadmin-cli` | Clap command skeleton, human/JSON output formatting, host-state action execution |
 | `lazyadmin-adapter-portless` | Read-only portless route discovery for `PORTLESS_STATE_DIR`, `~/.portless`, and legacy `/tmp/portless` state |
-| `lazyadmin-tui` | Ratatui interface: responsive rendering, theme/keybinding support, live refresh, Process Tree, Metrics |
-| `lazyadmin-runtime` | Shared snapshot/event assembly: `Digest`, `DoctorGroups`, `HeaderPip`, `InspectorView` projections for both TUI and Web |
+| `lazyadmin-tui` | Ratatui interface: responsive rendering, theme/keybinding support, Process Tree, Metrics, and interaction state |
+| `lazyadmin-runtime` | Shared snapshot/event assembly and view-model projections: `Digest`, `DoctorGroups`, `HeaderPip`, `InspectorView`, global search, listener tables, relation lookups, and live snapshot feeds |
 | `lazyadmin-web` | Loopback-only Axum server, embedded static app (`index.html`, `app.css`, `app.js`), read-only API routes |
 
 ## Data flow
@@ -55,11 +55,32 @@ graph TD
 
 4. **Projection** — `lazyadmin-runtime` builds view-models from the
    snapshot: `Digest` for overview, `DoctorGroups` for warnings,
-   `InspectorView` for per-entity detail, `HeaderPip` for status.
+   `InspectorView` for per-entity detail, `HeaderPip` for status,
+   `SearchResults` for global search, and `ListenerTable` for shared
+   listener row facts. Reusable relation facts live in
+   `SnapshotRelations` so digest, search, inspector, and listener-table
+   code do not each rediscover owner/project/manager labels.
 
 5. **Render** — TUI and Web UI render the view-models. The TUI uses
    Ratatui widgets; the Web UI uses the embedded static app calling
    read-only API routes that return the same view-models.
+
+6. **Refresh** — Long-lived surfaces use
+   `lazyadmin_runtime::spawn_live_snapshot_feed`. Discovery events are
+   treated as refresh hints and periodic snapshot polling remains
+   authoritative.
+
+## Action planning and execution
+
+Action descriptions and dry-run text live in `lazyadmin-core::actions`.
+The pure free-port planner is reusable by CLI, TUI, Web, and agents, and
+inspector previews read the first line of the same dry-run output rather
+than duplicating command strings in UI code.
+
+Execution stays outside core. CLI/runtime layers own host-state work:
+confirmation prompts, live rescans, process-key revalidation, signals,
+manager APIs, and post-action verification. This keeps pure planning
+testable while preserving conservative runtime safety.
 
 ## Adapter protocol
 
@@ -143,6 +164,9 @@ cargo run -p lazyadmin-cli -- --help
 cargo run -p lazyadmin-cli -- export --json
 cargo run -p lazyadmin-cli -- doctor --json
 cargo run -p lazyadmin-cli -- overview --json
+cargo run -p lazyadmin-cli -- search hermes --json
+cargo run -p lazyadmin-cli -- diff testdata/snapshots/empty.json testdata/snapshots/empty.json --json
+cargo run -p lazyadmin-cli -- tui --headless --json
 cargo test -p lazyadmin-tui render_views
 cargo test -p lazyadmin-tui live_refresh
 cargo test -p lazyadmin-runtime -p lazyadmin-web

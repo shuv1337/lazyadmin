@@ -10,6 +10,9 @@ const esc = (s) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
   );
 
+// ─── routing ───────────────────────────────────────────────────────
+const PAGES = ["overview", "listeners", "workloads", "processes", "doctor", "metrics"];
+
 // ─── state ─────────────────────────────────────────────────────────
 const state = {
   rail: [],
@@ -35,9 +38,6 @@ const state = {
   state.sortCol = sort.sortCol;
   state.sortDir = sort.sortDir;
 })();
-
-// ─── routing ───────────────────────────────────────────────────────
-const PAGES = ["overview", "listeners", "workloads", "processes", "doctor", "metrics"];
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, "") || "overview";
