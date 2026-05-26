@@ -5,6 +5,7 @@ pub mod digest;
 pub mod doctor_groups;
 pub mod header_pip;
 pub mod inspector;
+pub mod listeners;
 pub mod relations;
 pub mod search;
 
@@ -17,6 +18,12 @@ pub use doctor_groups::{
 };
 pub use header_pip::{AdapterHealth, DropRate, HeaderPip, SnapshotFreshness};
 pub use inspector::InspectorView;
+pub use listeners::{
+    LISTENER_TABLE_SCHEMA_VERSION, ListenerMarker, ListenerSignal, ListenerTable,
+    ListenerTableFilter, ListenerTableOptions, ListenerTableRow, ListenerTableSort,
+    ListenerTableSortColumn, ListenerTableSortDirection, ListenerTableTextMatch,
+    build_listener_table, listener_table_rows, sort_listener_table_rows,
+};
 pub use relations::SnapshotRelations;
 pub use search::{
     DEFAULT_SEARCH_LIMIT, ListenerHit, MAX_SEARCH_LIMIT, ManagerHit, ProcessHit, ProjectHit,
