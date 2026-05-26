@@ -1109,6 +1109,37 @@ mod tests {
     }
 
     #[test]
+    fn app_js_separates_global_search_from_page_filter_state() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("globalSearchState"),
+            "missing explicit global search state"
+        );
+        assert!(
+            js.contains("pageFilterText"),
+            "missing explicit page-local filter state"
+        );
+        assert!(
+            js.contains(r#"params.get("page_filter")"#),
+            "page-local filter URL state must use page_filter"
+        );
+        assert!(
+            js.contains(r#"params.get("q")"#),
+            "legacy q parameter must remain a read-only migration fallback"
+        );
+        assert!(
+            js.contains(r#"setParams({ page_filter: input.value, q: null })"#),
+            "page-local filter writes must migrate away from q"
+        );
+        assert!(
+            !js.contains("filterText")
+                && !js.contains("searchToolbar")
+                && !js.contains("applyTextFilter"),
+            "old page-local search naming must not drift back into the Web app"
+        );
+    }
+
+    #[test]
     fn app_js_has_no_inline_js_in_html() {
         let html = include_str!("../static/index.html");
         // Ensure global search input exists

@@ -22,13 +22,14 @@ const state = {
   selected: null, // {kind, id}
   showRaw: false,
   route: parseHash(),
-  filterText: "",
+  pageFilterText: "",
   sortCol: "port",
   sortDir: "asc",
 };
 
-// sync initial sort from URL on boot
-(function initSort() {
+// sync initial URL-backed view state on boot
+(function initRouteState() {
+  state.pageFilterText = pageFilterTextFromParams(state.route.params);
   const sort = parseSortFromParams(state.route.params);
   state.sortCol = sort.sortCol;
   state.sortDir = sort.sortDir;
@@ -53,6 +54,13 @@ function parseSortFromParams(params) {
     sortCol: validCols.includes(col) ? col : "port",
     sortDir: dir === "desc" ? "desc" : "asc",
   };
+}
+
+function pageFilterTextFromParams(params) {
+  // q was the original page-local filter parameter. Read it as a
+  // compatibility fallback, but write only page_filter so it cannot be
+  // confused with global search state.
+  return params.get("page_filter") || params.get("q") || "";
 }
 
 function navigate(page, params = {}) {
@@ -86,7 +94,7 @@ function nextSortParams(currentSortCol, currentSortDir, clickedColumn) {
 
 window.addEventListener("hashchange", () => {
   state.route = parseHash();
-  state.filterText = state.route.params.get("q") || "";
+  state.pageFilterText = pageFilterTextFromParams(state.route.params);
   const sort = parseSortFromParams(state.route.params);
   state.sortCol = sort.sortCol;
   state.sortDir = sort.sortDir;
@@ -392,7 +400,7 @@ function renderListeners() {
   const active = LISTENER_FILTERS.find((f) => f.id === filterId) || LISTENER_FILTERS[0];
   const all = snap.listeners.slice();
   const matched = all.filter((l) => active.match(l, snap));
-  const filtered = applyTextFilter(matched, listenerHaystack);
+  const filtered = applyPageTextFilter(matched, listenerHaystack);
   const sorted = sortListeners(filtered);
   const total = all.length;
   const matchCount = sorted.length;
@@ -407,7 +415,7 @@ function renderListeners() {
       <span class="subtle">${matchCount} matched · ${total} total</span>
     </section>
     <div class="chips">${chips}</div>
-    ${searchToolbar()}
+    ${pageFilterToolbar()}
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
@@ -487,7 +495,7 @@ function projectFor(l) {
 // ─── workloads ────────────────────────────────────────────────────
 function renderWorkloads() {
   const snap = state.snapshot;
-  const filtered = applyTextFilter(snap.workloads, (w) =>
+  const filtered = applyPageTextFilter(snap.workloads, (w) =>
     [w.display_name, w.runtime, w.state, w.id].join(" ").toLowerCase(),
   );
   const groups = new Map();
@@ -507,7 +515,7 @@ function renderWorkloads() {
   return `
     <section class="page-head"><h1>Workloads</h1>
       <span class="subtle">${filtered.length} matched · ${snap.workloads.length} total</span></section>
-    ${searchToolbar()}
+    ${pageFilterToolbar()}
     <div class="table-wrap">
       <table class="table">
         <thead><tr><th>Name</th><th>State</th><th>Health</th><th>Listeners</th></tr></thead>
@@ -530,7 +538,7 @@ function workloadRow(w) {
 // ─── processes ────────────────────────────────────────────────────
 function renderProcesses() {
   const snap = state.snapshot;
-  const filtered = applyTextFilter(snap.processes, (p) =>
+  const filtered = applyPageTextFilter(snap.processes, (p) =>
     [p.pid, p.exe, p.user, (p.cmdline || p.command || []).join(" ")].join(" ").toLowerCase(),
   );
   const byParent = new Map();
@@ -548,7 +556,7 @@ function renderProcesses() {
   return `
     <section class="page-head"><h1>Processes</h1>
       <span class="subtle">${filtered.length} matched · ${snap.processes.length} total</span></section>
-    ${searchToolbar()}
+    ${pageFilterToolbar()}
     <div class="table-wrap">
       <table class="table">
         <thead><tr><th>PID</th><th>User</th><th>Command</th><th>CWD</th></tr></thead>
@@ -666,21 +674,21 @@ function renderMetrics() {
   `;
 }
 
-// ─── shared toolbar / filter ──────────────────────────────────────
-function searchToolbar() {
-  const matchHint = state.filterText.startsWith("~")
-    ? "fuzzy match"
-    : "substring match";
+// ─── shared page-local toolbar / filter ──────────────────────────
+function pageFilterToolbar() {
+  const matchHint = state.pageFilterText.startsWith("~")
+    ? "page fuzzy filter"
+    : "page substring filter";
   return `<div class="toolbar">
-    <label class="search">
+    <label class="page-filter">
       <span class="strategy-hint">${matchHint}</span>
-      <input id="filterInput" type="text" placeholder="filter (prefix ~ for fuzzy)" value="${esc(state.filterText)}">
+      <input id="pageFilterInput" type="text" placeholder="filter this page (prefix ~ for fuzzy)" value="${esc(state.pageFilterText)}">
     </label>
   </div>`;
 }
 
-function applyTextFilter(items, hayFn) {
-  const q = state.filterText.trim();
+function applyPageTextFilter(items, hayFn) {
+  const q = state.pageFilterText.trim();
   if (!q) return items;
   if (q.startsWith("~")) {
     const needle = q.slice(1).toLowerCase();
@@ -700,14 +708,14 @@ function fuzzyMatch(haystack, needle) {
 }
 
 function attachToolbarHandlers() {
-  const input = $("#filterInput");
+  const input = $("#pageFilterInput");
   if (input) {
     input.addEventListener("input", () => {
-      state.filterText = input.value;
-      setParam("q", input.value);
+      state.pageFilterText = input.value;
+      setParams({ page_filter: input.value, q: null });
       // re-render but keep focus
       renderPage();
-      const next = $("#filterInput");
+      const next = $("#pageFilterInput");
       if (next) {
         next.focus();
         next.setSelectionRange(input.value.length, input.value.length);
