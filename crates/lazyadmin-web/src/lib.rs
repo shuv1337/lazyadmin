@@ -163,6 +163,7 @@ fn app(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/events", get(events))
         .route("/views/overview", get(overview))
+        .route("/views/listeners", get(listeners_view))
         .route("/entities/:kind/:id", get(entity))
         .layer(middleware::from_fn(local_origin_guard));
     Router::new()
@@ -494,6 +495,71 @@ async fn overview(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ListenerTableQuery {
+    filter: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
+    page_filter: Option<String>,
+    q: Option<String>,
+    show_system: Option<bool>,
+}
+
+async fn listeners_view(
+    State(state): State<AppState>,
+    Query(params): Query<ListenerTableQuery>,
+) -> impl IntoResponse {
+    match state.snapshot().await {
+        Ok(snapshot) => {
+            let raw_text_filter = params.page_filter.or(params.q).unwrap_or_default();
+            let (text_filter, text_match) = if let Some(fuzzy) = raw_text_filter.strip_prefix('~') {
+                (
+                    fuzzy.to_ascii_lowercase(),
+                    lazyadmin_runtime::view_model::ListenerTableTextMatch::Fuzzy,
+                )
+            } else {
+                (
+                    raw_text_filter.to_ascii_lowercase(),
+                    lazyadmin_runtime::view_model::ListenerTableTextMatch::Substring,
+                )
+            };
+            let sort = lazyadmin_runtime::view_model::ListenerTableSort {
+                column: params
+                    .sort
+                    .as_deref()
+                    .map(lazyadmin_runtime::view_model::ListenerTableSortColumn::parse)
+                    .unwrap_or_default(),
+                direction: params
+                    .dir
+                    .as_deref()
+                    .map(lazyadmin_runtime::view_model::ListenerTableSortDirection::parse)
+                    .unwrap_or_default(),
+            };
+            let table = lazyadmin_runtime::view_model::build_listener_table(
+                &snapshot,
+                lazyadmin_runtime::view_model::ListenerTableOptions {
+                    filter: params
+                        .filter
+                        .as_deref()
+                        .map(lazyadmin_runtime::view_model::ListenerTableFilter::parse)
+                        .unwrap_or_default(),
+                    sort,
+                    show_system: params.show_system.unwrap_or(true),
+                    text_filter,
+                    text_match,
+                },
+            );
+            Json(table).into_response()
+        }
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SNAPSHOT_FAILED",
+            e.to_string(),
+            None,
+        ),
+    }
+}
+
 async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
@@ -681,6 +747,25 @@ mod tests {
             .expect("overview response");
         assert_eq!(overview.status(), StatusCode::OK);
         let body = json_body(overview).await;
+        let listeners = app
+            .clone()
+            .oneshot(local_request(
+                "/api/views/listeners?filter=public&sort=port&dir=asc&show_system=true",
+            ))
+            .await
+            .expect("listeners view response");
+        assert_eq!(listeners.status(), StatusCode::OK);
+        let listeners_body = json_body(listeners).await;
+        assert_eq!(
+            listeners_body["schema_version"],
+            lazyadmin_runtime::view_model::LISTENER_TABLE_SCHEMA_VERSION
+        );
+        assert!(
+            listeners_body.get("rows").is_some(),
+            "missing listener rows"
+        );
+        assert_eq!(listeners_body["filter"], "public");
+        assert_eq!(listeners_body["sort"]["column"], "port");
         let digest = app
             .clone()
             .oneshot(local_request("/api/digest"))
@@ -1119,6 +1204,21 @@ mod tests {
         assert!(
             js.contains("/api/search"),
             "app.js must reference /api/search endpoint"
+        );
+    }
+
+    #[test]
+    fn app_js_uses_listener_table_view_projection() {
+        let js = include_str!("../static/app.js");
+        assert!(
+            js.contains("/api/views/listeners"),
+            "app.js must fetch the shared listener table projection"
+        );
+        assert!(
+            !js.contains("function sortListeners")
+                && !js.contains("function ownerLabel")
+                && !js.contains("function projectFor"),
+            "Web listener rows must not rebuild shared row facts or sort semantics in JavaScript"
         );
     }
 

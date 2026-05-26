@@ -20,12 +20,12 @@ use lazyadmin_core::{
     config::keybindings::{KeybindAction, ResolvedKeybindings},
     doctor::{WarningTier, metric_caption},
     model::{DiscoveryEvent, EntityRef, Exposure, ProcessKey, Snapshot, WarningSeverity},
-    output::listener_rows,
     snapshot::build_empty_snapshot,
 };
 use lazyadmin_runtime::view_model::{
-    Digest, HeaderPip, InspectorView, RAIL_ENTRIES, SearchResults, build_digest,
-    build_doctor_groups,
+    Digest, HeaderPip, InspectorView, ListenerTableOptions, ListenerTableRow, ListenerTableSort,
+    ListenerTableSortColumn, ListenerTableSortDirection, ListenerTableTextMatch, RAIL_ENTRIES,
+    SearchResults, build_digest, build_doctor_groups, build_listener_table,
     inspector::{InspectorRow, InspectorSection as RuntimeInspectorSection, JumpTarget},
     search::{
         SearchHitRef, SearchOptions as RuntimeSearchOptions, ranked_search_hits, run as run_search,
@@ -1347,87 +1347,29 @@ pub fn build_view_model_with_state(
         60..=79 => LayoutMode::SinglePane,
         _ => LayoutMode::Refuse,
     };
-    let mut rows = Vec::new();
-    let mut hidden = 0usize;
-    let projected_rows = listener_rows(snapshot);
-    let conflict_ids: HashSet<_> = snapshot
-        .warnings
+    let listener_table = build_listener_table(
+        snapshot,
+        ListenerTableOptions {
+            filter: Default::default(),
+            sort: tui_listener_sort(listener_sort),
+            show_system,
+            text_filter: filter.to_ascii_lowercase(),
+            text_match: ListenerTableTextMatch::Fuzzy,
+        },
+    );
+    let hidden = if show_system {
+        0
+    } else {
+        lazyadmin_runtime::view_model::listener_table_rows(snapshot)
+            .into_iter()
+            .filter(|row| row.is_system)
+            .count()
+    };
+    let rows: Vec<RowVm> = listener_table
+        .rows
         .iter()
-        .filter(|w| w.code == "CONFLICT")
-        .filter_map(|w| match &w.entity {
-            Some(EntityRef::Listener(id)) => Some(id.clone()),
-            _ => None,
-        })
+        .map(row_vm_from_listener)
         .collect();
-    for l in &snapshot.listeners {
-        let is_system = l
-            .provenance
-            .iter()
-            .any(|p| p.claim.contains("systemd:system"));
-        if is_system && !show_system {
-            hidden += 1;
-            continue;
-        }
-        let projected = projected_rows.iter().find(|row| row.id == l.id);
-        let owner = projected
-            .and_then(|row| row.manager_detail.clone())
-            .unwrap_or_else(|| listener_owner_label(l, snapshot));
-        let runtime = projected
-            .and_then(|row| row.manager_label.clone())
-            .unwrap_or_else(|| listener_runtime_label(l, snapshot, is_system));
-        let exposure = exposure_label(&l.exposure);
-        let mut badges = Vec::new();
-        if matches!(
-            l.exposure,
-            lazyadmin_core::model::Exposure::LanOrPublic | lazyadmin_core::model::Exposure::Public
-        ) {
-            badges.push("PUBLIC".into());
-        }
-        let is_conflict = conflict_ids.contains(&l.id) || l.owners.len() > 1;
-        let is_orphan = l.owners.is_empty();
-        let is_tracked = listener_is_tracked(l, snapshot);
-        let is_project = listener_is_project_member(l, snapshot);
-        if is_conflict {
-            badges.push("CONFLICT".into());
-        }
-        if is_orphan {
-            badges.push("ORPHAN".into());
-        }
-        if is_tracked {
-            badges.push("TRACKED".into());
-        }
-        let bind = l.bind_addr.clone().unwrap_or_else(|| {
-            l.path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "-".into())
-        });
-        let search_text = format!(
-            "{:?} {} {} {} {:?} {}",
-            l.port, bind, owner, runtime, l.protocol, exposure
-        );
-        rows.push(RowVm {
-            id: l.id.to_string(),
-            port: l.port,
-            bind,
-            owner,
-            runtime,
-            exposure,
-            project: "-".into(),
-            badges,
-            is_conflict,
-            is_orphan,
-            is_tracked,
-            is_project,
-            is_system,
-            search_text,
-        });
-    }
-    if !filter.is_empty() {
-        let m = SkimMatcherV2::default();
-        rows.retain(|r| m.fuzzy_match(&r.search_text, filter).is_some());
-    }
-    sort_listener_rows(&mut rows, listener_sort);
     let inspector = selected_process
         .as_ref()
         .and_then(|key| inspector_for_process(snapshot, key))
@@ -2085,38 +2027,6 @@ fn listener_owner_label(listener: &lazyadmin_core::model::Listener, snapshot: &S
         .unwrap_or_else(|| "unowned".into())
 }
 
-fn listener_runtime_label(
-    listener: &lazyadmin_core::model::Listener,
-    snapshot: &Snapshot,
-    is_system: bool,
-) -> String {
-    if let Some(label) = listener.owners.iter().find_map(|owner| match owner {
-        EntityRef::Workload(id) => snapshot
-            .workloads
-            .iter()
-            .find(|workload| &workload.id == id)
-            .map(|workload| runtime_kind_label(&workload.runtime)),
-        EntityRef::Manager(id) => snapshot
-            .managers
-            .iter()
-            .find(|manager| &manager.id == id)
-            .map(|manager| runtime_kind_label(&manager.kind)),
-        EntityRef::Process(key) => snapshot
-            .processes
-            .iter()
-            .find(|process| &process.key == key)
-            .map(process_runtime_label),
-        _ => None,
-    }) {
-        return label;
-    }
-    if is_system {
-        "systemd".into()
-    } else {
-        "direct".into()
-    }
-}
-
 fn process_owner_label(process: &lazyadmin_core::model::Process) -> String {
     let command = process
         .exe
@@ -2136,18 +2046,6 @@ fn process_owner_label(process: &lazyadmin_core::model::Process) -> String {
         .filter(|cmd| !cmd.trim().is_empty())
         .unwrap_or_else(|| "process".into());
     compact_text(&format!("{command} pid {}", process.pid), 38)
-}
-
-fn process_runtime_label(process: &lazyadmin_core::model::Process) -> String {
-    if process.systemd_unit.is_some() {
-        "systemd".into()
-    } else if process.container_id.is_some() {
-        "container".into()
-    } else if process.lazyadmin_run_id.is_some() {
-        "tracked".into()
-    } else {
-        "direct".into()
-    }
 }
 
 fn runtime_kind_label(kind: &lazyadmin_core::model::RuntimeKind) -> String {
@@ -2170,18 +2068,6 @@ fn runtime_kind_label(kind: &lazyadmin_core::model::RuntimeKind) -> String {
         lazyadmin_core::model::RuntimeKind::Supervisor => "supervisor",
         lazyadmin_core::model::RuntimeKind::Launchd => "launchd",
         lazyadmin_core::model::RuntimeKind::Unknown => "unknown",
-    }
-    .into()
-}
-
-fn exposure_label(exposure: &Exposure) -> String {
-    match exposure {
-        Exposure::Loopback => "loopback",
-        Exposure::LanOrPublic => "lan",
-        Exposure::Public => "public",
-        Exposure::ContainerOnly => "container",
-        Exposure::UnixLocal => "unix",
-        Exposure::Unknown => "unknown",
     }
     .into()
 }
@@ -3700,6 +3586,55 @@ fn render_summary_table(
     frame.render_widget(table, area);
 }
 
+fn tui_listener_sort(sort: ListenerSort) -> ListenerTableSort {
+    ListenerTableSort {
+        column: match sort.column {
+            ListenerSortColumn::Port => ListenerTableSortColumn::Port,
+            ListenerSortColumn::Bind => ListenerTableSortColumn::Bind,
+            ListenerSortColumn::Owner => ListenerTableSortColumn::Owner,
+            ListenerSortColumn::Runtime => ListenerTableSortColumn::Runtime,
+            ListenerSortColumn::Scope => ListenerTableSortColumn::Exposure,
+        },
+        direction: match sort.direction {
+            SortDirection::Asc => ListenerTableSortDirection::Asc,
+            SortDirection::Desc => ListenerTableSortDirection::Desc,
+        },
+    }
+}
+
+fn row_vm_from_listener(row: &ListenerTableRow) -> RowVm {
+    let mut badges = Vec::new();
+    if matches!(row.exposure, Exposure::LanOrPublic | Exposure::Public) {
+        badges.push("PUBLIC".into());
+    }
+    if row.is_conflict {
+        badges.push("CONFLICT".into());
+    }
+    if row.is_orphan {
+        badges.push("ORPHAN".into());
+    }
+    if row.is_tracked {
+        badges.push("TRACKED".into());
+    }
+    RowVm {
+        id: row.id.clone(),
+        port: row.port,
+        bind: row.bind_label.clone(),
+        owner: row.owner_label.clone(),
+        runtime: row.runtime_label.clone(),
+        exposure: row.exposure_label.clone(),
+        project: row.project_label.clone().unwrap_or_else(|| "-".into()),
+        badges,
+        is_conflict: row.is_conflict,
+        is_orphan: row.is_orphan,
+        is_tracked: row.is_tracked,
+        is_project: row.is_project,
+        is_system: row.is_system,
+        search_text: row.search_text.clone(),
+    }
+}
+
+#[cfg(test)]
 fn sort_listener_rows(rows: &mut [RowVm], sort: ListenerSort) {
     rows.sort_by(|a, b| {
         let ord = match sort.column {

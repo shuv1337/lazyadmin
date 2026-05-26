@@ -1,7 +1,7 @@
 // lazyadmin web — vanilla ES module.
 // Read-only UI built around the digest. No bundler, no framework.
 // Backed by /api/digest, /api/doctor, /api/snapshot, /api/rail,
-// /api/header_pip, /api/inspector, /api/views/overview.
+// /api/header_pip, /api/inspector, /api/views/overview, /api/views/listeners.
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -16,6 +16,7 @@ const state = {
   snapshot: null,
   digest: null,
   doctor: null,
+  listenerTable: null,
   pip: null,
   loadError: null,
   staleSeconds: 0,
@@ -98,8 +99,10 @@ window.addEventListener("hashchange", () => {
   const sort = parseSortFromParams(state.route.params);
   state.sortCol = sort.sortCol;
   state.sortDir = sort.sortDir;
+  state.listenerTable = null;
   renderPage();
   renderRail();
+  loadAll();
 });
 
 // ─── data loading ─────────────────────────────────────────────────
@@ -115,18 +118,20 @@ async function fetchJson(url) {
 
 async function loadAll() {
   try {
-    const [rail, snap, digest, doctor, pip] = await Promise.all([
+    const [rail, snap, digest, doctor, pip, listenerTable] = await Promise.all([
       fetchJson("/api/rail"),
       fetchJson("/api/snapshot"),
       fetchJson("/api/digest"),
       fetchJson("/api/doctor"),
       fetchJson("/api/header_pip"),
+      fetchJson(listenerTableUrl()),
     ]);
     state.rail = rail;
     state.snapshot = snap;
     state.digest = digest;
     state.doctor = doctor;
     state.pip = pip;
+    state.listenerTable = listenerTable;
     state.staleSeconds = pip?.freshness?.age_seconds ?? 0;
     state.loadError = null;
   } catch (err) {
@@ -137,6 +142,19 @@ async function loadAll() {
 
 setInterval(loadAll, 5000);
 loadAll();
+
+function listenerTableUrl() {
+  const params = new URLSearchParams();
+  const filter = state.route.params.get("filter") || "all";
+  if (filter !== "all") params.set("filter", filter);
+  if (state.sortCol !== "port") params.set("sort", state.sortCol);
+  if (state.sortDir !== "asc") params.set("dir", state.sortDir);
+  const pageFilter = pageFilterTextFromParams(state.route.params);
+  if (pageFilter) params.set("page_filter", pageFilter);
+  params.set("show_system", "true");
+  const qs = params.toString();
+  return "/api/views/listeners" + (qs ? "?" + qs : "");
+}
 
 // ─── render ────────────────────────────────────────────────────────
 function renderAll() {
@@ -343,49 +361,14 @@ function projectRow(r) {
 
 // ─── listeners ─────────────────────────────────────────────────────
 const LISTENER_FILTERS = [
-  { id: "all", label: "All", match: () => true },
-  { id: "public", label: "Public", match: (l) => l.exposure === "public" || l.exposure === "lan_or_public" },
-  { id: "lan", label: "LAN", match: (l) => l.exposure === "lan_or_public" },
-  { id: "conflicts", label: "Conflicts", match: (l, snap) =>
-      snap.warnings.some((w) => w.code === "CONFLICT" && w.entity?.id === l.id) ||
-      (l.owners || []).length > 1 },
-  { id: "orphans", label: "Orphans", match: (l) => (l.owners || []).length === 0 },
-  { id: "unowned", label: "Unowned", match: (l) => (l.owners || []).length === 0 },
-  { id: "tracked", label: "Tracked", match: (l, snap) =>
-      (l.owners || []).some((o) => o.kind === "run") ||
-      snap.workloads.some((w) => w.lazyadmin_run_id && (w.listeners || []).includes(l.id)) },
+  { id: "all", label: "All" },
+  { id: "public", label: "Public" },
+  { id: "lan", label: "LAN" },
+  { id: "conflicts", label: "Conflicts" },
+  { id: "orphans", label: "Orphans" },
+  { id: "unowned", label: "Unowned" },
+  { id: "tracked", label: "Tracked" },
 ];
-
-function sortListeners(listeners) {
-  const col = state.sortCol;
-  const dir = state.sortDir === "asc" ? 1 : -1;
-  return listeners.slice().sort((a, b) => {
-    let ord = 0;
-    if (col === "port") {
-      const ap = a.port ?? Infinity;
-      const bp = b.port ?? Infinity;
-      ord = ap - bp;
-      if (ord === 0) ord = (a.bind_addr || "").localeCompare(b.bind_addr || "");
-    } else if (col === "bind") {
-      const ab = a.path || `${a.bind_addr || "*"}:${a.port ?? "?"}`;
-      const bb = b.path || `${b.bind_addr || "*"}:${b.port ?? "?"}`;
-      ord = ab.localeCompare(bb);
-    } else if (col === "exposure") {
-      ord = (a.exposure || "").localeCompare(b.exposure || "");
-    } else if (col === "owner") {
-      ord = ownerLabel(a).localeCompare(ownerLabel(b));
-    } else if (col === "project") {
-      ord = (projectFor(a) || "").localeCompare(projectFor(b) || "");
-    } else if (col === "confidence") {
-      ord = (a.confidence || "").localeCompare(b.confidence || "");
-    } else if (col === "warnings") {
-      const aw = (state.snapshot.warnings || []).filter((w) => w.entity?.kind === "listener" && w.entity.id === a.id).length;
-      const bw = (state.snapshot.warnings || []).filter((w) => w.entity?.kind === "listener" && w.entity.id === b.id).length;
-      ord = aw - bw;
-    }
-    return ord * dir;
-  });
-}
 
 function thLabel(col, label) {
   const active = state.sortCol === col;
@@ -395,15 +378,11 @@ function thLabel(col, label) {
 }
 
 function renderListeners() {
-  const snap = state.snapshot;
   const filterId = state.route.params.get("filter") || "all";
-  const active = LISTENER_FILTERS.find((f) => f.id === filterId) || LISTENER_FILTERS[0];
-  const all = snap.listeners.slice();
-  const matched = all.filter((l) => active.match(l, snap));
-  const filtered = applyPageTextFilter(matched, listenerHaystack);
-  const sorted = sortListeners(filtered);
-  const total = all.length;
-  const matchCount = sorted.length;
+  const table = state.listenerTable;
+  const rows = table?.rows || [];
+  const total = table?.total ?? state.snapshot?.listeners?.length ?? 0;
+  const matchCount = table?.returned ?? rows.length;
 
   const chips = LISTENER_FILTERS.map(
     (f) => `<button class="chip ${f.id === filterId ? "active" : ""}" data-chip="${f.id}">${f.label}</button>`,
@@ -427,69 +406,31 @@ function renderListeners() {
           ${thLabel("confidence", "Confidence")}
           ${thLabel("warnings", "Warnings")}
         </tr></thead>
-        <tbody>${sorted.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet", 7)}</tbody>
+        <tbody>${rows.map(listenerTableRow).join("") || emptyRow("no listeners discovered yet", 7)}</tbody>
       </table>
     </div>
   `;
 }
 
-function listenerHaystack(l) {
-  return [
-    l.id, l.bind_addr, l.port, l.protocol, l.exposure, l.path,
-    ...(l.owners || []).map((o) => o.id?.pid ?? o.id ?? ""),
-  ].filter((x) => x != null).map(String).join(" ").toLowerCase();
-}
-
-function listenerTableRow(l) {
-  const exposure = l.exposure || "loopback";
-  const expClass = exposure === "public" ? "exp-public"
-    : exposure === "lan_or_public" ? "exp-lan" : "exp-loop";
-  const expGlyph = exposure === "public" ? "●" : exposure === "lan_or_public" ? "◐" : "·";
-  const bind = l.path || `${l.bind_addr || "*"}:${l.port ?? "?"}`;
-  const owner = ownerLabel(l);
-  const project = projectFor(l);
-  const warnings = (state.snapshot.warnings || []).filter(
-    (w) => w.entity?.kind === "listener" && w.entity.id === l.id,
-  );
-  const conflictCls = warnings.some((w) => w.code === "CONFLICT") || (l.owners || []).length > 1
-    ? "is-conflict" : "";
-  const trackedCls = (l.owners || []).some((o) => o.kind === "run") ? "is-tracked" : "";
-  const projectCls = project ? "is-project" : "";
-  const cls = [conflictCls, trackedCls, projectCls, isSelected("listener", l.id) ? "selected" : ""]
+function listenerTableRow(row) {
+  const expClass = row.signal === "public" ? "exp-public"
+    : row.signal === "lan" ? "exp-lan" : "exp-loop";
+  const expGlyph = row.signal === "public" ? "●" : row.signal === "lan" ? "◐" : "·";
+  const conflictCls = row.is_conflict ? "is-conflict" : "";
+  const trackedCls = row.is_tracked ? "is-tracked" : "";
+  const projectCls = row.is_project ? "is-project" : "";
+  const systemCls = row.is_system ? "is-system" : "";
+  const cls = [conflictCls, trackedCls, projectCls, systemCls, isSelected("listener", row.id) ? "selected" : ""]
     .filter(Boolean).join(" ");
-  return `<tr class="row ${cls}" data-row data-kind="listener" data-id="${esc(l.id)}">
-    <td class="mono port-cell">${l.port ?? "—"}</td>
-    <td class="bind-cell mono"><span class="exp-glyph ${expClass}">${expGlyph}</span>${esc(bind)}<div class="secondary">${esc(l.protocol)}</div></td>
-    <td>${esc(exposure)}</td>
-    <td>${esc(owner)}</td>
-    <td>${esc(project || "—")}</td>
-    <td>${esc(l.confidence || "")}</td>
-    <td>${warnings.length || ""}</td>
+  return `<tr class="row ${cls}" data-row data-kind="listener" data-id="${esc(row.id)}">
+    <td class="mono port-cell">${row.port ?? "—"}</td>
+    <td class="bind-cell mono"><span class="exp-glyph ${expClass}">${expGlyph}</span>${esc(row.endpoint_label || row.bind_label)}<div class="secondary">${esc(row.protocol_label)}</div></td>
+    <td>${esc(row.exposure_label)}</td>
+    <td>${esc(row.owner_label)}</td>
+    <td>${esc(row.project_label || "—")}</td>
+    <td>${esc(row.confidence || "")}</td>
+    <td>${row.warning_count || ""}</td>
   </tr>`;
-}
-
-function ownerLabel(l) {
-  const o = (l.owners || [])[0];
-  if (!o) return "—";
-  if (o.kind === "process") return `pid ${o.id?.pid ?? "?"}`;
-  if (o.kind === "workload") {
-    const wl = state.snapshot.workloads.find((w) => w.id === o.id);
-    return wl?.display_name || `workload ${o.id}`;
-  }
-  return `${o.kind} ${o.id}`;
-}
-
-function projectFor(l) {
-  for (const o of l.owners || []) {
-    if (o.kind === "workload") {
-      const wl = state.snapshot.workloads.find((w) => w.id === o.id);
-      if (wl?.project) {
-        const p = state.snapshot.projects.find((p) => p.id === wl.project);
-        return p?.name || wl.project;
-      }
-    }
-  }
-  return null;
 }
 
 // ─── workloads ────────────────────────────────────────────────────
