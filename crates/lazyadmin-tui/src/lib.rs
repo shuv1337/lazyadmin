@@ -6380,21 +6380,7 @@ fn render_search_view(
         .into_iter()
         .enumerate()
     {
-        let prefix = if index == selected_row { "> " } else { "  " };
-        let style = if index == selected_row {
-            Style::default()
-                .fg(theme.selection.color())
-                .bg(theme.base_bg.color())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme.base_fg.color())
-                .bg(theme.base_bg.color())
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{prefix}{}", search_hit_row(hit)),
-            style,
-        )));
+        lines.push(search_hit_line(hit, index == selected_row, theme));
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -6416,19 +6402,70 @@ fn search_group_count_label(returned: usize, total: usize) -> String {
     }
 }
 
-fn search_hit_row(hit: SearchHitRef<'_>) -> String {
+fn search_hit_line(hit: SearchHitRef<'_>, selected: bool, theme: &Theme) -> Line<'static> {
+    let base_style = if selected {
+        Style::default()
+            .fg(theme.selection.color())
+            .bg(theme.base_bg.color())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.base_fg.color())
+            .bg(theme.base_bg.color())
+    };
+    let highlight_style = Style::default()
+        .fg(theme.accent.color())
+        .bg(theme.base_bg.color())
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans = vec![Span::styled(
+        format!(
+            "{}{:>5}  {:<9}  ",
+            if selected { "> " } else { "  " },
+            hit.score(),
+            search_hit_kind_label(&hit)
+        ),
+        base_style,
+    )];
+    spans.extend(highlighted_search_spans(
+        &search_hit_display_text(&hit),
+        search_hit_matched_indices(&hit),
+        base_style,
+        highlight_style,
+    ));
+    Line::from(spans)
+}
+
+fn search_hit_kind_label(hit: &SearchHitRef<'_>) -> &'static str {
+    match hit {
+        SearchHitRef::Project(_) => "project",
+        SearchHitRef::Workload(_) => "workload",
+        SearchHitRef::Process(_) => "process",
+        SearchHitRef::Listener(_) => "listener",
+        SearchHitRef::Manager(_) => "manager",
+        SearchHitRef::RailView(_) => "view",
+    }
+}
+
+fn search_hit_matched_indices<'a>(hit: &'a SearchHitRef<'_>) -> &'a [usize] {
+    match hit {
+        SearchHitRef::Project(h) => &h.matched_indices,
+        SearchHitRef::Workload(h) => &h.matched_indices,
+        SearchHitRef::Process(h) => &h.matched_indices,
+        SearchHitRef::Listener(h) => &h.matched_indices,
+        SearchHitRef::Manager(h) => &h.matched_indices,
+        SearchHitRef::RailView(h) => &h.matched_indices,
+    }
+}
+
+fn search_hit_display_text(hit: &SearchHitRef<'_>) -> String {
     match hit {
         SearchHitRef::Project(h) => format!(
-            "{:>5}  {:<9}  {:<30} {}",
-            h.score,
-            "project",
+            "{:<30} {}",
             compact_text(&h.name, 30),
             compact_text(&h.root.display().to_string(), 48)
         ),
         SearchHitRef::Workload(h) => format!(
-            "{:>5}  {:<9}  {:<30} runtime={} listeners={} pids={}{}",
-            h.score,
-            "workload",
+            "{:<30} runtime={} listeners={} pids={}{}",
             compact_text(&h.display_name, 30),
             compact_text(&h.runtime, 12),
             h.listener_count,
@@ -6439,9 +6476,7 @@ fn search_hit_row(hit: SearchHitRef<'_>) -> String {
                 .unwrap_or_default()
         ),
         SearchHitRef::Process(h) => format!(
-            "{:>5}  {:<9}  pid={:<8} {:<30} cwd={}",
-            h.score,
-            "process",
+            "pid={:<8} {:<30} cwd={}",
             h.pid,
             compact_text(&h.exe_or_argv0, 30),
             compact_text(
@@ -6453,30 +6488,60 @@ fn search_hit_row(hit: SearchHitRef<'_>) -> String {
             )
         ),
         SearchHitRef::Listener(h) => format!(
-            "{:>5}  {:<9}  {:<30} owner={} exposure={:?}",
-            h.score,
-            "listener",
+            "{:<30} owner={} exposure={:?}",
             compact_text(&listener_hit_endpoint(h), 30),
             compact_text(&h.owner_label, 30),
             h.exposure
         ),
         SearchHitRef::Manager(h) => format!(
-            "{:>5}  {:<9}  {:<30} kind={} scope={} {}",
-            h.score,
-            "manager",
+            "{:<30} kind={} scope={} {}",
             compact_text(&h.name, 30),
             h.kind,
             h.scope,
             if h.available { "up" } else { "down" }
         ),
-        SearchHitRef::RailView(h) => format!(
-            "{:>5}  {:<9}  {:<30} id={}",
-            h.score,
-            "view",
-            compact_text(&h.label, 30),
-            h.id
-        ),
+        SearchHitRef::RailView(h) => format!("{:<30} id={}", compact_text(&h.label, 30), h.id),
     }
+}
+
+fn highlighted_search_spans(
+    text: &str,
+    matched_indices: &[usize],
+    base_style: Style,
+    highlight_style: Style,
+) -> Vec<Span<'static>> {
+    if matched_indices.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_highlighted: Option<bool> = None;
+    for (char_index, (byte_index, ch)) in text.char_indices().enumerate() {
+        let highlighted =
+            matched_indices.contains(&byte_index) || matched_indices.contains(&char_index);
+        match current_highlighted {
+            Some(state) if state == highlighted => current.push(ch),
+            Some(state) => {
+                let style = if state { highlight_style } else { base_style };
+                spans.push(Span::styled(std::mem::take(&mut current), style));
+                current.push(ch);
+                current_highlighted = Some(highlighted);
+            }
+            None => {
+                current.push(ch);
+                current_highlighted = Some(highlighted);
+            }
+        }
+    }
+    if !current.is_empty() {
+        let style = if current_highlighted.unwrap_or(false) {
+            highlight_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(current, style));
+    }
+    spans
 }
 
 fn listener_hit_endpoint(hit: &lazyadmin_runtime::view_model::ListenerHit) -> String {
@@ -8332,6 +8397,96 @@ mod tests {
             app.status.as_deref(),
             Some("kill is disabled from search results")
         );
+    }
+
+    #[test]
+    fn search_hit_lines_highlight_matched_indices_for_every_kind() {
+        use lazyadmin_runtime::view_model::{
+            ListenerHit, ManagerHit, ProcessHit, ProjectHit, RailViewHit, WorkloadHit,
+        };
+
+        let theme = Theme::default_dark();
+        let key = ProcessKey {
+            pid: 4321,
+            boot_id: "boot".into(),
+            start_time_ticks: 1,
+        };
+        let listener = ListenerHit {
+            id: ListenerId::new("tcp:0.0.0.0:8080"),
+            port: Some(8080),
+            bind: "0.0.0.0:8080".into(),
+            protocol: Protocol::Tcp,
+            exposure: Exposure::Public,
+            owner_label: "hermes".into(),
+            workload_labels: Vec::new(),
+            project_label: None,
+            score: 99,
+            matched_indices: vec![0],
+            is_system: false,
+        };
+        let process = ProcessHit {
+            key,
+            pid: 4321,
+            user: Some("shuv".into()),
+            exe_or_argv0: "hermes".into(),
+            cmdline_compact: "hermes serve".into(),
+            cwd: Some(PathBuf::from("/home/shuv/repos/hermes")),
+            score: 98,
+            matched_indices: vec![0],
+            is_system: false,
+        };
+        let workload = WorkloadHit {
+            id: lazyadmin_core::model::WorkloadId::new("workload:hermes"),
+            display_name: "hermes".into(),
+            runtime: "direct".into(),
+            project_label: Some("hermes".into()),
+            manager_label: None,
+            listener_count: 1,
+            pid_count: 1,
+            score: 97,
+            matched_indices: vec![0],
+        };
+        let project = ProjectHit {
+            id: ProjectId::new("project:hermes"),
+            name: "hermes".into(),
+            root: PathBuf::from("/home/shuv/repos/hermes"),
+            package_manager: None,
+            git_remote: None,
+            score: 96,
+            matched_indices: vec![0],
+        };
+        let manager = ManagerHit {
+            id: lazyadmin_core::model::ManagerId::new("manager:systemd-user"),
+            name: "systemd:user".into(),
+            kind: "systemd".into(),
+            scope: "user".into(),
+            available: true,
+            score: 95,
+            matched_indices: vec![0],
+        };
+        let rail = RailViewHit {
+            id: "listeners".into(),
+            label: "Listeners".into(),
+            score: 94,
+            matched_indices: vec![0],
+        };
+
+        for hit in [
+            SearchHitRef::Listener(&listener),
+            SearchHitRef::Process(&process),
+            SearchHitRef::Workload(&workload),
+            SearchHitRef::Project(&project),
+            SearchHitRef::Manager(&manager),
+            SearchHitRef::RailView(&rail),
+        ] {
+            let line = search_hit_line(hit, false, &theme);
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED)),
+                "expected highlighted span in {line:?}"
+            );
+        }
     }
 
     #[test]
