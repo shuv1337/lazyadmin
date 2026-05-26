@@ -53,7 +53,9 @@ input is active:
 compatibility, but both resolve to the global `search` command.
 
 The command palette remains on `:` in the TUI. In the Web UI, `/` focuses global
-search and `Ctrl+K` / `Cmd+K` opens the palette.
+search across all runtime entities and `Ctrl+K` / `Cmd+K` opens the palette.
+Web page-local text filters are not keybindings; they only filter the current
+table and store their URL state as `page_filter`.
 
 ### Sort actions
 

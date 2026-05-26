@@ -24,13 +24,13 @@ Use `?` for a help overlay sourced from active keybindings and `:` for the comma
 
 Global search (`/`) searches listeners, processes, workloads, projects,
 managers, and rail views through the shared `lazyadmin.search.v1` projection.
-Existing per-view filters still read the same query for Workloads, Doctor, and
-other local projections as a v1 compatibility escape hatch, so global results
-and page-local filtering can coexist until that older filter surface is cleaned
-up. `S` toggles system-service visibility by rebuilding the rendered model from
-the retained snapshot. In Process Tree, `t` opens the tree and pressing `t` on a
-node toggles expand/collapse while preserving the selected `ProcessKey` across
-refreshes.
+It is separate from page-local filtering. In the Web UI, the header search box
+uses the global projection, while listener/workload/process page text filters
+only narrow the rows already visible on that page and store URL state in
+`page_filter` (with legacy `q` accepted only as a read fallback). `S` toggles
+system-service visibility by rebuilding the rendered model from the retained
+snapshot. In Process Tree, `t` opens the tree and pressing `t` on a node toggles
+expand/collapse while preserving the selected `ProcessKey` across refreshes.
 
 ### Listener sorting
 

@@ -280,7 +280,7 @@ body.with-inspector .main {
   flex-wrap: wrap;
   margin: 0 0 12px;
 }
-.toolbar .search {
+.toolbar .page-filter {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -290,7 +290,7 @@ body.with-inspector .main {
   padding: 4px 8px;
   min-width: 220px;
 }
-.toolbar .search input {
+.toolbar .page-filter input {
   background: transparent;
   border: 0;
   outline: none;
