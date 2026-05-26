@@ -57,6 +57,10 @@ search across all runtime entities and `Ctrl+K` / `Cmd+K` opens the palette.
 Web page-local text filters are not keybindings; they only filter the current
 table and store their URL state as `page_filter`.
 
+Inspector action rows use their bracketed keys before global bindings. `l` keeps
+the global Logs view binding; `Shift+L` (`[L] logs`) opens logs for the selected
+inspector entity when that action is available.
+
 ### Sort actions
 
 | Action name | Default | Purpose |

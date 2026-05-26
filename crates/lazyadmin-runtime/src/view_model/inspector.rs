@@ -1060,7 +1060,7 @@ fn workload_actions(workload: &Workload) -> Vec<ActionPreview> {
         key_hint: "L".into(),
         command_string: format!("lazyadmin logs --workload {}", workload.id),
         enabled: !direct,
-        disabled_reason: direct.then(|| "logs unavailable for direct processes".into()),
+        disabled_reason: direct.then(|| "logs — none (direct process)".into()),
     });
     actions
 }
@@ -1952,6 +1952,16 @@ mod tests {
         assert!(
             reason.to_lowercase().contains("direct"),
             "expected reason to mention direct process, got {reason}"
+        );
+        let logs = workload
+            .actions
+            .iter()
+            .find(|a| a.verb == "logs")
+            .expect("logs action present");
+        assert!(!logs.enabled);
+        assert_eq!(
+            logs.disabled_reason.as_deref(),
+            Some("logs — none (direct process)")
         );
     }
 
