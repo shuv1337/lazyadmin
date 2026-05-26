@@ -8101,14 +8101,14 @@ mod tests {
         );
         let confirmation = app.confirmation.as_ref().unwrap();
         assert_eq!(confirmation.required, "free");
-        assert!(confirmation.command_preview.contains("lazyadmin free 8443"));
+        assert!(confirmation.command_preview.contains("free port 8443"));
 
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render_app(f, &app)).unwrap();
         let text = format!("{:?}", terminal.backend().buffer());
         assert!(text.contains("Confirm action"), "{text}");
-        assert!(text.contains("lazyadmin free 8443"), "{text}");
+        assert!(text.contains("free port 8443"), "{text}");
         assert!(text.contains("Type 'free'"), "{text}");
     }
 

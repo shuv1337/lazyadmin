@@ -17,6 +17,10 @@
 
 use std::collections::HashMap;
 
+use lazyadmin_core::actions::{
+    Action, ActionKind, ConfirmationPolicy, DryRunLine, first_dry_run_line,
+    plan_free_port_preview_action,
+};
 use lazyadmin_core::model::*;
 use serde::{Deserialize, Serialize};
 
@@ -540,7 +544,7 @@ fn build_listener_inspector(listener: &Listener, snapshot: &Snapshot) -> Listene
         |w| matches!(&w.entity, Some(EntityRef::Listener(id)) if id == &listener.id),
     );
     let bind = relations.listener_bind_label(listener);
-    let actions = listener_actions(listener, &bind);
+    let actions = listener_actions(listener, &bind, snapshot);
     let confidence = build_confidence(listener.confidence, &listener.provenance);
     ListenerInspector {
         id: listener.id.clone(),
@@ -935,25 +939,28 @@ fn build_confidence(value: Confidence, provenance: &[Provenance]) -> ConfidenceB
 
 // ── action previews ─────────────────────────────────────────────────
 
-fn listener_actions(listener: &Listener, bind: &str) -> Vec<ActionPreview> {
+fn listener_actions(listener: &Listener, bind: &str, snapshot: &Snapshot) -> Vec<ActionPreview> {
     let port = listener.port;
     let mut actions = Vec::new();
     if let Some(port) = port {
-        actions.push(ActionPreview {
-            verb: "free port".into(),
-            key_hint: "f".into(),
-            command_string: format!("lazyadmin free {port}"),
-            enabled: true,
-            disabled_reason: None,
-        });
+        actions.push(action_preview(
+            "free port",
+            "f",
+            &plan_free_port_preview_action(snapshot, port, true),
+            true,
+            None,
+        ));
     } else {
-        actions.push(ActionPreview {
-            verb: "free port".into(),
-            key_hint: "f".into(),
-            command_string: format!("lazyadmin free {bind}"),
-            enabled: false,
-            disabled_reason: Some("no port (unix socket listener)".into()),
-        });
+        let disabled = disabled_action(
+            ActionKind::FreePort,
+            "Free port unavailable",
+            EntityRef::Listener(listener.id.clone()),
+            listener_runtime(listener),
+            "free port unavailable",
+            &format!("no port for listener {bind}"),
+        );
+        let reason = first_dry_run_line(&disabled.dry_run);
+        actions.push(action_preview("free port", "f", &disabled, false, reason));
     }
     actions.push(ActionPreview {
         verb: "logs".into(),
@@ -968,20 +975,44 @@ fn listener_actions(listener: &Listener, bind: &str) -> Vec<ActionPreview> {
 fn workload_actions(workload: &Workload) -> Vec<ActionPreview> {
     let mut actions = Vec::new();
     let direct = matches!(workload.runtime, RuntimeKind::Direct);
-    actions.push(ActionPreview {
-        verb: "restart".into(),
-        key_hint: "r".into(),
-        command_string: format!("lazyadmin restart {}", workload.id),
-        enabled: !direct,
-        disabled_reason: direct.then(|| "direct process — no manager to restart it".into()),
-    });
-    actions.push(ActionPreview {
-        verb: "stop".into(),
-        key_hint: "s".into(),
-        command_string: format!("lazyadmin stop {}", workload.id),
-        enabled: !direct,
-        disabled_reason: direct.then(|| "direct process — use kill on the pid instead".into()),
-    });
+    let restart = if direct {
+        disabled_action(
+            ActionKind::Restart,
+            "Restart unavailable",
+            EntityRef::Workload(workload.id.clone()),
+            workload.runtime.clone(),
+            "restart unavailable",
+            "direct process — no manager to restart it",
+        )
+    } else {
+        workload_control_action(workload, ActionKind::Restart, "restart")
+    };
+    actions.push(action_preview(
+        "restart",
+        "r",
+        &restart,
+        !direct,
+        direct.then(|| first_dry_run_line(&restart.dry_run).unwrap_or_default()),
+    ));
+    let stop = if direct {
+        disabled_action(
+            ActionKind::Stop,
+            "Stop unavailable",
+            EntityRef::Workload(workload.id.clone()),
+            workload.runtime.clone(),
+            "stop unavailable",
+            "direct process — use kill on the pid instead",
+        )
+    } else {
+        workload_control_action(workload, ActionKind::Stop, "stop")
+    };
+    actions.push(action_preview(
+        "stop",
+        "s",
+        &stop,
+        !direct,
+        direct.then(|| first_dry_run_line(&stop.dry_run).unwrap_or_default()),
+    ));
     actions.push(ActionPreview {
         verb: "logs".into(),
         key_hint: "L".into(),
@@ -993,21 +1024,11 @@ fn workload_actions(workload: &Workload) -> Vec<ActionPreview> {
 }
 
 fn process_actions(process: &Process) -> Vec<ActionPreview> {
+    let kill = process_kill_action(process, false);
+    let kill_force = process_kill_action(process, true);
     vec![
-        ActionPreview {
-            verb: "kill".into(),
-            key_hint: "k".into(),
-            command_string: format!("kill {}", process.pid),
-            enabled: true,
-            disabled_reason: None,
-        },
-        ActionPreview {
-            verb: "kill -9".into(),
-            key_hint: "K".into(),
-            command_string: format!("kill -9 {}", process.pid),
-            enabled: true,
-            disabled_reason: None,
-        },
+        action_preview("kill", "k", &kill, true, None),
+        action_preview("kill -9", "K", &kill_force, true, None),
         ActionPreview {
             verb: "logs".into(),
             key_hint: "L".into(),
@@ -1019,6 +1040,121 @@ fn process_actions(process: &Process) -> Vec<ActionPreview> {
                 .then(|| "logs only available for lazyadmin-tracked runs".into()),
         },
     ]
+}
+
+fn action_preview(
+    verb: &str,
+    key_hint: &str,
+    action: &Action,
+    enabled: bool,
+    disabled_reason: Option<String>,
+) -> ActionPreview {
+    ActionPreview {
+        verb: verb.into(),
+        key_hint: key_hint.into(),
+        command_string: first_dry_run_line(&action.dry_run).unwrap_or_else(|| action.label.clone()),
+        enabled,
+        disabled_reason,
+    }
+}
+
+fn workload_control_action(workload: &Workload, kind: ActionKind, verb: &str) -> Action {
+    Action {
+        id: ActionId::new(format!("{verb}-{}", workload.id)),
+        label: format!("{verb} workload {}", workload.display_name),
+        kind,
+        danger: DangerLevel::Destructive,
+        requirements: vec![],
+        dry_run: vec![DryRunLine {
+            summary: format!("{verb} workload {}", workload.id),
+            detail: Some(format!(
+                "runtime {:?} manager handles {verb}",
+                workload.runtime
+            )),
+        }],
+        target: EntityRef::Workload(workload.id.clone()),
+        runtime: workload.runtime.clone(),
+        confirmation: ConfirmationPolicy::YesNo,
+        timeout_ms: 5_000,
+        provenance: vec!["inspector action preview".into()],
+    }
+}
+
+fn process_kill_action(process: &Process, force: bool) -> Action {
+    Action {
+        id: ActionId::new(format!(
+            "kill-{}-{}",
+            if force { "force" } else { "term" },
+            process.pid
+        )),
+        label: if force {
+            format!("Force kill PID {}", process.pid)
+        } else {
+            format!("Kill PID {}", process.pid)
+        },
+        kind: ActionKind::Kill,
+        danger: DangerLevel::Destructive,
+        requirements: vec![],
+        dry_run: vec![DryRunLine {
+            summary: if force {
+                format!("kill -9 PID {}", process.pid)
+            } else {
+                format!("kill PID {}", process.pid)
+            },
+            detail: Some(if force {
+                "SIGKILL is destructive and should only be used after SIGTERM fails".into()
+            } else {
+                "SIGTERM process; process-key validation remains required at execution time".into()
+            }),
+        }],
+        target: EntityRef::Process(process.key.clone()),
+        runtime: RuntimeKind::Direct,
+        confirmation: ConfirmationPolicy::TypedPhrase {
+            phrase: "kill".into(),
+        },
+        timeout_ms: 5_000,
+        provenance: vec!["inspector action preview".into()],
+    }
+}
+
+fn disabled_action(
+    kind: ActionKind,
+    label: &str,
+    target: EntityRef,
+    runtime: RuntimeKind,
+    summary: &str,
+    detail: &str,
+) -> Action {
+    Action {
+        id: ActionId::new(format!("disabled-{:?}", kind).to_ascii_lowercase()),
+        label: label.into(),
+        kind: ActionKind::Unsupported,
+        danger: DangerLevel::Safe,
+        requirements: vec![],
+        dry_run: vec![DryRunLine {
+            summary: summary.into(),
+            detail: Some(detail.into()),
+        }],
+        target,
+        runtime,
+        confirmation: ConfirmationPolicy::None,
+        timeout_ms: 0,
+        provenance: vec!["inspector action preview refusal".into()],
+    }
+}
+
+fn listener_runtime(listener: &Listener) -> RuntimeKind {
+    listener
+        .owners
+        .iter()
+        .find_map(|owner| match owner {
+            EntityRef::Workload(_) => None,
+            EntityRef::Manager(_) => None,
+            EntityRef::Process(_) => Some(RuntimeKind::Direct),
+            EntityRef::Run(_) => Some(RuntimeKind::LazyadminTracked),
+            _ => None,
+        })
+        .unwrap_or(RuntimeKind::Unknown)
 }
 
 fn tracked_run_actions(run: &TrackedRun) -> Vec<ActionPreview> {
@@ -1876,6 +2012,7 @@ mod tests {
             .disabled_reason
             .as_ref()
             .expect("disabled reason set");
+        assert_eq!(Some(reason.as_str()), restart.disabled_reason.as_deref());
         assert!(
             reason.to_lowercase().contains("direct"),
             "expected reason to mention direct process, got {reason}"
@@ -1893,14 +2030,18 @@ mod tests {
     }
 
     #[test]
-    fn command_preview_string_matches_expected_form() {
+    fn command_preview_string_matches_action_dry_run_first_line() {
         let mut snapshot = Snapshot::empty();
+        let key = process_key(5000);
+        snapshot
+            .processes
+            .push(process(5000, &["python", "-m", "http.server"]));
         snapshot.listeners.push(listener(
             "tcp:0.0.0.0:5000",
             "0.0.0.0",
             5000,
             Exposure::Public,
-            vec![],
+            vec![EntityRef::Process(key)],
         ));
         let view = InspectorView::lookup(&snapshot, "listener", "tcp:0.0.0.0:5000").expect("found");
         let InspectorView::Listener(listener) = view else {
@@ -1911,7 +2052,11 @@ mod tests {
             .iter()
             .find(|a| a.verb == "free port")
             .expect("free action");
-        assert_eq!(free.command_string, "lazyadmin free 5000");
+        let action = plan_free_port_preview_action(&snapshot, 5000, true);
+        assert_eq!(
+            free.command_string,
+            first_dry_run_line(&action.dry_run).expect("dry-run line")
+        );
     }
 }
 
