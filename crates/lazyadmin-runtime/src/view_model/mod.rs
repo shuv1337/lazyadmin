@@ -5,6 +5,7 @@ pub mod digest;
 pub mod doctor_groups;
 pub mod header_pip;
 pub mod inspector;
+pub mod relations;
 pub mod search;
 
 pub use digest::{
@@ -16,6 +17,7 @@ pub use doctor_groups::{
 };
 pub use header_pip::{AdapterHealth, DropRate, HeaderPip, SnapshotFreshness};
 pub use inspector::InspectorView;
+pub use relations::SnapshotRelations;
 pub use search::{
     DEFAULT_SEARCH_LIMIT, ListenerHit, MAX_SEARCH_LIMIT, ManagerHit, ProcessHit, ProjectHit,
     RailViewHit, SEARCH_SCHEMA_VERSION, SearchGroup, SearchHitRef, SearchKind, SearchKinds,
