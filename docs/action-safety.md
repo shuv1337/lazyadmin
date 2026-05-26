@@ -20,6 +20,8 @@ Free-port resolves listeners and validates direct process owners before signalin
 
 After execution lazyadmin rescans and reports factual before/after state. A rebound listener may indicate a restart policy; lazyadmin reports it rather than claiming success or failure.
 
+Pure free-port planning lives in `lazyadmin-core::actions` so the CLI, TUI, Web, and agents can share the same dry-run facts. Execution remains outside core: the CLI/runtime layer owns live rescans, process-key revalidation, signaling, and manager API calls because those steps depend on host state and adapter availability. Portless planning is deliberately conservative: it targets the portless CLI process key, does not mutate route state directly, and does not call `portless prune`.
+
 ## PID reuse guard
 
 Direct process actions validate `ProcessKey` (PID + boot ID + start time) immediately before signaling. If the key does not match, lazyadmin refuses to signal the PID.

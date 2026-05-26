@@ -5,8 +5,8 @@ use color_eyre::eyre::eyre;
 use futures::StreamExt;
 use lazyadmin_core::{
     actions::{
-        Action, ActionKind, ActionPlan, ActionResult, ActionStatus, ConfirmationPolicy, DryRunLine,
-        Requirement,
+        Action, ActionKind, ActionPlan, ActionResult, ActionStatus, ConfirmationPolicy,
+        plan_free_port_for_snapshot,
     },
     config::Config,
     correlate::{EventDropCounter, EventFanIn, everything_filter},
@@ -17,10 +17,7 @@ use lazyadmin_core::{
     },
     graph::{DiscoveryAdapter, DiscoveryContext},
     logs::{LogLine, LogOptions, LogStream, direct_unavailable},
-    model::{
-        ActionId, DIFF_SCHEMA_VERSION, DangerLevel, EntityRef, Listener, Process, Protocol,
-        RuntimeKind, Snapshot, Workload,
-    },
+    model::{DIFF_SCHEMA_VERSION, EntityRef, Protocol, Snapshot},
     output::listener_rows,
     selector::{Selector, parse_selector},
 };
@@ -1768,7 +1765,7 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         tracing::warn!("--yes-for-test-only bypass used; this flag is for automated tests only");
     }
     let before = build_snapshot(None).await?;
-    let parts = plan_free_for_snapshot(&before, args.port, true);
+    let parts = plan_free_port_for_snapshot(&before, args.port, true);
     let mut actions = parts.actions();
     let plan = ActionPlan {
         id: format!("free-{}", args.port),
@@ -1777,7 +1774,7 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
         confirmation: ConfirmationPolicy::TypedPhrase {
             phrase: "free".into(),
         },
-        dry_run: free_dry_run(args.port, &parts.listeners, &actions),
+        dry_run: parts.dry_run(args.port),
         actions: actions.clone(),
     };
     if args.dry_run {
@@ -1807,7 +1804,7 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
     } else {
         build_snapshot(None).await?
     };
-    let direct_parts = plan_free_for_snapshot(&direct_snapshot, args.port, false);
+    let direct_parts = plan_free_port_for_snapshot(&direct_snapshot, args.port, false);
     actions = parts.portless_actions.clone();
     actions.extend(direct_parts.direct_actions.clone());
     results.extend(
@@ -1847,208 +1844,6 @@ async fn run_free(args: FreeArgs, json: bool) -> std::result::Result<(), AppErro
     Ok(())
 }
 
-#[derive(Clone, Debug, Default)]
-struct FreePlanParts {
-    listeners: Vec<Listener>,
-    portless_actions: Vec<Action>,
-    direct_actions: Vec<Action>,
-}
-
-impl FreePlanParts {
-    fn actions(&self) -> Vec<Action> {
-        self.portless_actions
-            .iter()
-            .chain(self.direct_actions.iter())
-            .cloned()
-            .collect()
-    }
-}
-
-fn plan_free_for_snapshot(snap: &Snapshot, port: u16, include_portless: bool) -> FreePlanParts {
-    let listeners: Vec<_> = snap
-        .listeners
-        .iter()
-        .filter(|listener| listener.port == Some(port))
-        .cloned()
-        .collect();
-    let mut parts = FreePlanParts {
-        listeners,
-        ..FreePlanParts::default()
-    };
-    let mut planned_processes = std::collections::HashSet::new();
-    let mut planned_portless = std::collections::BTreeSet::new();
-    for listener in &parts.listeners {
-        let portless_workloads = portless_workloads_for_listener(snap, listener);
-        if include_portless {
-            for workload in &portless_workloads {
-                if planned_portless.insert(workload.id.clone()) {
-                    if let Some(action) = plan_portless_stop(workload, port) {
-                        parts.portless_actions.push(action);
-                    }
-                }
-            }
-        }
-        if !portless_workloads.is_empty() {
-            continue;
-        }
-        for owner in &listener.owners {
-            if let EntityRef::Process(key) = owner {
-                if planned_processes.insert(key.clone()) {
-                    if let Some(process) = snap.processes.iter().find(|process| &process.key == key)
-                    {
-                        parts
-                            .direct_actions
-                            .push(plan_direct_process(process, port));
-                    }
-                }
-            }
-        }
-    }
-    if parts.listeners.is_empty() && include_portless {
-        // Some test/dev servers can be observed as a process before the socket appears.
-        // Keep this conservative: only plan direct SIGTERM when the port is explicit in cmdline.
-        let needle = port.to_string();
-        for process in snap.processes.iter().filter(|process| {
-            process.cmdline.iter().any(|arg| arg == &needle)
-                && process
-                    .cmdline
-                    .iter()
-                    .any(|arg| arg.contains("http.server"))
-        }) {
-            if planned_processes.insert(process.key.clone()) {
-                parts
-                    .direct_actions
-                    .push(plan_direct_process(process, port));
-            }
-        }
-    }
-    parts
-}
-
-fn portless_workloads_for_listener<'a>(
-    snap: &'a Snapshot,
-    listener: &Listener,
-) -> Vec<&'a Workload> {
-    let listener_ref = EntityRef::Listener(listener.id.clone());
-    snap.edges
-        .iter()
-        .filter(|edge| {
-            edge.kind == lazyadmin_core::model::EdgeKind::WorkloadOwnsListener
-                && edge.to == listener_ref
-        })
-        .filter_map(|edge| match &edge.from {
-            EntityRef::Workload(id) => snap
-                .workloads
-                .iter()
-                .find(|workload| &workload.id == id && workload.runtime == RuntimeKind::Portless),
-            _ => None,
-        })
-        .collect()
-}
-
-fn plan_portless_stop(workload: &Workload, port: u16) -> Option<Action> {
-    let Some(EntityRef::Process(key)) = &workload.source else {
-        return None;
-    };
-    Some(Action {
-        id: ActionId::new(format!("portless-stop-{}", workload.id)),
-        label: format!("Stop portless app {}", workload.display_name),
-        kind: ActionKind::PortlessStop,
-        danger: DangerLevel::Destructive,
-        requirements: vec![
-            Requirement::ProcessKeyMatch { key: key.clone() },
-            Requirement::TypedPhrase {
-                phrase: "free".into(),
-            },
-        ],
-        dry_run: vec![DryRunLine {
-            summary: format!(
-                "stop portless app \"{}\" (manager: portless)",
-                workload.display_name
-            ),
-            detail: Some(format!(
-                "SIGTERM PID {} (portless cli); portless will killTree the dev-server and remove the route for port {port}",
-                key.pid
-            )),
-        }],
-        target: EntityRef::Process(key.clone()),
-        runtime: RuntimeKind::Portless,
-        confirmation: ConfirmationPolicy::TypedPhrase {
-            phrase: "free".into(),
-        },
-        timeout_ms: 5_000,
-        provenance: vec![format!("portless workload {}", workload.id)],
-    })
-}
-
-fn plan_direct_process(p: &Process, port: u16) -> Action {
-    let pgid = p.pgid.unwrap_or(p.pid);
-    let use_group = pgid == p.pid;
-    Action {
-        id: ActionId::new(format!(
-            "signal-{}-{}",
-            if use_group { "pgrp" } else { "pid" },
-            p.pid
-        )),
-        label: if use_group {
-            format!("Send SIGTERM to process group {pgid}")
-        } else {
-            format!("Send SIGTERM to PID {}", p.pid)
-        },
-        kind: if use_group {
-            ActionKind::SignalProcessGroup
-        } else {
-            ActionKind::SignalPid
-        },
-        danger: DangerLevel::Destructive,
-        requirements: vec![
-            Requirement::ProcessKeyMatch { key: p.key.clone() },
-            Requirement::TypedPhrase {
-                phrase: "free".into(),
-            },
-        ],
-        dry_run: vec![DryRunLine {
-            summary: format!(
-                "stop PID {} ({})",
-                p.pid,
-                p.cmdline
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "process".into())
-            ),
-            detail: Some(format!(
-                "SIGTERM {}; port {port} expected to disappear; SIGKILL will not be used automatically",
-                if use_group {
-                    format!("process group {pgid}")
-                } else {
-                    format!("PID {}", p.pid)
-                }
-            )),
-        }],
-        target: EntityRef::Process(p.key.clone()),
-        runtime: RuntimeKind::Direct,
-        confirmation: ConfirmationPolicy::TypedPhrase {
-            phrase: "free".into(),
-        },
-        timeout_ms: 5_000,
-        provenance: vec!["procfs listener owner".into()],
-    }
-}
-fn free_dry_run(
-    port: u16,
-    listeners: &[lazyadmin_core::model::Listener],
-    actions: &[Action],
-) -> Vec<DryRunLine> {
-    let mut v = vec![DryRunLine { summary: format!("free port {port}: {} listener(s), {} owner action(s)", listeners.len(), actions.len()), detail: Some("one consolidated confirmation; portless routes are stopped through their CLI, direct owners use process-key guarded SIGTERM".into()) }];
-    for a in actions {
-        v.extend(a.dry_run.clone());
-    }
-    v.push(DryRunLine {
-        summary: "will not touch unrelated ports or use SIGKILL automatically".into(),
-        detail: None,
-    });
-    v
-}
 fn render_free_plan(plan: &ActionPlan) {
     println!("Dry run for {}", plan.target);
     for l in &plan.dry_run {
@@ -2315,8 +2110,8 @@ fn remove_pause(selector: &str) -> std::result::Result<bool, AppError> {
 mod tests {
     use super::*;
     use lazyadmin_core::model::{
-        AddressFamily, Confidence, DualStackState, Edge, EdgeKind, Exposure, ListenerId,
-        ListenerState, ProcessKey, RedactedEnvironmentSummary, WorkloadId, WorkloadState,
+        AddressFamily, Confidence, DualStackState, Exposure, Listener, ListenerId, ListenerState,
+        Process, ProcessKey, RedactedEnvironmentSummary,
     };
 
     #[tokio::test]
@@ -2392,215 +2187,6 @@ mod tests {
             .await
             .unwrap();
         assert!(!snap.managers.is_empty());
-    }
-
-    #[test]
-    fn free_planner_prefers_portless_cli_over_descendant_owner() {
-        let cli = process_key(100, 10);
-        let child = process_key(101, 11);
-        let mut snap = Snapshot::empty();
-        snap.processes
-            .push(process(cli.clone(), None, vec!["portless"]));
-        snap.processes
-            .push(process(child.clone(), Some(100), vec!["node"]));
-        let listener_id = ListenerId::new("tcp:127.0.0.1:3737:1");
-        snap.listeners.push(listener(
-            listener_id.clone(),
-            3737,
-            vec![EntityRef::Process(child)],
-        ));
-        let workload_id = WorkloadId::new("portless:demo");
-        snap.workloads.push(Workload {
-            id: workload_id.clone(),
-            display_name: "demo.localhost".into(),
-            runtime: RuntimeKind::Portless,
-            state: WorkloadState::Running,
-            pids: vec![],
-            listeners: vec![listener_id.clone()],
-            project: None,
-            manager: None,
-            source: Some(EntityRef::Process(cli.clone())),
-            actions: vec![],
-            health: None,
-            metrics: None,
-            restart_policy: None,
-            lazyadmin_run_id: None,
-            provenance: vec![],
-        });
-        snap.edges.push(Edge {
-            kind: EdgeKind::WorkloadOwnsListener,
-            from: EntityRef::Workload(workload_id),
-            to: EntityRef::Listener(listener_id),
-            provenance: vec![],
-        });
-
-        let plan = plan_free_for_snapshot(&snap, 3737, true);
-        assert_eq!(plan.portless_actions.len(), 1);
-        assert!(plan.direct_actions.is_empty());
-        assert_eq!(plan.portless_actions[0].kind, ActionKind::PortlessStop);
-        assert_eq!(plan.portless_actions[0].target, EntityRef::Process(cli));
-    }
-
-    #[test]
-    fn free_planner_handles_direct_and_mixed_ports() {
-        let direct = process_key(200, 20);
-        let cli = process_key(300, 30);
-        let child = process_key(301, 31);
-        let mut snap = Snapshot::empty();
-        snap.processes
-            .push(process(direct.clone(), None, vec!["python"]));
-        snap.processes
-            .push(process(cli.clone(), None, vec!["portless"]));
-        snap.processes
-            .push(process(child.clone(), Some(300), vec!["node"]));
-        let direct_listener = ListenerId::new("tcp:127.0.0.1:8080:1");
-        let portless_listener = ListenerId::new("tcp:127.0.0.1:8080:2");
-        snap.listeners.push(listener(
-            direct_listener,
-            8080,
-            vec![EntityRef::Process(direct.clone())],
-        ));
-        snap.listeners.push(listener(
-            portless_listener.clone(),
-            8080,
-            vec![EntityRef::Process(child)],
-        ));
-        let workload_id = WorkloadId::new("portless:mixed");
-        snap.workloads.push(Workload {
-            id: workload_id.clone(),
-            display_name: "mixed.localhost".into(),
-            runtime: RuntimeKind::Portless,
-            state: WorkloadState::Running,
-            pids: vec![],
-            listeners: vec![portless_listener.clone()],
-            project: None,
-            manager: None,
-            source: Some(EntityRef::Process(cli.clone())),
-            actions: vec![],
-            health: None,
-            metrics: None,
-            restart_policy: None,
-            lazyadmin_run_id: None,
-            provenance: vec![],
-        });
-        snap.edges.push(Edge {
-            kind: EdgeKind::WorkloadOwnsListener,
-            from: EntityRef::Workload(workload_id),
-            to: EntityRef::Listener(portless_listener),
-            provenance: vec![],
-        });
-
-        let plan = plan_free_for_snapshot(&snap, 8080, true);
-        assert_eq!(plan.portless_actions.len(), 1);
-        assert_eq!(plan.direct_actions.len(), 1);
-        assert_eq!(plan.portless_actions[0].target, EntityRef::Process(cli));
-        assert_eq!(plan.direct_actions[0].target, EntityRef::Process(direct));
-    }
-
-    #[test]
-    fn free_planner_dedupes_same_portless_workload() {
-        let cli = process_key(400, 40);
-        let child = process_key(401, 41);
-        let mut snap = Snapshot::empty();
-        snap.processes
-            .push(process(cli.clone(), None, vec!["portless"]));
-        snap.processes
-            .push(process(child.clone(), Some(400), vec!["node"]));
-        let workload_id = WorkloadId::new("portless:dedupe");
-        snap.workloads.push(Workload {
-            id: workload_id.clone(),
-            display_name: "dedupe.localhost".into(),
-            runtime: RuntimeKind::Portless,
-            state: WorkloadState::Running,
-            pids: vec![],
-            listeners: vec![],
-            project: None,
-            manager: None,
-            source: Some(EntityRef::Process(cli)),
-            actions: vec![],
-            health: None,
-            metrics: None,
-            restart_policy: None,
-            lazyadmin_run_id: None,
-            provenance: vec![],
-        });
-        for suffix in [1, 2] {
-            let listener_id = ListenerId::new(format!("tcp:127.0.0.1:9090:{suffix}"));
-            snap.listeners.push(listener(
-                listener_id.clone(),
-                9090,
-                vec![EntityRef::Process(child.clone())],
-            ));
-            snap.edges.push(Edge {
-                kind: EdgeKind::WorkloadOwnsListener,
-                from: EntityRef::Workload(workload_id.clone()),
-                to: EntityRef::Listener(listener_id),
-                provenance: vec![],
-            });
-        }
-
-        let plan = plan_free_for_snapshot(&snap, 9090, true);
-        assert_eq!(plan.portless_actions.len(), 1);
-        assert!(plan.direct_actions.is_empty());
-    }
-
-    #[test]
-    fn free_planner_refuses_portless_without_source_and_ignores_alias_without_listener() {
-        let child = process_key(501, 51);
-        let mut snap = Snapshot::empty();
-        snap.processes
-            .push(process(child.clone(), None, vec!["node"]));
-        let listener_id = ListenerId::new("tcp:127.0.0.1:6060:1");
-        snap.listeners.push(listener(
-            listener_id.clone(),
-            6060,
-            vec![EntityRef::Process(child)],
-        ));
-        let workload_id = WorkloadId::new("portless:missing-source");
-        snap.workloads.push(Workload {
-            id: workload_id.clone(),
-            display_name: "missing-source.localhost".into(),
-            runtime: RuntimeKind::Portless,
-            state: WorkloadState::Running,
-            pids: vec![],
-            listeners: vec![listener_id.clone()],
-            project: None,
-            manager: None,
-            source: None,
-            actions: vec![],
-            health: None,
-            metrics: None,
-            restart_policy: None,
-            lazyadmin_run_id: None,
-            provenance: vec![],
-        });
-        snap.workloads.push(Workload {
-            id: WorkloadId::new("portless:alias"),
-            display_name: "alias.localhost".into(),
-            runtime: RuntimeKind::Portless,
-            state: WorkloadState::Running,
-            pids: vec![],
-            listeners: vec![],
-            project: None,
-            manager: None,
-            source: None,
-            actions: vec![],
-            health: None,
-            metrics: None,
-            restart_policy: None,
-            lazyadmin_run_id: None,
-            provenance: vec![],
-        });
-        snap.edges.push(Edge {
-            kind: EdgeKind::WorkloadOwnsListener,
-            from: EntityRef::Workload(workload_id),
-            to: EntityRef::Listener(listener_id),
-            provenance: vec![],
-        });
-
-        let plan = plan_free_for_snapshot(&snap, 6060, true);
-        assert!(plan.portless_actions.is_empty());
-        assert!(plan.direct_actions.is_empty());
     }
 
     fn process_key(pid: i32, start_time_ticks: u64) -> ProcessKey {
