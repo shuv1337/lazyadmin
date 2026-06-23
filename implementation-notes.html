@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>PLAN-25 Implementation Notes</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.5; margin: 2rem; max-width: 900px; }
+      code { background: #f4f4f4; padding: 0.1rem 0.25rem; }
+      h1, h2 { line-height: 1.2; }
+    </style>
+  </head>
+  <body>
+    <h1>PLAN-25 Implementation Notes</h1>
+    <p>Updated 2026-06-23 after reconciling the plan with the current checkout.</p>
+
+    <h2>Design decisions</h2>
+    <ul>
+      <li><code>lazyadmin-runtime/src/live.rs</code> keeps one public live-feed entry point and now has an internal runner that tests can feed with deterministic event streams.</li>
+      <li><code>lazyadmin-tui/src/interaction.rs</code> owns the first planned reducer slice: confirmation modal input, search-mode key handling, and listener sort selection preservation.</li>
+    </ul>
+
+    <h2>Deviations</h2>
+    <ul>
+      <li>The broader <code>state.rs</code> and <code>render.rs</code> file split from PLAN-25 remains deferred. The implemented deeper seam is the interaction behavior, not a mechanical file move.</li>
+      <li>Some TUI summary-view helper code still formats listener ownership locally for non-primary projections. The primary listener table path uses the runtime projection.</li>
+    </ul>
+
+    <h2>Validation</h2>
+    <ul>
+      <li><code>cargo fmt --all</code></li>
+      <li><code>cargo test -p lazyadmin-runtime</code></li>
+      <li><code>cargo test -p lazyadmin-tui</code></li>
+      <li><code>cargo test --workspace</code></li>
+      <li><code>cargo clippy --workspace --all-targets -- -D warnings</code></li>
+      <li><code>timeout 5s cargo run -p lazyadmin-cli -- web --port 0 --no-open</code></li>
+      <li><code>cargo test -p lazyadmin-cli --features integration-portless free_portless_app</code></li>
+    </ul>
+  </body>
+</html>
