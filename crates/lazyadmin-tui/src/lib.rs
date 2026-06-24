@@ -5488,82 +5488,6 @@ fn handle_key(app: &mut App, key: KeyEvent, width: u16) {
 }
 
 fn handle_key_impl(app: &mut App, key: KeyEvent, width: u16) {
-    if handle_confirmation_key(app, key) {
-        return;
-    }
-    if app.active_view == ViewKind::Overview && app.overview_hint_visible {
-        app.overview_hint_visible = false;
-        if let Err(err) = mark_overview_seen() {
-            app.set_status(format!("overview hint flag not saved: {err}"));
-        }
-    }
-    if matches!(app.mode, InputMode::Search) {
-        match key.code {
-            KeyCode::Esc => {
-                app.query.clear();
-                app.mode = InputMode::Normal;
-                let target = app
-                    .return_view_on_clear
-                    .take()
-                    .unwrap_or(app.search_origin_view);
-                if app.active_view == ViewKind::Search {
-                    set_active_view(app, target, width);
-                }
-                app.set_status("search cleared");
-                rebuild_view_model(app, width);
-            }
-            KeyCode::Enter => {
-                app.mode = InputMode::Normal;
-                jump_to_search_result(app, width);
-            }
-            KeyCode::Backspace => {
-                app.query.pop();
-                if app.query.is_empty() && app.active_view == ViewKind::Search {
-                    let target = app.return_view_on_clear.unwrap_or(app.search_origin_view);
-                    set_active_view(app, target, width);
-                }
-                rebuild_view_model(app, width);
-            }
-            KeyCode::Char(c) => {
-                if app.query.is_empty() && app.active_view != ViewKind::Search {
-                    if app.return_view_on_clear.is_none() {
-                        app.return_view_on_clear = Some(app.active_view);
-                        app.search_origin_view = app.active_view;
-                    }
-                    info!(
-                        origin_view = ?app.search_origin_view,
-                        "tui.search.activate"
-                    );
-                    set_active_view(app, ViewKind::Search, width);
-                }
-                app.query.push(c);
-                rebuild_view_model(app, width);
-            }
-            KeyCode::Up => scroll_rows(app, -1),
-            KeyCode::Down => scroll_rows(app, 1),
-            KeyCode::PageUp => scroll_rows(app, -10),
-            KeyCode::PageDown => scroll_rows(app, 10),
-            KeyCode::Tab => {
-                app.mode = InputMode::Normal;
-                cycle_pane(app, 1, width);
-            }
-            KeyCode::BackTab => {
-                app.mode = InputMode::Normal;
-                cycle_pane(app, -1, width);
-            }
-            KeyCode::Home => {
-                app.selected_row = 0;
-                sync_row_selection(app);
-            }
-            KeyCode::End => {
-                let count = app.vm.search.search_hit_count();
-                app.selected_row = count.saturating_sub(1);
-                sync_row_selection(app);
-            }
-            _ => {}
-        }
-        return;
-    }
     if matches!(app.mode, InputMode::Palette) {
         match key.code {
             KeyCode::Esc => {
@@ -5851,39 +5775,6 @@ fn handle_key_impl(app: &mut App, key: KeyEvent, width: u16) {
                         }
                     }
                 }
-            }
-            Command::SortNext => {
-                let (captured_id, old_index) = capture_selected_listener_id(app);
-                app.listener_sort = app.listener_sort.next_column();
-                rebuild_view_model(app, width);
-                restore_selected_listener_id(app, captured_id, old_index);
-                app.set_status(format!(
-                    "sorted by {} {}",
-                    app.listener_sort.label(),
-                    app.listener_sort.indicator()
-                ));
-            }
-            Command::SortPrev => {
-                let (captured_id, old_index) = capture_selected_listener_id(app);
-                app.listener_sort = app.listener_sort.prev_column();
-                rebuild_view_model(app, width);
-                restore_selected_listener_id(app, captured_id, old_index);
-                app.set_status(format!(
-                    "sorted by {} {}",
-                    app.listener_sort.label(),
-                    app.listener_sort.indicator()
-                ));
-            }
-            Command::SortToggle => {
-                let (captured_id, old_index) = capture_selected_listener_id(app);
-                app.listener_sort = app.listener_sort.toggle_direction();
-                rebuild_view_model(app, width);
-                restore_selected_listener_id(app, captured_id, old_index);
-                app.set_status(format!(
-                    "sorted by {} {}",
-                    app.listener_sort.label(),
-                    app.listener_sort.indicator()
-                ));
             }
             _ => CommandDispatcher::execute(&cmd),
         }
