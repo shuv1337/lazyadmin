@@ -17,7 +17,7 @@ use lazyadmin_core::{
     },
     graph::{DiscoveryAdapter, DiscoveryContext},
     logs::{LogLine, LogOptions, LogStream, direct_unavailable},
-    model::{DIFF_SCHEMA_VERSION, EntityRef, Protocol, Snapshot},
+    model::{DIFF_SCHEMA_VERSION, EntityRef, Listener, Process, ProcessKey, Protocol, Snapshot},
     output::listener_rows,
     selector::{Selector, parse_selector},
 };
@@ -48,6 +48,13 @@ struct Cli {
     log_format: LogFormat,
     #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
+    #[arg(
+        short = 'p',
+        long = "port",
+        value_name = "PORT",
+        help = "Inspect what is running on a port and its process tree"
+    )]
+    port: Option<u16>,
     #[command(subcommand)]
     command: Option<Command>,
     #[arg(value_name = "SELECTOR", hide = true)]
@@ -276,6 +283,9 @@ enum AppError {
 async fn run(cli: Cli) -> std::result::Result<(), AppError> {
     let span = info_span!("cli.command", json = cli.json, brief = cli.brief);
     let _guard = span.enter();
+    if let Some(port) = cli.port {
+        return run_port_inspect(port, cli.json, cli.brief, cli.config.as_deref()).await;
+    }
     match cli.command {
         None => {
             if let Some(selector) = cli.selector {
@@ -319,13 +329,7 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
             Ok(())
         }
         Some(Command::Port { port }) => {
-            run_point_query(
-                &format!(":{port}"),
-                cli.json,
-                cli.brief,
-                cli.config.as_deref(),
-            )
-            .await
+            run_port_inspect(port, cli.json, cli.brief, cli.config.as_deref()).await
         }
         Some(Command::Run(args)) => run_run(args, cli.json).await,
         Some(Command::Runs { json }) => run_runs(cli.json || json).await,
@@ -956,6 +960,369 @@ async fn run_point_query(
         }
     }
     Ok(())
+}
+
+/// Inspect a single port: which listener(s) are bound to it, the owning
+/// process(es), and the surrounding process tree (ancestors and descendants).
+async fn run_port_inspect(
+    port: u16,
+    json: bool,
+    brief: bool,
+    config_path: Option<&std::path::Path>,
+) -> std::result::Result<(), AppError> {
+    let snap = build_snapshot(config_path).await?;
+    let listeners: Vec<&Listener> = snap
+        .listeners
+        .iter()
+        .filter(|l| l.port == Some(port))
+        .collect();
+
+    let mut owner_keys: Vec<ProcessKey> = Vec::new();
+    for listener in &listeners {
+        collect_owner_process_keys(listener, &snap, &mut owner_keys);
+    }
+    let owners: Vec<&Process> = owner_keys
+        .iter()
+        .filter_map(|key| snap.processes.iter().find(|p| &p.key == key))
+        .collect();
+
+    if json {
+        print_json(&port_report_json(port, &listeners, &owners, &snap))?;
+        return Ok(());
+    }
+
+    if listeners.is_empty() {
+        println!("no listener found on :{port}");
+        return Ok(());
+    }
+
+    let label = if listeners.len() == 1 {
+        "listener"
+    } else {
+        "listeners"
+    };
+    println!(":{port} — {} {label}", listeners.len());
+    for listener in &listeners {
+        println!(
+            "  {} {}:{}  [{}]  state={} confidence={}",
+            format!("{:?}", listener.protocol).to_lowercase(),
+            listener.bind_addr.as_deref().unwrap_or("*"),
+            listener.port.unwrap_or(port),
+            exposure_word(&listener.exposure),
+            format!("{:?}", listener.state).to_lowercase(),
+            format!("{:?}", listener.confidence).to_lowercase(),
+        );
+    }
+
+    if brief {
+        println!();
+        if owners.is_empty() {
+            println!("owner: unknown");
+        }
+        for owner in &owners {
+            println!("owner: {}", format_process(owner));
+        }
+        return Ok(());
+    }
+
+    println!();
+    if owners.is_empty() {
+        println!("what's running on :{port}: owner could not be resolved");
+        print_unresolved_owner_hint(&listeners);
+    } else {
+        println!("what's running on :{port}");
+        for owner in &owners {
+            print!("  {}", format_process(owner));
+            if let Some(extra) = owner_associations(owner, &snap) {
+                print!("  ({extra})");
+            }
+            println!();
+        }
+    }
+
+    if !owners.is_empty() && !snap.processes.is_empty() {
+        let by_pid = process_by_pid(&snap);
+        let children = children_by_ppid(&snap);
+        for owner in &owners {
+            println!();
+            println!("process tree (owner pid {})", owner.pid);
+            let mut visited = std::collections::HashSet::new();
+            let chain = ancestor_chain(owner, &by_pid);
+            for (depth, ancestor) in chain.iter().enumerate() {
+                visited.insert(ancestor.pid);
+                println!("{}{}", tree_indent(depth), format_process(ancestor));
+            }
+            print_process_subtree(owner, chain.len(), &owner.key, &children, &mut visited);
+        }
+    }
+
+    let warnings: Vec<&lazyadmin_core::model::Warning> = snap
+        .warnings
+        .iter()
+        .filter(|w| warning_relevant_to_port(w, &listeners, &owner_keys))
+        .collect();
+    if !warnings.is_empty() {
+        println!();
+        println!("warnings");
+        for w in warnings {
+            println!("  {}: {}", w.code, w.message);
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve the process keys that own a listener, expanding workload owners to
+/// their member pids.
+fn collect_owner_process_keys(listener: &Listener, snap: &Snapshot, out: &mut Vec<ProcessKey>) {
+    for owner in &listener.owners {
+        match owner {
+            EntityRef::Process(key) => push_unique_key(out, key.clone()),
+            EntityRef::Workload(id) => {
+                if let Some(workload) = snap.workloads.iter().find(|w| &w.id == id) {
+                    for key in &workload.pids {
+                        push_unique_key(out, key.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_unique_key(out: &mut Vec<ProcessKey>, key: ProcessKey) {
+    if !out.contains(&key) {
+        out.push(key);
+    }
+}
+
+fn process_by_pid(snap: &Snapshot) -> std::collections::HashMap<i32, &Process> {
+    let mut map = std::collections::HashMap::new();
+    for p in &snap.processes {
+        map.entry(p.pid).or_insert(p);
+    }
+    map
+}
+
+fn children_by_ppid(snap: &Snapshot) -> std::collections::HashMap<i32, Vec<&Process>> {
+    let mut map: std::collections::HashMap<i32, Vec<&Process>> = std::collections::HashMap::new();
+    for p in &snap.processes {
+        if let Some(ppid) = p.ppid {
+            map.entry(ppid).or_default().push(p);
+        }
+    }
+    for kids in map.values_mut() {
+        kids.sort_by_key(|p| (p.pid, p.start_time_ticks));
+    }
+    map
+}
+
+/// Walk from a process up to its root via ppid, returning ancestors root-first.
+fn ancestor_chain<'a>(
+    owner: &'a Process,
+    by_pid: &std::collections::HashMap<i32, &'a Process>,
+) -> Vec<&'a Process> {
+    let mut chain = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(owner.pid);
+    let mut current = owner;
+    while let Some(ppid) = current.ppid {
+        let Some(parent) = by_pid.get(&ppid) else {
+            break;
+        };
+        if !seen.insert(parent.pid) {
+            break; // cycle guard
+        }
+        chain.push(*parent);
+        current = parent;
+        if chain.len() > 64 {
+            break;
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+fn print_process_subtree(
+    process: &Process,
+    depth: usize,
+    owner_key: &ProcessKey,
+    children: &std::collections::HashMap<i32, Vec<&Process>>,
+    visited: &mut std::collections::HashSet<i32>,
+) {
+    if !visited.insert(process.pid) {
+        return;
+    }
+    let marker = if &process.key == owner_key {
+        "   ◀ owns this port"
+    } else {
+        ""
+    };
+    println!(
+        "{}{}{}",
+        tree_indent(depth),
+        format_process(process),
+        marker
+    );
+    if let Some(kids) = children.get(&process.pid) {
+        for child in kids {
+            print_process_subtree(child, depth + 1, owner_key, children, visited);
+        }
+    }
+}
+
+fn tree_indent(depth: usize) -> String {
+    if depth == 0 {
+        String::from("  ")
+    } else {
+        format!("  {}└─ ", "   ".repeat(depth - 1))
+    }
+}
+
+fn format_process(p: &Process) -> String {
+    let command = if p.cmdline.is_empty() {
+        p.exe
+            .as_ref()
+            .map(|e| e.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into())
+    } else {
+        p.cmdline.join(" ")
+    };
+    let command = truncate_text(&command, 80);
+    let user = p
+        .user
+        .as_deref()
+        .map(|u| format!(" uid={u}"))
+        .unwrap_or_default();
+    let runtime = p
+        .systemd_unit
+        .as_deref()
+        .map(|unit| format!(" [{unit}]"))
+        .or_else(|| {
+            p.container_id
+                .as_deref()
+                .map(|id| format!(" [container {}]", &id[..id.len().min(12)]))
+        })
+        .unwrap_or_default();
+    format!("pid {}{} {}{}", p.pid, user, command, runtime)
+}
+
+/// Workload / project / run associations for an owning process, if any.
+fn owner_associations(process: &Process, snap: &Snapshot) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(workload) = snap
+        .workloads
+        .iter()
+        .find(|w| w.pids.contains(&process.key))
+    {
+        parts.push(format!("workload: {}", workload.display_name));
+        if let Some(project_id) = &workload.project {
+            if let Some(project) = snap.projects.iter().find(|p| &p.id == project_id) {
+                parts.push(format!("project: {}", project.name));
+            }
+        }
+    }
+    if let Some(run_id) = &process.lazyadmin_run_id {
+        parts.push(format!("run: {run_id}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn print_unresolved_owner_hint(listeners: &[&Listener]) {
+    let any_low = listeners
+        .iter()
+        .any(|l| matches!(l.confidence, lazyadmin_core::model::Confidence::Low));
+    if any_low {
+        println!("  (low confidence — try running with elevated privileges for owner attribution)");
+    }
+}
+
+fn warning_relevant_to_port(
+    warning: &lazyadmin_core::model::Warning,
+    listeners: &[&Listener],
+    owner_keys: &[ProcessKey],
+) -> bool {
+    let Some(entity) = warning.entity.as_ref() else {
+        return false;
+    };
+    match entity {
+        EntityRef::Listener(id) => listeners.iter().any(|l| &l.id == id),
+        EntityRef::Process(key) => owner_keys.contains(key),
+        _ => false,
+    }
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
+fn port_report_json(
+    port: u16,
+    listeners: &[&Listener],
+    owners: &[&Process],
+    snap: &Snapshot,
+) -> serde_json::Value {
+    let by_pid = process_by_pid(snap);
+    let children = children_by_ppid(snap);
+    let processes: Vec<serde_json::Value> = owners
+        .iter()
+        .map(|owner| {
+            let ancestors: Vec<i32> = ancestor_chain(owner, &by_pid)
+                .iter()
+                .map(|p| p.pid)
+                .collect();
+            let mut descendants = Vec::new();
+            collect_descendant_pids(
+                owner.pid,
+                &children,
+                &mut descendants,
+                &mut std::collections::HashSet::new(),
+            );
+            serde_json::json!({
+                "process": owner,
+                "ancestor_pids": ancestors,
+                "descendant_pids": descendants,
+                "associations": owner_associations(owner, snap),
+            })
+        })
+        .collect();
+    let owner_keys: Vec<ProcessKey> = owners.iter().map(|p| p.key.clone()).collect();
+    let warnings: Vec<&lazyadmin_core::model::Warning> = snap
+        .warnings
+        .iter()
+        .filter(|w| warning_relevant_to_port(w, listeners, &owner_keys))
+        .collect();
+    serde_json::json!({
+        "port": port,
+        "listeners": listeners,
+        "owners": processes,
+        "warnings": warnings,
+    })
+}
+
+fn collect_descendant_pids(
+    pid: i32,
+    children: &std::collections::HashMap<i32, Vec<&Process>>,
+    out: &mut Vec<i32>,
+    visited: &mut std::collections::HashSet<i32>,
+) {
+    if !visited.insert(pid) {
+        return;
+    }
+    if let Some(kids) = children.get(&pid) {
+        for child in kids {
+            out.push(child.pid);
+            collect_descendant_pids(child.pid, children, out, visited);
+        }
+    }
 }
 
 async fn run_runs(json: bool) -> std::result::Result<(), AppError> {
@@ -2239,6 +2606,128 @@ mod tests {
             last_seen: chrono::Utc::now(),
             dual_stack_state: DualStackState::NotApplicable,
         }
+    }
+
+    fn workload(id: &str, name: &str, pids: Vec<ProcessKey>) -> lazyadmin_core::model::Workload {
+        lazyadmin_core::model::Workload {
+            id: lazyadmin_core::model::WorkloadId::new(id),
+            display_name: name.into(),
+            runtime: lazyadmin_core::model::RuntimeKind::Direct,
+            state: lazyadmin_core::model::WorkloadState::Running,
+            pids,
+            listeners: vec![],
+            project: None,
+            manager: None,
+            source: None,
+            actions: vec![],
+            health: None,
+            metrics: None,
+            restart_policy: None,
+            lazyadmin_run_id: None,
+            provenance: vec![],
+        }
+    }
+
+    #[test]
+    fn collect_owner_process_keys_resolves_process_and_workload_owners() {
+        let mut snap = Snapshot::empty();
+        let proc_key = process_key(42, 1);
+        let workload_pid = process_key(99, 2);
+        snap.processes
+            .push(process(proc_key.clone(), None, vec!["node"]));
+        snap.processes
+            .push(process(workload_pid.clone(), None, vec!["python"]));
+        snap.workloads
+            .push(workload("wl-1", "api", vec![workload_pid.clone()]));
+        let listener = listener(
+            ListenerId::new("tcp:127.0.0.1:8000:1"),
+            8000,
+            vec![
+                EntityRef::Process(proc_key.clone()),
+                EntityRef::Workload(lazyadmin_core::model::WorkloadId::new("wl-1")),
+                EntityRef::Process(proc_key.clone()), // duplicate is deduped
+            ],
+        );
+
+        let mut keys = Vec::new();
+        collect_owner_process_keys(&listener, &snap, &mut keys);
+        assert_eq!(keys, vec![proc_key, workload_pid]);
+    }
+
+    #[test]
+    fn ancestor_chain_walks_root_first_and_breaks_cycles() {
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(process_key(1, 1), None, vec!["init"]));
+        snap.processes
+            .push(process(process_key(10, 1), Some(1), vec!["bash"]));
+        snap.processes
+            .push(process(process_key(20, 1), Some(10), vec!["node"]));
+        let by_pid = process_by_pid(&snap);
+        let owner = snap.processes.iter().find(|p| p.pid == 20).unwrap();
+        let chain: Vec<i32> = ancestor_chain(owner, &by_pid)
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(chain, vec![1, 10]); // root-first, owner excluded
+
+        // a self-referential ppid must not loop forever
+        let mut cyclic = Snapshot::empty();
+        cyclic
+            .processes
+            .push(process(process_key(7, 1), Some(7), vec!["weird"]));
+        let by_pid = process_by_pid(&cyclic);
+        let owner = cyclic.processes.iter().find(|p| p.pid == 7).unwrap();
+        assert!(ancestor_chain(owner, &by_pid).is_empty());
+    }
+
+    #[test]
+    fn port_report_json_includes_listener_owner_and_tree() {
+        let mut snap = Snapshot::empty();
+        snap.processes
+            .push(process(process_key(1, 1), None, vec!["init"]));
+        snap.processes
+            .push(process(process_key(10, 1), Some(1), vec!["bash"]));
+        let owner_key = process_key(20, 1);
+        snap.processes.push(process(
+            owner_key.clone(),
+            Some(10),
+            vec!["node", "server.js"],
+        ));
+        snap.processes.push(process(
+            process_key(30, 1),
+            Some(20),
+            vec!["node", "worker.js"],
+        ));
+        snap.listeners.push(listener(
+            ListenerId::new("tcp:127.0.0.1:8000:1"),
+            8000,
+            vec![EntityRef::Process(owner_key.clone())],
+        ));
+
+        let listeners: Vec<&Listener> = snap.listeners.iter().collect();
+        let owners: Vec<&Process> = vec![snap.processes.iter().find(|p| p.pid == 20).unwrap()];
+        let report = port_report_json(8000, &listeners, &owners, &snap);
+        assert_eq!(report["port"], 8000);
+        assert_eq!(report["listeners"].as_array().unwrap().len(), 1);
+        let owner = &report["owners"][0];
+        assert_eq!(owner["process"]["pid"], 20);
+        assert_eq!(owner["ancestor_pids"], serde_json::json!([1, 10]));
+        assert_eq!(owner["descendant_pids"], serde_json::json!([30]));
+    }
+
+    #[test]
+    fn format_process_labels_uid_and_truncates_long_commands() {
+        let mut p = process(process_key(5, 1), Some(1), vec!["short"]);
+        p.user = Some("1000".into());
+        assert_eq!(format_process(&p), "pid 5 uid=1000 short");
+
+        let long = "x".repeat(200);
+        let mut q = process(process_key(6, 1), None, vec![long.as_str()]);
+        q.user = None;
+        let rendered = format_process(&q);
+        assert!(rendered.ends_with('…'));
+        assert!(rendered.chars().count() < 100);
     }
 
     #[test]
