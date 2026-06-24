@@ -284,6 +284,11 @@ async fn run(cli: Cli) -> std::result::Result<(), AppError> {
     let span = info_span!("cli.command", json = cli.json, brief = cli.brief);
     let _guard = span.enter();
     if let Some(port) = cli.port {
+        if cli.command.is_some() {
+            return Err(AppError::Other(eyre!(
+                "--port cannot be combined with a subcommand; use lazyadmin --port {port} or lazyadmin port {port}"
+            )));
+        }
         return run_port_inspect(port, cli.json, cli.brief, cli.config.as_deref()).await;
     }
     match cli.command {
@@ -981,13 +986,20 @@ async fn run_port_inspect(
     for listener in &listeners {
         collect_owner_process_keys(listener, &snap, &mut owner_keys);
     }
+    let owner_refs = port_owner_refs(&listeners);
     let owners: Vec<&Process> = owner_keys
         .iter()
         .filter_map(|key| snap.processes.iter().find(|p| &p.key == key))
         .collect();
 
     if json {
-        print_json(&port_report_json(port, &listeners, &owners, &snap))?;
+        print_json(&port_report_json(
+            port,
+            &listeners,
+            &owner_refs,
+            &owners,
+            &snap,
+        ))?;
         return Ok(());
     }
 
@@ -1059,7 +1071,7 @@ async fn run_port_inspect(
     let warnings: Vec<&lazyadmin_core::model::Warning> = snap
         .warnings
         .iter()
-        .filter(|w| warning_relevant_to_port(w, &listeners, &owner_keys))
+        .filter(|w| warning_relevant_to_port(w, &listeners, &owner_refs))
         .collect();
     if !warnings.is_empty() {
         println!();
@@ -1094,6 +1106,18 @@ fn push_unique_key(out: &mut Vec<ProcessKey>, key: ProcessKey) {
     if !out.contains(&key) {
         out.push(key);
     }
+}
+
+fn port_owner_refs(listeners: &[&Listener]) -> Vec<EntityRef> {
+    let mut refs = Vec::new();
+    for listener in listeners {
+        for owner in &listener.owners {
+            if !refs.contains(owner) {
+                refs.push(owner.clone());
+            }
+        }
+    }
+    refs
 }
 
 fn process_by_pid(snap: &Snapshot) -> std::collections::HashMap<i32, &Process> {
@@ -1244,15 +1268,14 @@ fn print_unresolved_owner_hint(listeners: &[&Listener]) {
 fn warning_relevant_to_port(
     warning: &lazyadmin_core::model::Warning,
     listeners: &[&Listener],
-    owner_keys: &[ProcessKey],
+    owner_refs: &[EntityRef],
 ) -> bool {
     let Some(entity) = warning.entity.as_ref() else {
         return false;
     };
     match entity {
         EntityRef::Listener(id) => listeners.iter().any(|l| &l.id == id),
-        EntityRef::Process(key) => owner_keys.contains(key),
-        _ => false,
+        _ => owner_refs.contains(entity),
     }
 }
 
@@ -1267,6 +1290,7 @@ fn truncate_text(text: &str, max: usize) -> String {
 fn port_report_json(
     port: u16,
     listeners: &[&Listener],
+    owner_refs: &[EntityRef],
     owners: &[&Process],
     snap: &Snapshot,
 ) -> serde_json::Value {
@@ -1294,11 +1318,10 @@ fn port_report_json(
             })
         })
         .collect();
-    let owner_keys: Vec<ProcessKey> = owners.iter().map(|p| p.key.clone()).collect();
     let warnings: Vec<&lazyadmin_core::model::Warning> = snap
         .warnings
         .iter()
-        .filter(|w| warning_relevant_to_port(w, listeners, &owner_keys))
+        .filter(|w| warning_relevant_to_port(w, listeners, owner_refs))
         .collect();
     serde_json::json!({
         "port": port,
@@ -2478,7 +2501,7 @@ mod tests {
     use super::*;
     use lazyadmin_core::model::{
         AddressFamily, Confidence, DualStackState, Exposure, Listener, ListenerId, ListenerState,
-        Process, ProcessKey, RedactedEnvironmentSummary,
+        Process, ProcessKey, RedactedEnvironmentSummary, Warning, WarningSeverity,
     };
 
     #[tokio::test]
@@ -2628,6 +2651,16 @@ mod tests {
         }
     }
 
+    fn warning(code: &str, entity: Option<EntityRef>) -> Warning {
+        Warning {
+            severity: WarningSeverity::Warning,
+            code: code.into(),
+            message: format!("{code} message"),
+            entity,
+            provenance: vec![],
+        }
+    }
+
     #[test]
     fn collect_owner_process_keys_resolves_process_and_workload_owners() {
         let mut snap = Snapshot::empty();
@@ -2706,14 +2739,55 @@ mod tests {
         ));
 
         let listeners: Vec<&Listener> = snap.listeners.iter().collect();
+        let owner_refs = port_owner_refs(&listeners);
         let owners: Vec<&Process> = vec![snap.processes.iter().find(|p| p.pid == 20).unwrap()];
-        let report = port_report_json(8000, &listeners, &owners, &snap);
+        let report = port_report_json(8000, &listeners, &owner_refs, &owners, &snap);
         assert_eq!(report["port"], 8000);
         assert_eq!(report["listeners"].as_array().unwrap().len(), 1);
         let owner = &report["owners"][0];
         assert_eq!(owner["process"]["pid"], 20);
         assert_eq!(owner["ancestor_pids"], serde_json::json!([1, 10]));
         assert_eq!(owner["descendant_pids"], serde_json::json!([30]));
+    }
+
+    #[test]
+    fn port_report_includes_workload_and_unresolved_process_warnings() {
+        let mut snap = Snapshot::empty();
+        let workload_id = lazyadmin_core::model::WorkloadId::new("wl-1");
+        let resolved_key = process_key(20, 1);
+        let unresolved_key = process_key(30, 1);
+        snap.processes
+            .push(process(resolved_key.clone(), None, vec!["node"]));
+        snap.workloads
+            .push(workload("wl-1", "api", vec![resolved_key.clone()]));
+        snap.listeners.push(listener(
+            ListenerId::new("tcp:127.0.0.1:8000:1"),
+            8000,
+            vec![
+                EntityRef::Workload(workload_id.clone()),
+                EntityRef::Process(unresolved_key.clone()),
+            ],
+        ));
+        snap.warnings.push(warning(
+            "workload.warning",
+            Some(EntityRef::Workload(workload_id)),
+        ));
+        snap.warnings.push(warning(
+            "process.unresolved",
+            Some(EntityRef::Process(unresolved_key)),
+        ));
+
+        let listeners: Vec<&Listener> = snap.listeners.iter().collect();
+        let owner_refs = port_owner_refs(&listeners);
+        let owners: Vec<&Process> = vec![snap.processes.iter().find(|p| p.pid == 20).unwrap()];
+        let report = port_report_json(8000, &listeners, &owner_refs, &owners, &snap);
+        let codes: Vec<&str> = report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|warning| warning["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, vec!["workload.warning", "process.unresolved"]);
     }
 
     #[test]

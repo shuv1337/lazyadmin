@@ -218,6 +218,16 @@ fn unknown_subcommand_exits_nonzero() {
 }
 
 #[test]
+fn port_flag_rejects_subcommand() {
+    let (ok, _stdout, stderr) = run(&["--port", "0", "export", "--json"]);
+    assert!(!ok, "--port must not silently override a subcommand");
+    assert!(
+        stderr.contains("--port cannot be combined with a subcommand"),
+        "expected --port conflict error in stderr: {stderr}"
+    );
+}
+
+#[test]
 fn invalid_diff_path_exits_nonzero() {
     let (ok, _stdout, stderr) = run(&["diff", "/no/such/file.a", "/no/such/file.b"]);
     assert!(!ok);
