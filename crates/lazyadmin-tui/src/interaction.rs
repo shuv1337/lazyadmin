@@ -68,54 +68,32 @@ impl<'a> InteractionCore<'a> {
                 rebuild_view_model(self.app, self.width);
             }
             KeyCode::Enter => {
-                if self.app.active_view == ViewKind::Search
-                    && self.app.vm.search.search_hit_count() > 0
-                    && !self.app.query.trim().is_empty()
-                {
-                    self.app.mode = InputMode::Normal;
-                    crate::jump_to_search_result(self.app, self.width);
-                } else if !self.app.query.trim().is_empty() {
-                    let target = self
-                        .app
-                        .return_view_on_clear
-                        .take()
-                        .unwrap_or(self.app.search_origin_view);
-                    set_active_view(self.app, target, self.width);
-                    self.app.mode = InputMode::Normal;
-                } else {
-                    self.app.mode = InputMode::Normal;
-                }
+                self.app.mode = InputMode::Normal;
+                crate::jump_to_search_result(self.app, self.width);
             }
             KeyCode::Backspace => {
                 self.app.query.pop();
-                if self.app.query.is_empty() {
-                    if self.app.active_view == ViewKind::Search {
-                        let target = self
-                            .app
-                            .return_view_on_clear
-                            .unwrap_or(self.app.search_origin_view);
-                        set_active_view(self.app, target, self.width);
-                    } else {
-                        rebuild_view_model(self.app, self.width);
-                    }
-                } else {
-                    if self.app.active_view != ViewKind::Search {
-                        self.app.return_view_on_clear = Some(self.app.active_view);
-                        self.app.search_origin_view = self.app.active_view;
-                    }
-                    set_active_view(self.app, ViewKind::Search, self.width);
+                if self.app.query.is_empty() && self.app.active_view == ViewKind::Search {
+                    let target = self
+                        .app
+                        .return_view_on_clear
+                        .unwrap_or(self.app.search_origin_view);
+                    set_active_view(self.app, target, self.width);
                 }
+                rebuild_view_model(self.app, self.width);
             }
             KeyCode::Char(c) => {
                 if self.app.query.is_empty() && self.app.active_view != ViewKind::Search {
-                    self.app.return_view_on_clear = Some(self.app.active_view);
-                    self.app.search_origin_view = self.app.active_view;
+                    if self.app.return_view_on_clear.is_none() {
+                        self.app.return_view_on_clear = Some(self.app.active_view);
+                        self.app.search_origin_view = self.app.active_view;
+                    }
+                    info!(
+                        origin_view = ?self.app.search_origin_view,
+                        "tui.search.activate"
+                    );
+                    set_active_view(self.app, ViewKind::Search, self.width);
                 }
-                info!(
-                    origin_view = ?self.app.search_origin_view,
-                    "tui.search.activate"
-                );
-                set_active_view(self.app, ViewKind::Search, self.width);
                 self.app.query.push(c);
                 rebuild_view_model(self.app, self.width);
             }
